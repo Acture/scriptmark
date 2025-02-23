@@ -1,0 +1,9 @@
+[package]
+name = "Grader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.218", features = ["derive"] }
+typed-builder = "0.20.0"
+toml = "0.8.20"
