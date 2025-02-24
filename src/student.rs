@@ -1,7 +1,8 @@
 use csv::{ReaderBuilder, StringRecord};
-use log::{info, log};
+use log::info;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt::Display;
 use std::fs;
 use std::path::Path;
 use typed_builder::TypedBuilder;
