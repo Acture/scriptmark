@@ -7,22 +7,14 @@ use std::path::Path;
 use typed_builder::TypedBuilder;
 
 #[derive(Debug, TypedBuilder, Serialize, Deserialize)]
-struct Student {
+pub struct Student {
 	pub name: String,
 	pub id: String,
 	pub sis_login_id: String,
 }
 
 impl Student {
-	fn new(name: String, id: String, sis_login_id: String) -> Self {
-		Self {
-			name,
-			id,
-			sis_login_id,
-		}
-	}
-
-	fn load_from_roster<P: AsRef<Path>>(path: P) -> Vec<Student> {
+	pub fn load_from_roster<P: AsRef<Path>>(path: P) -> Vec<Student> {
 		let path = path.as_ref();
 		let file = fs::File::open(path).expect("无法打开文件");
 		let mut rdr = ReaderBuilder::new()

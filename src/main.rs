@@ -4,6 +4,7 @@ mod class;
 mod utils;
 mod config;
 mod student;
+mod assignment;
 
 fn main() {
 	ensure_config_exists();
