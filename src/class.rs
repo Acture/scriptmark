@@ -1,6 +1,6 @@
-use std::collections::HashMap;
 use crate::assignment::Assignment;
 use crate::student::Student;
+use std::collections::HashMap;
 use std::path;
 use std::path::{Path, PathBuf};
 use typed_builder::TypedBuilder;
@@ -15,18 +15,15 @@ pub struct Class {
 	pub assignments: Vec<Assignment>,
 }
 
-
 impl Class {
 	pub fn prepare_class<P: AsRef<Path>>(path: P) -> Vec<Class> {
 		let mut classes = Class::load_class(path);
 		classes.iter_mut().for_each(|class| {
 			class.load_students();
 			class.load_assignments();
-			class.assignments.iter().for_each(
-				|assignment| {
-					let _group = assignment.group_by_student(&class.students);
-				}
-			)
+			class.assignments.iter().for_each(|assignment| {
+				let _group = assignment.group_by_student(&class.students);
+			})
 		});
 		classes
 	}
@@ -39,7 +36,12 @@ impl Class {
 			let path = entry.path();
 			if path.is_dir() {
 				let class = Class::builder()
-					.name(path.file_stem().expect("file_stem failed").to_string_lossy().to_string())
+					.name(
+                        path.file_stem()
+							.expect("file_stem failed")
+							.to_string_lossy()
+							.to_string(),
+					)
 					.path(path)
 					.build();
 				classes.push(class);
@@ -58,7 +60,12 @@ impl Class {
 			let path = entry.path();
 			if path.is_dir() {
 				let assignment = Assignment::builder()
-					.name(path.file_stem().expect("file_stem failed").to_string_lossy().to_string())
+					.name(
+                        path.file_stem()
+							.expect("file_stem failed")
+							.to_string_lossy()
+							.to_string(),
+					)
 					.path(path)
 					.build();
 				self.assignments.push(assignment);
@@ -70,16 +77,29 @@ impl Class {
 		self.students = Student::load_from_roster(self.roster_path())
 	}
 
-	pub fn get_student_assignments(&self, assignment_name: String) -> HashMap<Student, Vec<PathBuf>> {
-		let assignment = self.assignments.iter().find(|a| a.name == assignment_name).expect("未找到作业");
-		assignment.group_by_student(&self.students).iter().map(
-			|(id, file_paths)| {
-				match self.students.iter().find(|student: &&Student| {student.sis_login_id == *id}) {
+	pub fn get_student_assignments(
+		&self,
+		assignment_name: String,
+	) -> HashMap<Student, Vec<PathBuf>> {
+		let assignment = self
+			.assignments
+			.iter()
+			.find(|a| a.name == assignment_name)
+			.expect("未找到作业");
+		assignment
+			.group_by_student(&self.students)
+			.iter()
+			.map(|(id, file_paths)| {
+				match self
+					.students
+					.iter()
+					.find(|student: &&Student| student.sis_login_id == *id)
+				{
 					Some(student) => (student.clone(), file_paths.clone()),
-					None => panic!("未找到学生")
+					None => panic!("未找到学生"),
 				}
-			}
-		).collect()
+			})
+			.collect()
 	}
 }
 
@@ -87,7 +107,6 @@ impl Class {
 mod tests {
 	use super::*;
 	use crate::config::Config;
-
 
 	#[test]
 	fn test_load_class() {
@@ -114,6 +133,5 @@ mod tests {
 		let test_class = &mut classes[0];
 		let student_assignments = test_class.get_student_assignments("lab1".to_string());
 		println!("{:?}", student_assignments);
-
 	}
 }

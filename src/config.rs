@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use toml;
 use typed_builder::TypedBuilder;
 
-
 #[derive(Debug, Serialize, Deserialize, TypedBuilder)]
 pub struct Config {
 	#[builder(default = PathBuf::from("./data"))]
@@ -40,7 +39,6 @@ pub fn prepare_config() -> Config {
 		}
 	}
 }
-
 
 #[cfg(test)]
 mod tests {

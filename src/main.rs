@@ -1,6 +1,7 @@
-use crate::grade::lab1;
+use crate::grade::circle_area;
 use crate::student::Student;
 use env_logger;
+use grade::circle_area;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::env;
@@ -20,157 +21,6 @@ fn init_logger() {
 		.init();
 }
 
-fn judge_func(s: &str, t: &str) -> Result<(bool, Vec<lab1::Message>), (bool, Vec<lab1::Message>)> {
-	let s_lines: Vec<_> = s.split("\n").filter(|line| !line.trim().is_empty()).collect();
-	let t_lines: Vec<_> = t.split("\n").filter(|line| !line.trim().is_empty()).collect();
-	let required_s: f64 = s_lines
-		.get(0)
-		.ok_or_else(|| {
-			(
-				false,
-				vec![lab1::Message::builder()
-					.title("Standard Line 0 Error".to_string())
-					.build()],
-			)
-		})?
-		.split(':')
-		.last()
-		.and_then(|s| s.trim().parse::<f64>().ok())
-		.ok_or_else(|| {
-			(
-				false,
-				vec![lab1::Message::builder()
-					.title("Standard Parse Error".to_string())
-					.description(format!(
-						"The standard value is {}",
-						s
-					))
-					.build()],
-			)
-		})?;
-	let required_t: f64 = t_lines
-		.get(0)
-		.ok_or_else(|| {
-			(
-				false,
-				vec![lab1::Message::builder()
-					.title("Tested Line 0 Error".to_string())
-					.build()],
-			)
-		})?
-		.split(':')
-		.last()
-		.and_then(|s| s.trim().parse::<f64>().ok())
-		.ok_or_else(|| {
-			(
-				false,
-				vec![lab1::Message::builder()
-					.title("Tested Parse Error".to_string())
-					.description(format!(
-						"The tested value is {}. Expected {}",
-						t, required_s
-					))
-					.build()],
-			)
-		})?;
-
-	let passed;
-	let mut messages = Vec::new();
-
-	if required_s != required_t {
-		let diff = ((required_s - required_t) / required_s).abs() * 100.0;
-		if diff < 1.0 {
-			let mut message = lab1::Message::builder()
-				.title("Small Value Difference".to_string())
-				.build();
-			message
-				.description
-				.push_str(format!("The difference is {} %", diff).as_str());
-			passed = true;
-			messages.push(message);
-		} else {
-			passed = false;
-			let mut message = lab1::Message::builder()
-				.title("Value Difference".to_string())
-				.build();
-			message
-				.description
-				.push_str(format!("The difference is {} %", diff).as_str());
-			messages.push(message);
-		}
-	} else {
-		passed = true;
-	}
-
-	let additional_s = s_lines.get(1..).unwrap_or(&[]);
-	let additional_t = t_lines.get(1..).unwrap_or(&[]);
-
-	let mut additional_s = additional_s.iter();
-	let mut additional_t = additional_t.iter();
-
-	if additional_t.len() > 0 {
-		messages.push(
-            lab1::Message::builder()
-				.title("完成选做".to_string())
-				.build(),
-		);
-		loop {
-			let s = additional_s.next();
-			let t = additional_t.next();
-			match (s, t) {
-				(Some(s), Some(t)) => {
-					if s != t {
-						messages.push(
-                            lab1::Message::builder()
-								.title("Additional Output Difference".to_string())
-								.description(format!("Desired <{}>, Given <{}>", s, t))
-								.build(),
-						);
-					}
-				}
-				(Some(s), None) => {
-					messages.push(
-                        lab1::Message::builder()
-							.title("Additional Output Difference".to_string())
-							.description(format!("Desired <{}>, Given <{}>", s, ""))
-							.build(),
-					);
-				}
-				(None, Some(t)) => {
-					messages.push(
-                        lab1::Message::builder()
-							.title("Additional Output Difference".to_string())
-							.description(format!("Desired <{}>, Given <{}>", "", t))
-							.build(),
-					);
-				}
-				(None, None) => break,
-			}
-		}
-	} else {
-		messages.push(
-            lab1::Message::builder()
-				.title("未完成选做".to_string())
-				.build(),
-		);
-	}
-
-	Ok((passed, messages))
-}
-
-fn calculate_hash(s: &str) -> u64 {
-	use std::collections::hash_map::DefaultHasher;
-	use std::hash::{Hash, Hasher};
-	let mut hasher = DefaultHasher::new();
-	s.hash(&mut hasher);
-	hasher.finish()
-}
-
-fn calculate_hash_from_file(file_path: &std::path::Path) -> Result<u64, Box<dyn Error>> {
-	let content = std::fs::read_to_string(file_path)?;
-	Ok(calculate_hash(&content))
-}
-
 fn main() {
 	init_logger();
 
@@ -182,8 +32,8 @@ fn main() {
 	let student_assignments = test_class.get_student_assignments("lab1".to_string());
 
 	let lab1_path = config.data_dir.join("lab1.py");
-	let test_inputs = grade::lab1::generate_twentys(42);
-	let standard = grade::lab1::run_lab_one(lab1_path, &test_inputs);
+	let test_inputs = run::generate_twentys(42);
+	let standard = grade::circle_area::run_lab_one(lab1_path, &test_inputs);
 
 	let mut keys: Vec<_> = student_assignments.keys().collect();
 	keys.sort_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id));
@@ -200,7 +50,8 @@ fn main() {
 			warn!("学生 {} 提交了多个文件，只使用第一个文件", student.name);
 		}
 		let file_path = &file_paths[0];
-		let hash = calculate_hash_from_file(file_path).expect("calculate_hash_from_file failed");
+		let hash =
+			run::calculate_hash_from_file(file_path).expect("calculate_hash_from_file failed");
 		match hash_record.entry(hash) {
 			std::collections::hash_map::Entry::Occupied(mut entry) => {
 				let students = entry.get_mut();
@@ -214,9 +65,9 @@ fn main() {
 				entry.insert(vec![(*student).clone()]);
 			}
 		}
-		let to_be_judged = lab1::run_lab_one(file_path, &test_inputs);
+		let to_be_judged = circle_area::run_lab_one(file_path, &test_inputs);
 
-		let res = grade::lab1::judge(&standard, &to_be_judged, Some(judge_func));
+		let res = run::judge(&standard, &to_be_judged, Some(circle_area::judge_func));
 		info!(
 			"学生 {} {} 的成绩 {} / {}:",
 			student.name,

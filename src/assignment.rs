@@ -1,7 +1,7 @@
+use crate::student::Student;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use typed_builder::TypedBuilder;
-use crate::student::Student;
 
 #[derive(Debug, TypedBuilder)]
 pub struct Assignment {
@@ -10,10 +10,7 @@ pub struct Assignment {
 }
 
 impl Assignment {
-	pub fn group_by_student<'a>(
-		&self,
-		students: &'a [Student],
-	) -> HashMap<String, Vec<PathBuf>> {
+	pub fn group_by_student<'a>(&self, students: &'a [Student]) -> HashMap<String, Vec<PathBuf>> {
 		let mut rec: HashMap<String, Vec<PathBuf>> = students
 			.iter()
 			.map(|student| (student.sis_login_id.to_string(), vec![]))
