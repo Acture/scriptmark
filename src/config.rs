@@ -1,9 +1,9 @@
 use log::{info, warn};
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::fs;
 use toml;
 use typed_builder::TypedBuilder;
 
@@ -49,6 +49,6 @@ mod tests {
 	#[test]
 	fn test_config() {
 		let config = Config::builder().build();
-		assert_eq!(config.data_dir, path::Path::new("./data"));
+		assert_eq!(config.data_dir, Path::new("./data"));
 	}
 }
