@@ -199,14 +199,20 @@ fn main() {
 					);
 			})
 		});
-	let record_options = results
+	let mut results_keys = results.keys().collect::<Vec<_>>();
+	results_keys.sort_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id));
+	let mut record_options = results_keys
 		.iter()
-		.map(
-            |(student, submission_record)| match submission_record.is_submitted {
+		.map(|student| -> std::string::String {
+			let submission_record = results.get(student).unwrap();
+			match submission_record.is_submitted {
 				Some(false) => {
-					return format!("{} - {}: 未提交", student.name, student.sis_login_id);
+					format!("{} - {}: 未提交", student.name, student.sis_login_id)
 				}
-				_ => match (submission_record.errors.as_ref(), submission_record.messages.as_ref()) {
+				_ => match (
+					submission_record.errors.as_ref(),
+					submission_record.messages.as_ref(),
+				) {
 					(Some(errors), Some(messages)) => {
 						format!(
 							"{} - {} : {} / {} has {} errors and {} messages",
@@ -272,9 +278,10 @@ fn main() {
 						)
 					}
 				},
-			},
-		)
+			}
+		})
 		.collect::<Vec<_>>();
+	record_options.push("退出".to_string());
 	loop {
 		let selected_record_index = FuzzySelect::new()
 			.with_prompt("Please Select a Record:")
@@ -282,75 +289,81 @@ fn main() {
 			.interact()
 			.expect("Select failed");
 
-		let selected_record = &results.values().collect::<Vec<_>>()[selected_record_index];
-		let mut options = Vec::new();
-		if Some(false) == selected_record.is_submitted {
-			println!("\t未提交");
-		} else {
-			if let Some(errors) = &selected_record.errors {
-				options.push("查看错误");
-			}
-			if let Some(messages) = &selected_record.messages {
-				options.push("查看消息");
-			}
-		}
-		options.extend(vec!["返回", "退出"]);
-		loop {
-			let selected = Select::new()
-				.items(&options)
-				.interact()
-				.expect("Select failed");
-			match options[selected] {
-				"查看错误" => {
-					let errors = selected_record.errors.as_ref().unwrap();
-					let mut error_options =
-						errors.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-					error_options.extend(vec!["返回", "退出"]);
-					loop {
-						let selected_error_index = Select::new()
-							.items(&error_options)
-							.interact()
-							.expect("Select failed");
-						match error_options[selected_error_index] {
-							"返回" => break,
-							"退出" => return,
-							error_name => {
-								if let Some(error_details) = errors.get(error_name) {
-									error_details.iter().for_each(|msg| {
-										println!("{:?}", msg);
-									});
+		match record_options[selected_record_index].as_str() {
+			"退出" => return,
+			_ => {
+				let selected_record = results.get(results_keys[selected_record_index]).unwrap();
+				let mut options = Vec::new();
+				if Some(false) == selected_record.is_submitted {
+					println!("\t未提交");
+				} else {
+					if let Some(errors) = &selected_record.errors {
+						options.push("查看错误");
+					}
+					if let Some(messages) = &selected_record.messages {
+						options.push("查看消息");
+					}
+				}
+				options.extend(vec!["返回", "退出"]);
+				loop {
+					let selected = Select::new()
+						.items(&options)
+						.interact()
+						.expect("Select failed");
+					match options[selected] {
+						"查看错误" => {
+							let errors = selected_record.errors.as_ref().unwrap();
+							let mut error_options =
+								errors.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
+							error_options.extend(vec!["返回", "退出"]);
+							loop {
+								let selected_error_index = Select::new()
+									.items(&error_options)
+									.interact()
+									.expect("Select failed");
+								match error_options[selected_error_index] {
+									"返回" => break,
+									"退出" => return,
+									error_name => {
+										if let Some(error_details) = errors.get(error_name) {
+											error_details.iter().for_each(|msg| {
+												println!("{:?}", msg);
+											});
+										}
+									}
 								}
 							}
 						}
-					}
-				}
-				"查看消息" => {
-					let messages = selected_record.messages.as_ref().unwrap();
-					let mut message_options =
-						messages.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-					message_options.extend(vec!["返回", "退出"]);
-					loop {
-						let selected_message_index = Select::new()
-							.items(&message_options)
-							.interact()
-							.expect("Select failed");
-						match message_options[selected_message_index] {
-							"返回" => break,
-							"退出" => return,
-							message_name => {
-								if let Some(messages) = messages.get(message_name).unwrap() {
-									println!("\t{} x {}:", message_name, messages.len());
-									messages.iter().for_each(|msg| {
-										println!("\t\t{}", msg);
-									});
-								};
+						"查看消息" => {
+							let messages = selected_record.messages.as_ref().unwrap();
+							let mut message_options =
+								messages.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
+							message_options.extend(vec!["返回", "退出"]);
+							loop {
+								let selected_message_index = Select::new()
+									.items(&message_options)
+									.interact()
+									.expect("Select failed");
+								match message_options[selected_message_index] {
+									"返回" => break,
+									"退出" => return,
+									message_name => {
+										if let Some(messages) = messages.get(message_name).unwrap()
+										{
+											println!("\t{} x {}:", message_name, messages.len());
+											messages.iter().for_each(|msg| {
+												println!("\t\t{}", msg);
+											});
+										};
+									}
+								}
 							}
 						}
+						"返回" => break,
+						"退出" => return,
+						_ => panic!("未知选项"),
 					}
 				}
-				"返回" => break,
-				"退出" => return,
-				_ => panic!("未知选项"),
 			}
 		}
 	}
