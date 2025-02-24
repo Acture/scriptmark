@@ -11,6 +11,9 @@ pub struct SubmissionRecord {
 	#[builder(default = None)]
 	pub assignment: Option<String>,
 	#[builder(default = None)]
+    pub is_submitted: Option<bool>,
+
+	#[builder(default = None)]
 	pub correct_count: Option<usize>,
 	#[builder(default = None)]
 	pub total_count: Option<usize>,
