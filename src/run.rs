@@ -1,7 +1,11 @@
 use pyo3::prelude::{PyAnyMethods, PyDictMethods};
 use pyo3::types::PyDict;
 use pyo3::Python;
+use rand::prelude::StdRng;
+use rand::{Rng, SeedableRng};
+use std::error::Error;
 use std::ffi::CString;
+use typed_builder::TypedBuilder;
 
 pub fn run_python_code<S: AsRef<str> + std::fmt::Debug>(
 	code: S,
@@ -10,7 +14,6 @@ pub fn run_python_code<S: AsRef<str> + std::fmt::Debug>(
 ) -> String {
 	let c_code = CString::new(code.as_ref()).expect("Transform <Code> into CString Failed");
 	Python::with_gil(|py| {
-
 		let globals = PyDict::new(py);
 		globals
 			.set_item("__name__", "__main__")
@@ -70,4 +73,64 @@ print(t)"#;
 		let res = run_python_code(code, Some("test"), Some(&["math"]));
 		assert_eq!(res, "test\n");
 	}
+}
+
+pub fn generate_twentys(seed: u64) -> Vec<f64> {
+	let mut rng = StdRng::seed_from_u64(seed); // ✅ 生成固定随机序列
+
+	(0..20).map(|_| rng.random_range(1.0..=100.0)).collect()
+}
+
+#[derive(Debug, TypedBuilder, Eq, PartialEq, Hash)]
+pub struct Message {
+	#[builder(default=String::new())]
+	pub title: String,
+	#[builder(default=String::new())]
+	pub description: String,
+}
+
+pub fn judge(
+	standard: &[String],
+	to_be_judged: &[String],
+	judge_function: Option<fn(&str, &str) -> Result<(bool, Vec<Message>), (bool, Vec<Message>)>>,
+) -> Vec<(bool, Vec<Message>)> {
+	standard
+		.iter()
+		.zip(to_be_judged.iter())
+		.map(|(s, t)| {
+			if let Some(judge_function) = judge_function {
+				match judge_function(s, t) {
+					Ok((is_correct, msg)) => (is_correct, msg),
+					Err((is_correct, msg)) => (is_correct, msg),
+				}
+			} else {
+				match s == t {
+					true => (true, vec![]),
+					false => (
+						false,
+						vec![Message::builder()
+							.title("Value Diff".to_string())
+							.description(format!(
+								"The standard answer is {}, but the student's answer is {}",
+								s, t
+							))
+							.build()],
+					),
+				}
+			}
+		})
+		.collect()
+}
+
+fn calculate_hash(s: &str) -> u64 {
+	use std::collections::hash_map::DefaultHasher;
+	use std::hash::{Hash, Hasher};
+	let mut hasher = DefaultHasher::new();
+	s.hash(&mut hasher);
+	hasher.finish()
+}
+
+pub fn calculate_hash_from_file(file_path: &std::path::Path) -> Result<u64, Box<dyn Error>> {
+	let content = std::fs::read_to_string(file_path)?;
+	Ok(calculate_hash(&content))
 }
