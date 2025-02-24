@@ -89,10 +89,10 @@ mod tests {
 	#[test]
 	fn test_load_assignments() {
 		let config = Config::builder().build();
-		let classes = Class::load_class(&config.data_dir);
-		let test_class = &classes[0];
+		let mut classes = Class::load_class(&config.data_dir);
+		let test_class = &mut classes[0];
 		test_class.load_assignments();
-		let assignments = test_class.assignments;
+		let assignments = &test_class.assignments;
 		println!("{:?}", assignments);
 	}
 }
