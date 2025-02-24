@@ -67,9 +67,10 @@ mod tests {
 	#[test]
 	fn test_group_by_student() {
 		let config = Config::builder().build();
-		let test_class = &Class::load_class(&config.data_dir)[0];
+		let mut test_class = &Class::load_class(&config.data_dir)[0];
 		let students = Student::load_from_roster(test_class.roster_path());
-		let test_assignment = &test_class.load_assignments()[0];
+		test_class.load_assignments();
+		let test_assignment = test_class.assignments[0];
 		let paths = test_assignment.group_by_student(students.iter().map(|s| &s.sis_login_id).collect());
 		println!("{:?}", paths);
 	}

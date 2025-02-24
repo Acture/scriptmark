@@ -1,8 +1,7 @@
 use crate::assignment::Assignment;
 use crate::student::Student;
-use std::fmt::Display;
-use std::path::Path;
 use std::path;
+use std::path::Path;
 use typed_builder::TypedBuilder;
 
 #[derive(Debug, TypedBuilder)]
