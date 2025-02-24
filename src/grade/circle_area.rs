@@ -22,12 +22,12 @@ pub fn run_lab_one<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> 
 mod tests {
 	use super::*;
 	use crate::config::Config;
-	use crate::run::{generate_twentys, judge};
+	use crate::run::{generate, judge};
 
 	#[test]
 	fn test_generate() {
 		let seed = 42;
-		assert_eq!(generate_twentys(seed), generate_twentys(seed));
+		assert_eq!(generate(seed), generate(seed));
 	}
 
 	#[test]
@@ -35,7 +35,7 @@ mod tests {
 		let default_config = Config::builder().build();
 
 		let lab1_path = default_config.data_dir.join("lab1.py");
-		let test_inputs = generate_twentys(42);
+		let test_inputs = generate(42);
 
 		let res = run_lab_one(lab1_path, test_inputs);
 		println!("{:?}", res);
@@ -46,7 +46,7 @@ mod tests {
 		let default_config = Config::builder().build();
 
 		let lab1_path = default_config.data_dir.join("lab1.py");
-		let test_inputs = generate_twentys(42);
+		let test_inputs = generate(42);
 
 		let res = run_lab_one(lab1_path, test_inputs);
 

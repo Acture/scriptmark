@@ -5,6 +5,7 @@ use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::error::Error;
 use std::ffi::CString;
+use rand::distr::uniform;
 use typed_builder::TypedBuilder;
 
 pub fn run_python_code<S: AsRef<str> + std::fmt::Debug>(
@@ -75,10 +76,15 @@ print(t)"#;
 	}
 }
 
-pub fn generate_twentys(seed: u64) -> Vec<f64> {
+pub fn generate<T: uniform::SampleUniform + std::cmp::PartialOrd + Clone>(
+	seed: u64,
+	size: usize,
+	begin: T,
+	end: T,
+) -> Vec<T> {
 	let mut rng = StdRng::seed_from_u64(seed); // ✅ 生成固定随机序列
 
-	(0..20).map(|_| rng.random_range(1.0..=100.0)).collect()
+	(0..size).map(|_| rng.random_range(begin.clone()..=end.clone())).collect()
 }
 
 #[derive(Debug, TypedBuilder, Eq, PartialEq, Hash)]

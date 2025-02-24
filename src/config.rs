@@ -11,6 +11,8 @@ use typed_builder::TypedBuilder;
 pub struct Config {
 	#[builder(default = PathBuf::from("./data"))]
 	pub data_dir: PathBuf,
+	#[builder(default = 42)]
+	pub seed: u64,
 }
 
 impl Config {
