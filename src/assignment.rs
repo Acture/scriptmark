@@ -71,7 +71,7 @@ mod tests {
 		let students = Student::load_from_roster(test_class.roster_path());
 		test_class.load_assignments();
 		let test_assignment = test_class.assignments[0];
-		let paths = test_assignment.group_by_student(students.iter().map(|s| &s.sis_login_id).collect());
+		let paths = test_assignment.group_by_student(students.iter().map(|s| &s.sis_login_id).collect::<Vec<String>>());
 		println!("{:?}", paths);
 	}
 }
