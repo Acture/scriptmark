@@ -10,7 +10,7 @@ pub struct Assignment {
 
 
 impl Assignment {
-	pub fn group_by_student<S: AsRef<str>>(&self, student_ids: Vec<S>) -> HashMap<String, Vec<PathBuf>> {
+	pub fn group_by_student<S: AsRef<str>>(&self, student_ids: &[S]) -> HashMap<String, Vec<PathBuf>> {
 		let mut rec: HashMap<String, Vec<PathBuf>> = student_ids.iter()
 			.map(|id| (id.as_ref().to_string(), vec![]))
 			.collect();
