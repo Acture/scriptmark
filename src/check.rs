@@ -1,10 +1,10 @@
-use crate::run;
-use crate::CONFIG;
 use crate::defines::class;
-use std::collections::HashMap;
-use crate::lab::circle_area;
 use crate::defines::student::Student;
 use crate::defines::submission_record::SubmissionRecord;
+use crate::lab::circle_area;
+use crate::run;
+use crate::CONFIG;
+use std::collections::HashMap;
 
 pub fn check_assignment(
 	selected_class: &class::Class,
