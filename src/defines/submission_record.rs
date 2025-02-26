@@ -1,4 +1,4 @@
-use crate::student::Student;
+use crate::defines::student::Student;
 use std::collections::HashMap;
 use typed_builder::TypedBuilder;
 
