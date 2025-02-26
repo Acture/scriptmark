@@ -1,5 +1,5 @@
-use crate::assignment::Assignment;
-use crate::student::Student;
+use crate::defines::assignment::Assignment;
+use crate::defines::student::Student;
 use std::collections::HashMap;
 use std::path;
 use std::path::{Path, PathBuf};
