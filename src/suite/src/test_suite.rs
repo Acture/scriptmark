@@ -1,6 +1,7 @@
+use std::any::Any;
 use std::collections::HashMap;
-use typed_builder::TypedBuilder;
 use std::path::PathBuf;
+use typed_builder::TypedBuilder;
 
 #[derive(Debug, TypedBuilder)]
 pub struct TestResult {
@@ -9,22 +10,25 @@ pub struct TestResult {
 	#[builder(default = None)]
 	pub infos: Option<HashMap<String, Option<Vec<String>>>>,
 }
-pub struct TestSuite<I, O, P>
-where
-	P: AsRef<PathBuf>,
-{
-	data: I,
-	answer: O,
-	runner: Box<dyn Fn(&P) -> O>,
-	judge: Box<dyn Fn(&O, &O) -> TestResult>,
+
+pub trait TestSuiteTrait {
+	fn run(&self, path: &dyn AsRef<PathBuf>) -> Box<dyn Any>;
+	fn judge(&self, result: &dyn Any, expected: &dyn Any) -> TestResult;
 }
 
-impl<I, R, P: AsRef<PathBuf>> TestSuite<I, R, P> {
+pub struct TestSuite {
+	data: Box<dyn Any>,
+	answer: Box<dyn Any>,
+	runner: Box<dyn Fn(&dyn AsRef<PathBuf>) -> Box<dyn Any>>,
+	judge: Box<dyn Fn(&dyn Any, &dyn Any) -> TestResult>,
+}
+
+impl TestSuite {
 	pub fn new(
-		data: I,
-		answer: R,
-		runner: Box<dyn Fn(&P) -> R>,
-		judge: Box<dyn Fn(&R, &R) -> TestResult>,
+		data: Box<dyn Any>,
+		answer: Box<dyn Any>,
+		runner: Box<dyn Fn(&dyn AsRef<PathBuf>) -> Box<dyn Any>>,
+		judge: Box<dyn Fn(&dyn Any, &dyn Any) -> TestResult>,
 	) -> Self {
 		Self {
 			data,
@@ -33,8 +37,14 @@ impl<I, R, P: AsRef<PathBuf>> TestSuite<I, R, P> {
 			judge,
 		}
 	}
+}
 
-	pub fn run(&self, path: &P) -> TestResult {
-		(self.judge)(&(self.runner)(path), &self.answer)
+impl TestSuiteTrait for TestSuite {
+	fn run(&self, path: &dyn AsRef<PathBuf>) -> Box<dyn Any> {
+		(self.runner)(path)
+	}
+
+	fn judge(&self, result: &dyn Any, expected: &dyn Any) -> TestResult {
+		(self.judge)(result, expected)
 	}
 }
