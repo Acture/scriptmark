@@ -8,7 +8,7 @@ use std::error::Error;
 use std::ffi::CString;
 use typed_builder::TypedBuilder;
 
-pub fn run_python_code<S: AsRef<str> + std::fmt::Debug>(
+pub fn run_code<S: AsRef<str> + std::fmt::Debug>(
 	code: S,
 	std_in: Option<S>,
 	libs_to_import: Option<&[S]>,
@@ -63,7 +63,7 @@ pub fn run_python_code<S: AsRef<str> + std::fmt::Debug>(
 
 #[cfg(test)]
 mod tests {
-	use crate::run::run_python_code;
+	use crate::python::run_code;
 
 	#[test]
 	fn test_run_python_code() {
@@ -71,7 +71,7 @@ mod tests {
 import sys
 t = input()
 print(t)"#;
-		let res = run_python_code(code, Some("test"), Some(&["math"]));
+		let res = run_code(code, Some("test"), Some(&["math"]));
 		assert_eq!(res, "test\n");
 	}
 }

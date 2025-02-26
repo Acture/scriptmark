@@ -1,5 +1,4 @@
-use crate::run;
-use crate::run::run_python_code;
+use runner;
 use std::path::Path;
 
 pub fn run<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> Vec<String> {
@@ -8,7 +7,7 @@ pub fn run<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> Vec<Stri
 	test_inputs
 		.iter()
 		.map(|input| {
-			run_python_code(
+			runner::python::run_code(
 				&code,
 				Some(&input.to_string()),
 				Some(&[&"math".to_string()]),
@@ -17,7 +16,7 @@ pub fn run<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> Vec<Stri
 		.collect()
 }
 
-pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<run::Message>)> {
+pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<runner::python::Message>), (bool, Vec<runner::python::Message>)> {
 	let s_lines: Vec<_> = s
 		.split("\n")
 		.filter(|line| !line.trim().is_empty())
@@ -31,7 +30,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 		.ok_or_else(|| {
 			(
 				false,
-				vec![run::Message::builder()
+				vec![runner::python::Message::builder()
 					.title("Standard Line 0 Error".to_string())
 					.build()],
 			)
@@ -42,7 +41,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 		.ok_or_else(|| {
 			(
 				false,
-				vec![run::Message::builder()
+				vec![runner::python::Message::builder()
 					.title("Standard Parse Error".to_string())
 					.description(format!("The standard value is {}", s))
 					.build()],
@@ -53,7 +52,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 		.ok_or_else(|| {
 			(
 				false,
-				vec![run::Message::builder()
+				vec![runner::python::Message::builder()
 					.title("Tested Line 0 Error".to_string())
 					.build()],
 			)
@@ -64,7 +63,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 		.ok_or_else(|| {
 			(
 				false,
-				vec![run::Message::builder()
+				vec![runner::python::Message::builder()
 					.title("Tested Parse Error".to_string())
 					.description(format!(
 						"The tested value is {}. Expected {}",
@@ -80,7 +79,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 	if required_s != required_t {
 		let diff = ((required_s - required_t) / required_s).abs() * 100.0;
 		if diff < 1.0 {
-			let mut message = run::Message::builder()
+			let mut message = runner::python::Message::builder()
 				.title("Small Value Difference".to_string())
 				.build();
 			message
@@ -90,7 +89,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 			messages.push(message);
 		} else {
 			passed = false;
-			let mut message = run::Message::builder()
+			let mut message = runner::python::Message::builder()
 				.title("Value Difference".to_string())
 				.build();
 			message
@@ -110,7 +109,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 
 	if additional_t.len() > 0 {
 		messages.push(
-            run::Message::builder()
+            runner::python::Message::builder()
 				.title("完成选做".to_string())
 				.build(),
 		);
@@ -121,7 +120,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 				(Some(s), Some(t)) => {
 					if s != t {
 						messages.push(
-                            run::Message::builder()
+                            runner::python::Message::builder()
 								.title("Additional Output Difference".to_string())
 								.description(format!("Desired <{}>, Given <{}>", s, t))
 								.build(),
@@ -130,7 +129,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 				}
 				(Some(s), None) => {
 					messages.push(
-                        run::Message::builder()
+                        runner::python::Message::builder()
 							.title("Additional Output Difference".to_string())
 							.description(format!("Desired <{}>, Given <{}>", s, ""))
 							.build(),
@@ -138,7 +137,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 				}
 				(None, Some(t)) => {
 					messages.push(
-                        run::Message::builder()
+                        runner::python::Message::builder()
 							.title("Additional Output Difference".to_string())
 							.description(format!("Desired <{}>, Given <{}>", "", t))
 							.build(),
@@ -149,7 +148,7 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<run::Message>), (bool, Vec<r
 		}
 	} else {
 		messages.push(
-            run::Message::builder()
+            runner::python::Message::builder()
 				.title("未完成选做".to_string())
 				.build(),
 		);
