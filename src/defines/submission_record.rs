@@ -9,7 +9,7 @@ pub struct SubmissionRecord {
 	#[builder(default = None)]
 	pub assignment: Option<String>,
 	#[builder(default = None)]
-    pub is_submitted: Option<bool>,
+	pub is_submitted: Option<bool>,
 
 	#[builder(default = None)]
 	pub correct_count: Option<usize>,
@@ -18,7 +18,7 @@ pub struct SubmissionRecord {
 	#[builder(default = None)]
 	pub did_additional: Option<bool>,
 	#[builder(default = None)]
-    pub has_hash_collision: Option<Vec<String>>,
+	pub has_hash_collision: Option<Vec<String>>,
 	#[builder(default = None)]
 	pub errors: Option<HashMap<String, Option<Vec<String>>>>,
 	#[builder(default = None)]

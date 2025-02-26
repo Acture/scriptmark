@@ -1,11 +1,11 @@
-use dialoguer::{FuzzySelect, Select};
-use log::info;
-use std::process::exit;
-use std::collections::HashMap;
-use itertools::Itertools;
 use crate::defines::class;
 use crate::defines::student::Student;
 use crate::defines::submission_record::SubmissionRecord;
+use dialoguer::{FuzzySelect, Select};
+use itertools::Itertools;
+use log::info;
+use std::collections::HashMap;
+use std::process::exit;
 
 pub fn select_class(classes: &[class::Class]) {
 	let class_options = classes
@@ -54,7 +54,8 @@ fn select_assignment(selected_class: &class::Class) {
 				let selected_assignment_name = &assignment_options[selected_index];
 				info!("所选作业：{}", selected_assignment_name);
 
-				let submission_map = crate::check::check_assignment(selected_class, selected_assignment_name);
+				let submission_map =
+					crate::check::check_assignment(selected_class, selected_assignment_name);
 				select_submission(&submission_map);
 			}
 		}

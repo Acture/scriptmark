@@ -1,11 +1,11 @@
 use pyo3::prelude::{PyAnyMethods, PyDictMethods};
 use pyo3::types::PyDict;
 use pyo3::Python;
+use rand::distr::uniform;
 use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::error::Error;
 use std::ffi::CString;
-use rand::distr::uniform;
 use typed_builder::TypedBuilder;
 
 pub fn run_python_code<S: AsRef<str> + std::fmt::Debug>(
@@ -84,7 +84,9 @@ pub fn generate<T: uniform::SampleUniform + std::cmp::PartialOrd + Clone>(
 ) -> Vec<T> {
 	let mut rng = StdRng::seed_from_u64(seed); // ✅ 生成固定随机序列
 
-	(0..size).map(|_| rng.random_range(begin.clone()..=end.clone())).collect()
+	(0..size)
+		.map(|_| rng.random_range(begin.clone()..=end.clone()))
+		.collect()
 }
 
 #[derive(Debug, TypedBuilder, Eq, PartialEq, Hash)]

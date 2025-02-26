@@ -1,17 +1,8 @@
 use crate::defines::class::Class;
-use dialoguer::FuzzySelect;
-use dialoguer::Select;
 use env_logger;
-use lab::circle_area;
-use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::info;
-use std::collections::HashMap;
 use std::env;
-use std::io::Read;
-use std::process::exit;
-
-
 
 mod check;
 mod config;
@@ -19,8 +10,8 @@ mod lab;
 mod run;
 mod tui;
 
-mod utils;
 mod defines;
+mod utils;
 
 lazy_static! {
 	static ref CONFIG: config::Config = config::prepare_config();
