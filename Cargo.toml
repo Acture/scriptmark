@@ -1,7 +1,7 @@
 [workspace]
 members = ["src/grader",
 	"src/lab", "src/runner", "src/suite", "src/grader"
-]
+, "src/util"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -9,4 +9,5 @@ lab = { path = "src/lab" }
 runner = { path = "src/runner" }
 suite = { path = "src/suite" }
 grader = { path = "src/grader" }
+util = { path = "src/util" }
 

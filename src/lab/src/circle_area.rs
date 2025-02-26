@@ -16,7 +16,10 @@ pub fn run<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> Vec<Stri
 		.collect()
 }
 
-pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<runner::python::Message>), (bool, Vec<runner::python::Message>)> {
+pub fn judge(
+	s: &str,
+	t: &str,
+) -> Result<(bool, Vec<runner::python::Message>), (bool, Vec<runner::python::Message>)> {
 	let s_lines: Vec<_> = s
 		.split("\n")
 		.filter(|line| !line.trim().is_empty())
@@ -157,23 +160,3 @@ pub fn judge(s: &str, t: &str) -> Result<(bool, Vec<runner::python::Message>), (
 	Ok((passed, messages))
 }
 
-#[cfg(test)]
-mod tests {
-	use crate::config::Config;
-	use crate::run::{generate};
-	use crate::Class;
-
-	#[test]
-	fn test_generate() {
-		let seed = 42;
-		assert_eq!(generate(seed, 20, 0, 100), generate(seed, 20, 0, 100));
-	}
-
-
-	#[test]
-	fn test_run_students_code() {
-		let default_config = Config::builder().build();
-		let test_class = &Class::prepare_class(default_config.data_dir)[0];
-		println!("{:?}", test_class)
-	}
-}

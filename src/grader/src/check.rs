@@ -19,7 +19,7 @@ pub fn check_assignment(
 	}
 	let (_inputs, run_func, judge_func) = match selected_assignment_name {
 		"lab1_circle_area" => (
-			runner::python::generate(CONFIG.seed, 20, 0.0, 100.0),
+			util::generate(CONFIG.seed, 20, 0.0, 100.0),
 			lab::circle_area::run,
 			lab::circle_area::judge,
 		),
@@ -69,7 +69,7 @@ pub fn check_assignment(
 					.or_insert(None);
 			}
 			let file_path = &file_paths[0];
-			let hash = match runner::python::calculate_hash_from_file(file_path) {
+			let hash = match util::calculate_hash_from_file(file_path) {
 				Ok(hash) => hash,
 				Err(_e) => {
 					submission_record
