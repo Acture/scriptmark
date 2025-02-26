@@ -74,25 +74,3 @@ impl Assignment {
 	}
 }
 
-#[cfg(test)]
-mod tests {
-	use crate::class::Class;
-	use crate::config::Config;
-	use crate::student::Student;
-
-	#[test]
-	fn test_group_by_student() {
-		let config = Config::builder().build();
-		let test_class = &mut Class::load_class(&config.data_dir)[0];
-		let students = Student::load_from_roster(test_class.roster_path());
-		test_class.load_assignments();
-		let test_assignment = &test_class.assignments[0];
-		let paths = test_assignment.group_by_student(
-            &students
-				.iter()
-				.map(|s| s.sis_login_id.clone())
-				.collect::<Vec<String>>(),
-		);
-		println!("{:?}", paths);
-	}
-}

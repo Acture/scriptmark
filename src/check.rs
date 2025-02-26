@@ -21,8 +21,8 @@ pub fn check_assignment(
 	let (_inputs, run_func, judge_func) = match selected_assignment_name {
 		"lab1_circle_area" => (
 			run::generate(CONFIG.seed, 20, 0.0, 100.0),
-			circle_area::run_lab_one,
-			circle_area::judge_func,
+			circle_area::run,
+			circle_area::judge,
 		),
 		_ => panic!("未知作业"),
 	};

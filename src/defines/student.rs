@@ -92,7 +92,7 @@ impl Student {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::class::Class;
+	use crate::defines::class::Class;
 	use crate::config::Config;
 	use std::path::PathBuf;
 
