@@ -1,8 +1,6 @@
 use pyo3::prelude::{PyAnyMethods, PyDictMethods};
 use pyo3::types::PyDict;
 use pyo3::Python;
-use rand::distr::uniform;
-use rand::prelude::StdRng;
 use rand::{Rng, SeedableRng};
 use std::error::Error;
 use std::ffi::CString;
@@ -76,19 +74,6 @@ print(t)"#;
 	}
 }
 
-pub fn generate<T: uniform::SampleUniform + std::cmp::PartialOrd + Clone>(
-	seed: u64,
-	size: usize,
-	begin: T,
-	end: T,
-) -> Vec<T> {
-	let mut rng = StdRng::seed_from_u64(seed); // ✅ 生成固定随机序列
-
-	(0..size)
-		.map(|_| rng.random_range(begin.clone()..=end.clone()))
-		.collect()
-}
-
 #[derive(Debug, TypedBuilder, Eq, PartialEq, Hash)]
 pub struct Message {
 	#[builder(default=String::new())]
@@ -130,15 +115,3 @@ pub fn judge(
 		.collect()
 }
 
-fn calculate_hash(s: &str) -> u64 {
-	use std::collections::hash_map::DefaultHasher;
-	use std::hash::{Hash, Hasher};
-	let mut hasher = DefaultHasher::new();
-	s.hash(&mut hasher);
-	hasher.finish()
-}
-
-pub fn calculate_hash_from_file(file_path: &std::path::Path) -> Result<u64, Box<dyn Error>> {
-	let content = std::fs::read_to_string(file_path)?;
-	Ok(calculate_hash(&content))
-}

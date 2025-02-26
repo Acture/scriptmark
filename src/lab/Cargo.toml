@@ -5,3 +5,5 @@ edition = "2021"
 
 [dependencies]
 runner = {path="../runner"}
+suite.workspace = true
+util.workspace = true
