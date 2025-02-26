@@ -1,3 +1,4 @@
+use std::any::Any;
 use runner;
 use std::collections::HashMap;
 use std::fs;
@@ -51,19 +52,26 @@ fn judge_results<'a, 'b>(answer: &'a String, to_test: &'b String) -> TestResult 
 	res
 }
 
-fn get_test_suite<P: AsRef<PathBuf>>() -> suite::test_suite::TestSuite<Option<()>, String, P> {
+pub fn get_test_suite() -> suite::test_suite::TestSuite {
 	let answer = get_answer();
 	suite::test_suite::TestSuite::new(
-		None,
-		answer.clone(),
-		Box::new(|p: &P| {
-			if !p.as_ref().exists() {
-				panic!("Test file not found: {}", p.as_ref().display());
+		Box::new(None::<()>),
+		Box::new(answer.clone()),
+		Box::new(|p: &dyn AsRef<PathBuf>| {
+			let path = p.as_ref();
+			if !path.exists() {
+				panic!("Test file not found: {}", path.display());
 			}
-			let content = fs::read_to_string(&p.as_ref()).expect("Failed to read file");
-			runner::python::run_code(content, None, None)
+			let content = fs::read_to_string(path).expect("Failed to read file");
+			Box::new(runner::python::run_code(content, None, None)) as Box<dyn Any>
 		}),
-		Box::new(judge_results),
+		Box::new(|result: &dyn Any, expected: &dyn Any| -> TestResult {
+			if let (Some(result_str), Some(expected_str)) = (result.downcast_ref::<String>(), expected.downcast_ref::<String>()) {
+				judge_results(expected_str, result_str)
+			} else {
+				panic!("Failed to downcast")
+			}
+		}),
 	)
 }
 mod test {
