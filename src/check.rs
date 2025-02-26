@@ -72,7 +72,7 @@ pub fn check_assignment(
 			let file_path = &file_paths[0];
 			let hash = match run::calculate_hash_from_file(file_path) {
 				Ok(hash) => hash,
-				Err(e) => {
+				Err(_e) => {
 					submission_record
 						.errors
 						.get_or_insert_with(HashMap::new)
@@ -130,7 +130,7 @@ pub fn check_assignment(
 	hash_record
 		.iter()
 		.filter(|(_, students)| students.len() > 1)
-		.for_each(|(hash, collided_students)| {
+		.for_each(|(_hash, collided_students)| {
 			collided_students.iter().for_each(|collided_student| {
 				results
 					.get_mut(collided_student)
