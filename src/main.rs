@@ -2,6 +2,7 @@ use dialoguer::FuzzySelect;
 use dialoguer::Select;
 use env_logger;
 use grade::circle_area;
+use lazy_static::lazy_static;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::env;
@@ -9,7 +10,9 @@ use std::error::Error;
 use std::iter::zip;
 use student::Student;
 
+use crate::assignment::Assignment;
 use submission_record::SubmissionRecord;
+
 mod assignment;
 mod class;
 mod config;
@@ -19,66 +22,90 @@ mod student;
 mod submission_record;
 mod utils;
 
+lazy_static! {
+	static ref CONFIG: config::Config = config::prepare_config();
+}
+
 fn init_logger() {
 	env_logger::Builder::new()
 		.parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())) // 默认 info
 		.init();
 }
 
-fn main() {
-	init_logger();
-
-	info!("开始加载班级信息...");
-	let config = config::prepare_config();
-	let classes = class::Class::prepare_class(&config.data_dir);
-	info!("班级信息加载完成");
+fn select_class(classes: &[class::Class]) {
 	let class_options = classes
 		.iter()
 		.enumerate()
 		.map(|(_i, class)| class.name.as_str())
+		.chain(std::iter::once("退出"))
 		.collect::<Vec<_>>();
-	let selected_index = Select::new()
-		.with_prompt("Please Select a Class:")
-		.items(&class_options)
-		.interact()
-		.expect("Select failed");
+	let class_selector = Select::new()
+		.with_prompt("Please Select a Class")
+		.items(&class_options);
 
-	let selected_class = &classes[selected_index];
-	info!("所选班级：{}", selected_class.name);
+	loop {
+		let selected_index = class_selector.clone().interact().expect("Select failed");
 
+		match class_options[selected_index] {
+			"退出" => return,
+			_ => {
+				let selected_class = &classes[selected_index];
+				info!("所选班级：{}", selected_class.name);
+				select_assignment(selected_class);
+			}
+		}
+	}
+}
+
+fn select_assignment(selected_class: &class::Class) {
 	let assignment_options = selected_class
 		.assignments
 		.iter()
 		.map(|assignment| assignment.name.as_str())
+		.chain(vec!["返回", "退出"])
 		.collect::<Vec<_>>();
-	let selected_assignment_index = Select::new()
-		.with_prompt("Please Select an Assignment:")
-		.items(&assignment_options)
-		.interact()
-		.expect("Select failed");
-	let selected_assignment_name = &selected_class.assignments[selected_assignment_index].name;
-	info!("所选作业：{}", selected_assignment_name);
+	let assignment_selector = Select::new()
+		.with_prompt("Please Select an Assignment")
+		.items(&assignment_options);
+	loop {
+		let selected_index = assignment_selector
+			.clone()
+			.interact()
+			.expect("Select failed");
 
-	info!("开始检查作业...");
+		match assignment_options[selected_index] {
+			"退出" => return,
+			_ => {
+				let selected_assignment_name = &assignment_options[selected_index];
+				info!("所选作业：{}", selected_assignment_name);
+
+				let submission_map = check_assignment(selected_class, selected_assignment_name);
+				select_submission(&submission_map);
+			}
+		}
+	}
+}
+
+fn check_assignment(
+	selected_class: &class::Class,
+	selected_assignment_name: &str,
+) -> HashMap<Student, SubmissionRecord> {
 	let student_assignments =
 		selected_class.get_student_assignments(selected_assignment_name.to_string());
-
-	let standard_py = config
+	let standard_py = CONFIG
 		.data_dir
 		.join(format!("{}.py", selected_assignment_name));
 	if !standard_py.exists() {
-		warn!("未找到标准答案: {:?}", standard_py);
-		return;
+		panic!("未找到标准答案: {:?}", standard_py);
 	}
-	let (_inputs, run_func, judge_func) = match selected_assignment_name.as_str() {
-		"lab1" => (
-			run::generate(config.seed, 20, 0.0, 100.0),
+	let (_inputs, run_func, judge_func) = match selected_assignment_name {
+		"lab1_circle_area" => (
+			run::generate(CONFIG.seed, 20, 0.0, 100.0),
 			circle_area::run_lab_one,
 			circle_area::judge_func,
 		),
 		_ => panic!("未知作业"),
 	};
-
 	let standard = run_func(&standard_py, &_inputs);
 
 	let keys = {
@@ -96,7 +123,7 @@ fn main() {
 		.map(|student| {
 			let mut submission_record = SubmissionRecord::builder()
 				.student(Some((*student).clone()))
-				.assignment(Some(selected_assignment_name.clone()))
+				.assignment(Some(selected_assignment_name.to_string()))
 				.build();
 			let file_paths = match student_assignments.get(student) {
 				Some(paths) => paths,
@@ -199,9 +226,13 @@ fn main() {
 					);
 			})
 		});
+	results
+}
+
+fn select_submission(results: &HashMap<Student, SubmissionRecord>) {
 	let mut results_keys = results.keys().collect::<Vec<_>>();
 	results_keys.sort_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id));
-	let mut record_options = results_keys
+	let record_options = results_keys
 		.iter()
 		.map(|student| -> std::string::String {
 			let submission_record = results.get(student).unwrap();
@@ -280,11 +311,11 @@ fn main() {
 				},
 			}
 		})
+        .chain(vec!["退出".to_string()])
 		.collect::<Vec<_>>();
-	record_options.push("退出".to_string());
 	loop {
 		let selected_record_index = FuzzySelect::new()
-			.with_prompt("Please Select a Record:")
+			.with_prompt("Please Select a Record")
 			.items(&record_options)
 			.interact()
 			.expect("Select failed");
@@ -367,4 +398,13 @@ fn main() {
 			}
 		}
 	}
+}
+fn main() {
+	init_logger();
+
+	info!("开始加载班级信息...");
+	let classes = class::Class::prepare_class(&CONFIG.data_dir);
+	info!("班级信息加载完成");
+
+	select_class(&classes);
 }
