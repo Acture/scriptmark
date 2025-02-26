@@ -1,13 +1,11 @@
 use crate::defines::class::Class;
 use env_logger;
 use lazy_static::lazy_static;
-use log::info;
+use log::{info, log};
 use std::env;
-
+use lab;
 mod check;
 mod config;
-mod lab;
-mod run;
 mod tui;
 
 mod defines;

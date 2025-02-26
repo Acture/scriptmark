@@ -1,8 +1,7 @@
 use crate::defines::class;
 use crate::defines::student::Student;
 use crate::defines::submission_record::SubmissionRecord;
-use crate::lab::circle_area;
-use crate::run;
+use runner;
 use crate::CONFIG;
 use std::collections::HashMap;
 
@@ -20,9 +19,9 @@ pub fn check_assignment(
 	}
 	let (_inputs, run_func, judge_func) = match selected_assignment_name {
 		"lab1_circle_area" => (
-			run::generate(CONFIG.seed, 20, 0.0, 100.0),
-			circle_area::run,
-			circle_area::judge,
+			runner::python::generate(CONFIG.seed, 20, 0.0, 100.0),
+			lab::circle_area::run,
+			lab::circle_area::judge,
 		),
 		_ => panic!("未知作业"),
 	};
@@ -70,7 +69,7 @@ pub fn check_assignment(
 					.or_insert(None);
 			}
 			let file_path = &file_paths[0];
-			let hash = match run::calculate_hash_from_file(file_path) {
+			let hash = match runner::python::calculate_hash_from_file(file_path) {
 				Ok(hash) => hash,
 				Err(_e) => {
 					submission_record
@@ -93,7 +92,7 @@ pub fn check_assignment(
 
 			let to_be_judged = run_func(file_path, &_inputs);
 
-			let judge_result = run::judge(&standard, &to_be_judged, Some(judge_func));
+			let judge_result = runner::python::judge(&standard, &to_be_judged, Some(judge_func));
 			submission_record.total_count = Some(judge_result.len());
 			submission_record.correct_count = Some(
                 judge_result

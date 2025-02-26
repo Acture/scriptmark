@@ -1,20 +1,12 @@
-[package]
-name = "Grader"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = ["src/grader",
+	"src/lab", "src/runner", "src/suite", "src/grader"
+]
+resolver = "2"
 
-[dependencies]
-serde = { version = "1.0.218", features = ["derive"] }
-typed-builder = "0.20.0"
-toml = "0.8.20"
-csv = "1.3.1"
-log = "0.4.26"
-env_logger = "0.11.6"
-pyo3 = { version = "0.23.4", features = ["abi3-py312", "auto-initialize"] }
-rand = "0.9.0"
-serde_json = "1.0.139"
-inquire = { version = "0.7.5" }
-dialoguer = { version = "0.11.0", features = ["fuzzy-select"] }
-indicatif = "0.17.11"
-lazy_static = "1.5.0"
-itertools = "0.14.0"
+[workspace.dependencies]
+lab = { path = "src/lab" }
+runner = { path = "src/runner" }
+suite = { path = "src/suite" }
+grader = { path = "src/grader" }
+
