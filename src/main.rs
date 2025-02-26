@@ -3,14 +3,11 @@ use dialoguer::Select;
 use env_logger;
 use grade::circle_area;
 use lazy_static::lazy_static;
-use log::{info, warn};
+use log::{info};
 use std::collections::HashMap;
 use std::env;
-use std::error::Error;
-use std::iter::zip;
 use student::Student;
-
-use crate::assignment::Assignment;
+use itertools::Itertools;
 use submission_record::SubmissionRecord;
 
 mod assignment;
@@ -230,8 +227,7 @@ fn check_assignment(
 }
 
 fn select_submission(results: &HashMap<Student, SubmissionRecord>) {
-	let mut results_keys = results.keys().collect::<Vec<_>>();
-	results_keys.sort_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id));
+    let results_keys = results.keys().sorted_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id)).collect::<Vec<_>>();
 	let record_options = results_keys
 		.iter()
 		.map(|student| -> std::string::String {
@@ -311,7 +307,7 @@ fn select_submission(results: &HashMap<Student, SubmissionRecord>) {
 				},
 			}
 		})
-        .chain(vec!["退出".to_string()])
+		.chain(vec!["退出".to_string()])
 		.collect::<Vec<_>>();
 	loop {
 		let selected_record_index = FuzzySelect::new()
