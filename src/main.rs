@@ -2,12 +2,14 @@ use dialoguer::FuzzySelect;
 use dialoguer::Select;
 use env_logger;
 use grade::circle_area;
+use itertools::Itertools;
 use lazy_static::lazy_static;
-use log::{info};
+use log::info;
 use std::collections::HashMap;
 use std::env;
+use std::io::Read;
+use std::process::exit;
 use student::Student;
-use itertools::Itertools;
 use submission_record::SubmissionRecord;
 
 mod assignment;
@@ -227,7 +229,10 @@ fn check_assignment(
 }
 
 fn select_submission(results: &HashMap<Student, SubmissionRecord>) {
-    let results_keys = results.keys().sorted_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id)).collect::<Vec<_>>();
+	let results_keys = results
+		.keys()
+		.sorted_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id))
+		.collect::<Vec<_>>();
 	let record_options = results_keys
 		.iter()
 		.map(|student| -> std::string::String {
@@ -317,84 +322,107 @@ fn select_submission(results: &HashMap<Student, SubmissionRecord>) {
 			.expect("Select failed");
 
 		match record_options[selected_record_index].as_str() {
-			"退出" => return,
+			"返回" => return,
+			"退出" => exit(0),
 			_ => {
 				let selected_record = results.get(results_keys[selected_record_index]).unwrap();
-				let mut options = Vec::new();
-				if Some(false) == selected_record.is_submitted {
-					println!("\t未提交");
-				} else {
-					if let Some(errors) = &selected_record.errors {
-						options.push("查看错误");
-					}
-					if let Some(messages) = &selected_record.messages {
-						options.push("查看消息");
-					}
-				}
-				options.extend(vec!["返回", "退出"]);
-				loop {
-					let selected = Select::new()
-						.items(&options)
-						.interact()
-						.expect("Select failed");
-					match options[selected] {
-						"查看错误" => {
-							let errors = selected_record.errors.as_ref().unwrap();
-							let mut error_options =
-								errors.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-							error_options.extend(vec!["返回", "退出"]);
-							loop {
-								let selected_error_index = Select::new()
-									.items(&error_options)
-									.interact()
-									.expect("Select failed");
-								match error_options[selected_error_index] {
-									"返回" => break,
-									"退出" => return,
-									error_name => {
-										if let Some(error_details) = errors.get(error_name) {
-											error_details.iter().for_each(|msg| {
-												println!("{:?}", msg);
-											});
-										}
-									}
-								}
-							}
-						}
-						"查看消息" => {
-							let messages = selected_record.messages.as_ref().unwrap();
-							let mut message_options =
-								messages.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
-							message_options.extend(vec!["返回", "退出"]);
-							loop {
-								let selected_message_index = Select::new()
-									.items(&message_options)
-									.interact()
-									.expect("Select failed");
-								match message_options[selected_message_index] {
-									"返回" => break,
-									"退出" => return,
-									message_name => {
-										if let Some(messages) = messages.get(message_name).unwrap()
-										{
-											println!("\t{} x {}:", message_name, messages.len());
-											messages.iter().for_each(|msg| {
-												println!("\t\t{}", msg);
-											});
-										};
-									}
-								}
-							}
-						}
-						"返回" => break,
-						"退出" => return,
-						_ => panic!("未知选项"),
-					}
+				select_detail(selected_record)
+			}
+		}
+	}
+}
+
+fn select_detail(selected_record: &SubmissionRecord) {
+	let options = std::iter::empty()
+		.chain(
+            selected_record
+				.is_submitted
+				.as_ref()
+				.map(|_| "未提交")
+				.into_iter(),
+		)
+		.chain(
+            selected_record
+				.has_hash_collision
+				.as_ref()
+				.map(|_| "查看hash冲突")
+				.into_iter(),
+		)
+		.chain(selected_record.errors.as_ref().map(|_| "查看错误"))
+		.chain(selected_record.messages.as_ref().map(|_| "查看消息"))
+		.chain(["返回", "退出"].iter().copied())
+		.collect::<Vec<_>>();
+
+	loop {
+		let selected = Select::new()
+			.items(&options)
+			.interact()
+			.expect("Select failed");
+		match options[selected] {
+			"未提交" => break,
+			"查看错误" => {
+				select_error(selected_record);
+			}
+			"查看消息" => {
+				select_message(selected_record);
+			}
+			"返回" => break,
+			"退出" => exit(0),
+			_ => panic!("未知选项"),
+		}
+	}
+}
+
+fn select_message(selected_record: &SubmissionRecord) {
+	let messages = selected_record.messages.as_ref().unwrap();
+	let mut message_options = messages.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>();
+	message_options.extend(vec!["返回", "退出"]);
+	loop {
+		let selected_message_index = Select::new()
+			.items(&message_options)
+			.interact()
+			.expect("Select failed");
+		match message_options[selected_message_index] {
+			"返回" => break,
+			"退出" => exit(0),
+			message_name => {
+				if let Some(messages) = messages.get(message_name).unwrap() {
+					println!("\t{} x {}:", message_name, messages.len());
+					messages.iter().for_each(|msg| {
+						println!("\t\t{}", msg);
+					});
+				};
+			}
+		}
+	}
+}
+
+fn select_error(selected_record: &SubmissionRecord) {
+	let errors = selected_record.errors.as_ref().unwrap();
+	let error_options = errors
+		.iter()
+		.map(|(k, _)| k.as_str())
+		.chain(["返回", "退出"].iter().copied())
+		.collect::<Vec<_>>();
+	loop {
+		let selected_error_index = Select::new()
+			.items(&error_options)
+			.interact()
+			.expect("Select failed");
+		match error_options[selected_error_index] {
+			"返回" => break,
+			"退出" => exit(0),
+			error_name => {
+				if let Some(error_details) = errors.get(error_name) {
+					error_details.iter().for_each(|msg| {
+						println!("{:?}", msg);
+					});
 				}
 			}
 		}
 	}
 }
+
 fn main() {
 	init_logger();
 
