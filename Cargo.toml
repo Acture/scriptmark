@@ -17,3 +17,4 @@ inquire = { version = "0.7.5" }
 dialoguer = { version = "0.11.0", features = ["fuzzy-select"] }
 indicatif = "0.17.11"
 lazy_static = "1.5.0"
+itertools = "0.14.0"

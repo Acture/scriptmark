@@ -1,6 +1,5 @@
 use crate::run;
 use crate::run::run_python_code;
-use rand::{Rng, SeedableRng};
 use std::path::Path;
 
 pub fn run_lab_one<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> Vec<String> {
