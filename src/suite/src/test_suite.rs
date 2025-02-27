@@ -4,11 +4,30 @@ use std::path::Path;
 use typed_builder::TypedBuilder;
 use util;
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq, Clone)]
 pub enum AdditionalStatus {
 	None,
 	Partial,
 	Full,
+}
+
+impl AdditionalStatus {
+	pub fn to_string(&self) -> String {
+		match self {
+			AdditionalStatus::None => "None".to_string(),
+			AdditionalStatus::Partial => "Partial".to_string(),
+			AdditionalStatus::Full => "Full".to_string(),
+		}
+	}
+
+	pub fn from_string(s: &str) -> Self {
+		match s {
+			"None" => AdditionalStatus::None,
+			"Partial" => AdditionalStatus::Partial,
+			"Full" => AdditionalStatus::Full,
+			_ => panic!("Invalid AdditionalStatus: {}", s),
+		}
+	}
 }
 
 #[derive(Debug, TypedBuilder)]
@@ -16,11 +35,11 @@ pub struct TestResult {
 	#[builder(default = false)]
 	pub passed: bool,
 	#[builder(default = None)]
-	pub infos: Option<HashMap<String, Vec<String>>>,
+	pub infos: Option<HashMap<String, String>>,
 	#[builder(default = None)]
 	pub additional_status: Option<AdditionalStatus>,
 	#[builder(default = None)]
-	pub additional_infos: Option<HashMap<String, Vec<String>>>,
+	pub additional_infos: Option<HashMap<String, String>>,
 }
 
 pub trait TestSuiteTrait {

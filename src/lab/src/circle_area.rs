@@ -46,29 +46,44 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 		.zip(t.lines())
 		.enumerate()
 		.for_each(|(i, (s_line, t_line))| match i {
-			0 => {}
-			1 => {
-				let s_area = match util::extract_numbers::<f64>(s_line).pop() {
-					Some(value) => value,
+			0 => {
+				let s_extracted = util::extract_numbers::<f64>(s_line);
+				let t_extracted = util::extract_numbers::<f64>(t_line);
+				if s_extracted.len() != 1 || t_extracted.len() != 1 {
+					res.infos
+						.get_or_insert_with(HashMap::new)
+						.entry("More Than One Number".to_string())
+						.or_insert(format!(
+							"Expected: 1, Got: s: {}, t: {}",
+							s_extracted.len(),
+							t_extracted.len()
+						));
+				}
+				let s_area = match s_extracted.first() {
+					Some(value) => *value,
 					None => {
 						res.passed = false;
 						res.infos
 							.get_or_insert_with(HashMap::new)
 							.entry("Area".to_string())
-							.or_insert_with(Vec::new)
-							.push(format!("Failed to extract number from line {}: {:?}", i, s));
+							.or_insert(format!(
+								"Failed to extract number from line {}: {:?}",
+								i, s
+							));
 						return;
 					}
 				};
-				let t_area = match util::extract_numbers::<f64>(t_line).pop() {
-					Some(value) => value,
+				let t_area = match t_extracted.first() {
+					Some(value) => *value,
 					None => {
 						res.passed = false;
 						res.infos
 							.get_or_insert_with(HashMap::new)
 							.entry("Area".to_string())
-							.or_insert_with(Vec::new)
-							.push(format!("Failed to extract number from line {}: {:?}", i, t));
+							.or_insert(format!(
+								"Failed to extract number from line {}: {:?}",
+								i, t
+							));
 						return;
 					}
 				};
@@ -78,13 +93,12 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 					res.infos
 						.get_or_insert_with(HashMap::new)
 						.entry("Area".to_string())
-						.or_insert_with(Vec::new)
-						.push(format!("Expected: {}, Got: {}", t_area, s_area));
+						.or_insert(format!("Expected: <{}>, Got: <{}>", t_area, s_area));
 				} else {
 					res.passed = true;
 				}
 			}
-			2 => {
+			1 => {
 				let s_count = match util::extract_numbers::<f64>(t_line).pop() {
 					Some(value) => value,
 					None => {
@@ -92,8 +106,10 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 						res.additional_infos
 							.get_or_insert_with(HashMap::new)
 							.entry("Count".to_string())
-							.or_insert_with(Vec::new)
-							.push(format!("Failed to extract number from line {}: {:?}", i, s));
+							.or_insert(format!(
+								"Failed to extract number from line {}: {:?}",
+								i, s
+							));
 						return;
 					}
 				};
@@ -104,8 +120,10 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 						res.additional_infos
 							.get_or_insert_with(HashMap::new)
 							.entry("Count".to_string())
-							.or_insert_with(Vec::new)
-							.push(format!("Failed to extract number from line {}: {:?}", i, t));
+							.or_insert(format!(
+								"Failed to extract number from line {}: {:?}",
+								i, t
+							));
 						return;
 					}
 				};
@@ -114,8 +132,7 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 					res.additional_infos
 						.get_or_insert_with(HashMap::new)
 						.entry("Count".to_string())
-						.or_insert_with(Vec::new)
-						.push(format!("Expected: {}, Got: {}", t_count, s_count));
+						.or_insert(format!("Expected: <{}>, Got: <{}>", t_count, s_count));
 				} else {
 					res.additional_status = Some(suite::test_suite::AdditionalStatus::Full);
 				}
@@ -125,8 +142,7 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 				res.infos
 					.get_or_insert_with(HashMap::new)
 					.entry("Extra Lines".to_string())
-					.or_insert_with(Vec::new)
-					.push(format!("Extra line: {}", s_line));
+					.or_insert(format!("Extra line: {}", s_line));
 			}
 		});
 	res
