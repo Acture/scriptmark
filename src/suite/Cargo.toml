@@ -5,3 +5,4 @@ edition = "2021"
 
 [dependencies]
 typed-builder = "0.20.0"
+util.workspace = true

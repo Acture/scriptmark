@@ -1,162 +1,145 @@
 use runner;
+use std::any::Any;
+use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
+use suite::test_suite::{TestResult, TestSuiteTrait};
 
-pub fn run<P: AsRef<Path>>(python_code_path: P, test_inputs: &[f64]) -> Vec<String> {
-	let code = std::fs::read_to_string(python_code_path).expect("读取文件失败");
+static SOLUTION_CODE: &str = include_str!("solutions/circle_area.py");
 
-	test_inputs
-		.iter()
-		.map(|input| {
-			runner::python::run_code(
-				&code,
-				Some(&input.to_string()),
-				Some(&[&"math".to_string()]),
-			)
-		})
-		.collect()
+pub fn get_answer(input: f64) -> String {
+	runner::python::run_code(SOLUTION_CODE, Some(&input.to_string()), None)
+}
+pub fn get_test_suite() -> Box<dyn TestSuiteTrait> {
+	let test_inputs = util::generate(42, 20, 0.0, 100.0);
+	let test_inputs_clone = test_inputs.clone();
+	let answers: Vec<_> = test_inputs.iter().map(|input| get_answer(*input)).collect();
+	let runner = move |path: &Path| {
+		if !path.exists() {
+			panic!("Test file not found: {}", path.display());
+		}
+		let content = fs::read_to_string(&path).expect("Failed to read file");
+		let test_inputs_cloned = test_inputs.clone();
+		test_inputs_cloned
+			.into_iter()
+			.map(|input| runner::python::run_code(content.clone(), Some(input.to_string()), None))
+			.collect::<Vec<_>>()
+	};
+	let judge = |result: &[String], expected: &[String]| -> Vec<TestResult> {
+		result
+			.into_iter()
+			.zip(expected.into_iter())
+			.map(|(result, expected)| judge(result, expected))
+			.collect::<Vec<TestResult>>()
+	};
+	Box::new(suite::test_suite::TestSuite::new(
+		test_inputs_clone,
+		answers,
+		runner,
+		judge,
+	))
 }
 
-pub fn judge(
-	s: &str,
-	t: &str,
-) -> Result<(bool, Vec<runner::python::Message>), (bool, Vec<runner::python::Message>)> {
-	let s_lines: Vec<_> = s
-		.split("\n")
-		.filter(|line| !line.trim().is_empty())
-		.collect();
-	let t_lines: Vec<_> = t
-		.split("\n")
-		.filter(|line| !line.trim().is_empty())
-		.collect();
-	let required_s: f64 = s_lines
-		.get(0)
-		.ok_or_else(|| {
-			(
-				false,
-				vec![runner::python::Message::builder()
-					.title("Standard Line 0 Error".to_string())
-					.build()],
-			)
-		})?
-		.split(':')
-		.last()
-		.and_then(|s| s.trim().parse::<f64>().ok())
-		.ok_or_else(|| {
-			(
-				false,
-				vec![runner::python::Message::builder()
-					.title("Standard Parse Error".to_string())
-					.description(format!("The standard value is {}", s))
-					.build()],
-			)
-		})?;
-	let required_t: f64 = t_lines
-		.get(0)
-		.ok_or_else(|| {
-			(
-				false,
-				vec![runner::python::Message::builder()
-					.title("Tested Line 0 Error".to_string())
-					.build()],
-			)
-		})?
-		.split(':')
-		.last()
-		.and_then(|s| s.trim().parse::<f64>().ok())
-		.ok_or_else(|| {
-			(
-				false,
-				vec![runner::python::Message::builder()
-					.title("Tested Parse Error".to_string())
-					.description(format!(
-						"The tested value is {}. Expected {}",
-						t, required_s
-					))
-					.build()],
-			)
-		})?;
-
-	let passed;
-	let mut messages = Vec::new();
-
-	if required_s != required_t {
-		let diff = ((required_s - required_t) / required_s).abs() * 100.0;
-		if diff < 1.0 {
-			let mut message = runner::python::Message::builder()
-				.title("Small Value Difference".to_string())
-				.build();
-			message
-				.description
-				.push_str(format!("The difference is {} %", diff).as_str());
-			passed = true;
-			messages.push(message);
-		} else {
-			passed = false;
-			let mut message = runner::python::Message::builder()
-				.title("Value Difference".to_string())
-				.build();
-			message
-				.description
-				.push_str(format!("The difference is {} %", diff).as_str());
-			messages.push(message);
-		}
-	} else {
-		passed = true;
-	}
-
-	let additional_s = s_lines.get(1..).unwrap_or(&[]);
-	let additional_t = t_lines.get(1..).unwrap_or(&[]);
-
-	let mut additional_s = additional_s.iter();
-	let mut additional_t = additional_t.iter();
-
-	if additional_t.len() > 0 {
-		messages.push(
-            runner::python::Message::builder()
-				.title("完成选做".to_string())
-				.build(),
-		);
-		loop {
-			let s = additional_s.next();
-			let t = additional_t.next();
-			match (s, t) {
-				(Some(s), Some(t)) => {
-					if s != t {
-						messages.push(
-                            runner::python::Message::builder()
-								.title("Additional Output Difference".to_string())
-								.description(format!("Desired <{}>, Given <{}>", s, t))
-								.build(),
-						);
+pub fn judge(s: &str, t: &str) -> TestResult {
+	let mut res = TestResult::builder().build();
+	s.lines()
+		.zip(t.lines())
+		.enumerate()
+		.for_each(|(i, (s_line, t_line))| match i {
+			0 => {}
+			1 => {
+				let s_area = match util::extract_numbers::<f64>(s_line).pop() {
+					Some(value) => value,
+					None => {
+						res.passed = false;
+						res.infos
+							.get_or_insert_with(HashMap::new)
+							.entry("Area".to_string())
+							.or_insert_with(Vec::new)
+							.push(format!("Failed to extract number from line {}: {:?}", i, s));
+						return;
 					}
+				};
+				let t_area = match util::extract_numbers::<f64>(t_line).pop() {
+					Some(value) => value,
+					None => {
+						res.passed = false;
+						res.infos
+							.get_or_insert_with(HashMap::new)
+							.entry("Area".to_string())
+							.or_insert_with(Vec::new)
+							.push(format!("Failed to extract number from line {}: {:?}", i, t));
+						return;
+					}
+				};
+				let offset_percent = 0.0001;
+				if (s_area - t_area).abs() > offset_percent * s_area {
+					res.passed = false;
+					res.infos
+						.get_or_insert_with(HashMap::new)
+						.entry("Area".to_string())
+						.or_insert_with(Vec::new)
+						.push(format!("Expected: {}, Got: {}", t_area, s_area));
+				} else {
+					res.passed = true;
 				}
-				(Some(s), None) => {
-					messages.push(
-                        runner::python::Message::builder()
-							.title("Additional Output Difference".to_string())
-							.description(format!("Desired <{}>, Given <{}>", s, ""))
-							.build(),
-					);
-				}
-				(None, Some(t)) => {
-					messages.push(
-                        runner::python::Message::builder()
-							.title("Additional Output Difference".to_string())
-							.description(format!("Desired <{}>, Given <{}>", "", t))
-							.build(),
-					);
-				}
-				(None, None) => break,
 			}
-		}
-	} else {
-		messages.push(
-            runner::python::Message::builder()
-				.title("未完成选做".to_string())
-				.build(),
-		);
-	}
-
-	Ok((passed, messages))
+			2 => {
+				let s_count = match util::extract_numbers::<f64>(t_line).pop() {
+					Some(value) => value,
+					None => {
+						res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+						res.additional_infos
+							.get_or_insert_with(HashMap::new)
+							.entry("Count".to_string())
+							.or_insert_with(Vec::new)
+							.push(format!("Failed to extract number from line {}: {:?}", i, s));
+						return;
+					}
+				};
+				let t_count = match util::extract_numbers::<f64>(t_line).pop() {
+					Some(value) => value,
+					None => {
+						res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+						res.additional_infos
+							.get_or_insert_with(HashMap::new)
+							.entry("Count".to_string())
+							.or_insert_with(Vec::new)
+							.push(format!("Failed to extract number from line {}: {:?}", i, t));
+						return;
+					}
+				};
+				if s_count != t_count {
+					res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+					res.additional_infos
+						.get_or_insert_with(HashMap::new)
+						.entry("Count".to_string())
+						.or_insert_with(Vec::new)
+						.push(format!("Expected: {}, Got: {}", t_count, s_count));
+				} else {
+					res.additional_status = Some(suite::test_suite::AdditionalStatus::Full);
+				}
+			}
+			_ => {
+				res.passed = false;
+				res.infos
+					.get_or_insert_with(HashMap::new)
+					.entry("Extra Lines".to_string())
+					.or_insert_with(Vec::new)
+					.push(format!("Extra line: {}", s_line));
+			}
+		});
+	res
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_get_answer() {
+		let input = 3.14;
+		let answer = get_answer(input);
+		assert_eq!(answer, "3.141592653589793");
+	}
+}
