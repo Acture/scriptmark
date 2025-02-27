@@ -43,8 +43,7 @@ fn judge_results<'a, 'b>(answer: &'a String, to_test: &'b String) -> TestResult 
 			res.infos
 				.get_or_insert_with(HashMap::new)
 				.entry("Value Diff".to_string())
-				.or_insert_with(Vec::new)
-				.push(format!(
+				.or_insert(format!(
 					"Expected <{}>, Failed to find in <{:?}>",
 					a_num, b_nums
 				));
