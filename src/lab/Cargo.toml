@@ -9,3 +9,4 @@ suite.workspace = true
 util.workspace = true
 lazy_static = "1.5.0"
 log = "0.4.26"
+pyo3.workspace = true
