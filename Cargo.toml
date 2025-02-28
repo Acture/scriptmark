@@ -10,4 +10,5 @@ runner = { path = "src/runner" }
 suite = { path = "src/suite" }
 grader = { path = "src/grader" }
 util = { path = "src/util" }
+pyo3 = { version = "0.23.5", features = ["auto-initialize"] }
 
