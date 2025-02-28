@@ -49,6 +49,7 @@ pub fn judge(s: &str, t: &str) -> TestResult {
 			0 => {
 				let s_extracted = util::extract_numbers::<f64>(s_line);
 				let t_extracted = util::extract_numbers::<f64>(t_line);
+
 				if s_extracted.len() != 1 || t_extracted.len() != 1 {
 					res.infos
 						.get_or_insert_with(HashMap::new)

@@ -57,23 +57,26 @@ fn select_assignment(selected_class: &class::Class) {
 				let selected_assignment_name = &assignment_options[selected_index];
 				info!("所选作业：{}", selected_assignment_name);
 
-				let submission_map =
+				let (submission_map, submission_hash_map) =
 					check::check_assignment(selected_class, selected_assignment_name);
-				select_submission(&submission_map);
+				select_submission(&submission_map, &submission_hash_map);
 			}
 		}
 	}
 }
 
-fn select_submission(results: &HashMap<Student, Vec<TestResult>>) {
-	let results_keys = results
+fn select_submission(
+	submissions: &HashMap<Student, Vec<TestResult>>,
+	_hash_map: &HashMap<u64, Vec<Student>>,
+) {
+	let results_keys = submissions
 		.keys()
 		.sorted_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id))
 		.collect::<Vec<_>>();
 	let record_options = results_keys
 		.iter()
 		.map(|student| -> std::string::String {
-			let record = results.get(student).expect("Failed to get test result");
+			let record = submissions.get(student).expect("Failed to get test result");
 			let pass_count = record.iter().filter(|r| r.passed).count();
 			let info_count = record.iter().filter(|r| r.infos.is_some()).count();
 			let add_info_count = record.iter().filter(|r| r.infos.is_some()).count();
@@ -101,13 +104,40 @@ fn select_submission(results: &HashMap<Student, Vec<TestResult>>) {
 					})
 			};
 
+			let hash_collision_status =
+				if _hash_map
+					.iter()
+					.filter(|(_, v)| v.len() > 1)
+					.any(|(hash, same_hash_students)| {
+						same_hash_students
+							.iter()
+							.any(|same_hash_student| *student == same_hash_student)
+					})
+				{
+					true
+				} else {
+					false
+				};
+
 			format!(
-				"{:<10}\t{:<10}\t{:>2}/{:>}\t{}\t{:>2} infos\t{:>2} add_infos",
+				"{:<10}\t{:<10}\t{:<4}\t{:>4}\t{:>2}/{:>2}\t{:<5}\t{:>2} infos\t{:>2} add_infos",
 				student.name,
 				student.sis_login_id,
+				match record.is_empty() {
+					true => "未提交",
+					false => "已提交",
+				},
+                match hash_collision_status {
+                    true => "冲突",
+                    false => "无冲突",
+                },
 				pass_count,
 				record.len(),
-				additional_status.to_string(),
+				match additional_status {
+					AdditionalStatus::None => "未完成附加",
+					AdditionalStatus::Partial => "尝试附加",
+					AdditionalStatus::Full => "完成附加",
+				},
 				info_count,
 				add_info_count,
 			)
@@ -125,7 +155,9 @@ fn select_submission(results: &HashMap<Student, Vec<TestResult>>) {
 			"返回" => return,
 			"退出" => exit(0),
 			_ => {
-				let selected_record = results.get(results_keys[selected_record_index]).unwrap();
+				let selected_record = submissions
+					.get(results_keys[selected_record_index])
+					.unwrap();
 				select_detail(selected_record)
 			}
 		}
@@ -137,16 +169,24 @@ fn select_detail(selected_record: &[TestResult]) {
 		.iter()
 		.flat_map(|result| {
 			let info_keys = if let Some(infos) = &result.infos {
-				infos.iter().map(|(k, v)| format!("{}: {}", k, v)).collect::<Vec<String>>()
+				infos
+					.iter()
+					.map(|(k, v)| format!("{}: {}", k, v))
+					.collect::<Vec<String>>()
 			} else {
 				Vec::new()
-			}.into_iter();
+			}
+			.into_iter();
 
 			let additional_keys = if let Some(additional_infos) = &result.additional_infos {
-				additional_infos.iter().map(|(k, v)| format!("{}: {}", k, v)).collect::<Vec<String>>()
+				additional_infos
+					.iter()
+					.map(|(k, v)| format!("{}: {}", k, v))
+					.collect::<Vec<String>>()
 			} else {
 				Vec::new()
-			}.into_iter();
+			}
+			.into_iter();
 
 			info_keys.chain(additional_keys).collect::<Vec<_>>()
 		})
