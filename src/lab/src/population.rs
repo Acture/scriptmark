@@ -33,20 +33,40 @@ fn judge_results<'a, 'b>(answer: &'a String, to_test: &'b String) -> TestResult 
 			.split(" ")
 			.last()
 			.expect("Failed to get last element")
-			.parse::<i64>()
+			.parse::<f64>()
 			.expect("Failed to parse");
 
-		let b_nums = util::extract_numbers::<i64>(b);
+		let b_nums = util::extract_numbers::<f64>(b);
+		if b_nums.len() > 2 {
+			res.passed = false;
+			res.infos
+				.get_or_insert_with(HashMap::new)
+				.entry("More Than Two Number".to_string())
+				.or_insert(format!("Expected: <{}>, Got: <{}>", answer, to_test));
+			continue;
+		}
 
-		if !b_nums.iter().any(|b_num| a_num == *b_num) {
+		if b_nums.len() == 0 {
+			res.passed = false;
+			res.infos
+				.get_or_insert_with(HashMap::new)
+				.entry("No Number".to_string())
+				.or_insert(format!("Expected: <{}>, Got: <{}>", answer, to_test));
+		}
+
+		let b_num = match b_nums.len() {
+			0 => continue,
+			1 => b_nums[0],
+			2 => b_nums[1],
+			_ => panic!("Invalid number count"),
+		};
+
+		if (a_num - b_num).abs() > 0.0001 * a_num {
 			res.passed = false;
 			res.infos
 				.get_or_insert_with(HashMap::new)
 				.entry("Value Diff".to_string())
-				.or_insert(format!(
-					"Expected <{}>, Failed to find in <{:?}>",
-					a_num, b_nums
-				));
+				.or_insert(format!("Expected <{}>, Got <{}>", a_num, b_num));
 		}
 	}
 	res
@@ -63,10 +83,21 @@ pub fn get_test_suite() -> Box<dyn suite::test_suite::TestSuiteTrait> {
 		vec![runner::python::run_code(content, None, None)]
 	};
 	let judge = |result: &[String], expected: &[String]| -> Vec<TestResult> {
-		result
-			.iter()
-			.zip(expected.iter())
-			.map(|(result, expected)| judge_results(expected, result))
+		let result_one = result.first().expect("Failed to get result");
+		let expected_one = expected.first().expect("Failed to get expected");
+		if result_one.lines().count() != expected_one.lines().count() {
+			return vec![TestResult::builder()
+				.passed(false)
+				.infos(Some(HashMap::from_iter(vec![(
+					String::from("Line Count"),
+					format!("Expected: <{}>, Got: <{}>", expected_one, result_one),
+				)])))
+				.build()]; // You might be missing the .build() call here
+		}
+		result_one
+			.lines()
+			.zip(expected_one.lines())
+			.map(|(result, expected)| judge_results(&expected.to_string(), &result.to_string()))
 			.collect()
 	};
 

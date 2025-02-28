@@ -16,4 +16,4 @@ for i in range(5):
 	# emigration
 	current_pop -= secs_per_year // 79
 
-	print(i + 1, current_pop)
+	print(current_pop)
