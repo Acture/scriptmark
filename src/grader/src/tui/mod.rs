@@ -52,7 +52,7 @@ fn select_assignment(selected_class: &class::Class) {
 
 		match assignment_options[selected_index] {
 			"退出" => exit(0),
-            "返回" => return,
+			"返回" => return,
 			_ => {
 				let selected_assignment_name = &assignment_options[selected_index];
 				info!("所选作业：{}", selected_assignment_name);
@@ -79,7 +79,10 @@ fn select_submission(
 			let record = submissions.get(student).expect("Failed to get test result");
 			let pass_count = record.iter().filter(|r| r.passed).count();
 			let info_count = record.iter().filter(|r| r.infos.is_some()).count();
-			let add_info_count = record.iter().filter(|r| r.infos.is_some()).count();
+			let add_info_count = record
+				.iter()
+				.filter(|r| r.additional_infos.is_some())
+				.count();
 
 			let additional_status = if record.is_empty() {
 				AdditionalStatus::None
@@ -162,34 +165,32 @@ fn select_submission(
 }
 
 fn select_detail(selected_record: &[TestResult]) {
-	let result_options = selected_record
-		.iter()
-		.flat_map(|result| {
-			let info_keys = if let Some(infos) = &result.infos {
-				infos
-					.iter()
-					.map(|(k, v)| format!("{}: {}", k, v))
-					.collect::<Vec<String>>()
-			} else {
-				Vec::new()
-			}
-			.into_iter();
+    let mut result_options = Vec::new();
+    let mut result_values = Vec::new();
 
-			let additional_keys = if let Some(additional_infos) = &result.additional_infos {
-				additional_infos
-					.iter()
-					.map(|(k, v)| format!("{}: {}", k, v))
-					.collect::<Vec<String>>()
-			} else {
-				Vec::new()
-			}
-			.into_iter();
+    // 遍历处理每个测试结果
+    for (i, result) in selected_record.iter().enumerate() {
+        // 处理普通信息
+        if let Some(infos) = &result.infos {
+            for (k, v) in infos.iter() {
+                result_options.push(format!("{}: {}", i, k));
+                result_values.push(v.to_string());
+            }
+        }
 
-			info_keys.chain(additional_keys).collect::<Vec<_>>()
-		})
-		.chain(std::iter::once("返回".to_string()))
-		.chain(std::iter::once("退出".to_string()))
-		.collect::<Vec<_>>();
+        // 处理附加信息
+        if let Some(additional_infos) = &result.additional_infos {
+            for (k, v) in additional_infos.iter() {
+                result_options.push(format!("{}: {}", i, k));
+                result_values.push(v.to_string());
+            }
+        }
+    }
+
+    // 添加返回和退出选项
+    result_options.push("返回".to_string());
+    result_options.push("退出".to_string());
+
 
 	loop {
 		let selected_result_index = FuzzySelect::new()
@@ -205,7 +206,8 @@ fn select_detail(selected_record: &[TestResult]) {
 			"返回" => return,
 			"退出" => exit(0),
 			_ => {
-				info!("Result: {:?}", selected_record[selected_result_index]);
+                let selected_result_value = &result_values[selected_result_index];
+                info!("{}: {}", selected_result_keys, selected_result_value);
 			}
 		}
 	}
