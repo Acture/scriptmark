@@ -21,6 +21,7 @@ pub fn generate<T: uniform::SampleUniform + std::cmp::PartialOrd + Clone>(
         .collect()
 }
 
+
 fn calculate_hash(s: &str) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};

@@ -94,13 +94,14 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::defines::class::Class;
-    use std::path::PathBuf;
+    use std::path;
 
     #[test]
     fn test_load_student() {
-        let config = Config::builder().build();
-        assert_eq!(config.data_dir, PathBuf::from("./data"));
-        let classes = Class::load_class("./data");
+        let config = Config::builder()
+            .data_dir(path::Path::new("../../data").to_path_buf())
+            .build();
+        let classes = Class::load_class(&config.data_dir);
         classes.iter().for_each(|class| {
             let students = Student::load_from_roster(class.roster_path());
             let test_student = students.iter().find(|s| s.name == "测验学生");

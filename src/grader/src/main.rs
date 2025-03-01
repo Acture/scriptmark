@@ -1,8 +1,7 @@
 use crate::defines::class::Class;
 use env_logger;
-use lab;
 use lazy_static::lazy_static;
-use log::{info, log};
+use log::{info};
 use std::env;
 mod check;
 mod config;

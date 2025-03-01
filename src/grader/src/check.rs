@@ -2,10 +2,7 @@ use crate::defines::class;
 use crate::defines::student::Student;
 use lab::TestSuiteType;
 use log::warn;
-use runner;
-use std::any::Any;
 use std::collections::HashMap;
-use suite::test_suite;
 use suite::test_suite::TestResult;
 use util;
 
@@ -21,7 +18,7 @@ pub fn check_assignment(
 
     let select_assignment_type = TestSuiteType::from_endwith(selected_assignment_name);
 
-    let solution_map = lab::get_solution_map();
+    let solution_map = &lab::TEST_SUITE_MAP  ;
     let test_suite = solution_map
         .get(&select_assignment_type)
         .expect("未找到测试套件");
@@ -55,10 +52,10 @@ pub fn check_assignment(
                 .entry(file_hash)
                 .or_insert_with(Vec::new)
                 .push(student.clone());
-            let result = test_suite.run(file);
-            let answer = test_suite.get_answer();
+            let result = test_suite.run_any(file);
+            let answer = test_suite.get_answer_any();
 
-            (student.clone(), test_suite.judge(&result, &answer))
+            (student.clone(), test_suite.judge_any(&result, &answer))
         })
         .collect::<HashMap<Student, Vec<TestResult>>>();
     (assignments, hash_map)

@@ -5,7 +5,6 @@ use dialoguer::{FuzzySelect, Select};
 use itertools::Itertools;
 use log::info;
 use std::collections::HashMap;
-use std::os::macos::raw::stat;
 use std::process::exit;
 use std::string::String;
 use suite::test_suite::{AdditionalStatus, TestResult};
@@ -105,7 +104,7 @@ fn select_submission(
             };
 
             let hash_collision_status = if _hash_map.iter().filter(|(_, v)| v.len() > 1).any(
-                |(hash, same_hash_students)| {
+                |(_hash, same_hash_students)| {
                     same_hash_students
                         .iter()
                         .any(|same_hash_student| *student == same_hash_student)
