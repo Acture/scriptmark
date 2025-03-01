@@ -288,7 +288,7 @@ mod tests {
 
 		let data = suite.get_data();
 		let trait_data = trait_object.get_data();
-		let object_data = object.get_data_any();
+		let _object_data = object.get_data_any();
 		let fake_test = Box::new(suite.get_answer()) as Box<dyn Any>;
 		let answer = Box::new(suite.get_answer()) as Box<dyn Any>;
 
