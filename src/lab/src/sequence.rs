@@ -1,38 +1,107 @@
 use runner;
+use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
+use suite::define_test_suite;
 
 const SOLUTION_CODE: &str = include_str!("solutions/sequence.py");
 
-fn get_answer() -> Vec<String> {
-	let (_output, trace) = runner::python::run_code_with_trace(SOLUTION_CODE, None, None);
-	let mut res = trace.iter().collect::<Vec<_>>();
-	res.sort_by_key(|(k, _v)| *k);
-	res.into_iter().filter_map(|(_k, v_map)| {
-		if v_map.len() > 1 {
-			let mut v_vec = v_map.iter().collect::<Vec<_>>();
-			v_vec.sort_by_key(|(k, _v)| *k);
-			v_vec.iter().map(|(k, v)| format!("{}: {}", k, v)).collect::<Vec<_>>().join(" ").into()
-		} else {
-			None
+type InputType = Option<()>;
+type OutputType = Vec<HashMap<String, Vec<i64>>>;
+
+fn get_answer() -> OutputType {
+	let result = runner::python::run_code_with_trace::<String, Vec<i64>>(SOLUTION_CODE, None::<&String>, None::<&[String]>);
+
+	match result {
+		Ok((_output, trace)) => {
+			let mut t = trace.into_iter().collect::<Vec<_>>();
+			t.sort_by_key(|x| x.0);
+			t.into_iter()
+				.filter_map(|(_, output)| {
+					if output.is_empty() {
+						None
+					} else {
+						Some(output)
+					}
+				})
+				.collect::<Vec<_>>()
 		}
-	})
+
+		Err(e) => panic!("Failed to get answer: {:?}", e),
+	}
+}
+
+fn runner_fn(path: &Path) -> OutputType {
+	if !path.exists() {
+		panic!("Test file not found: {}", path.display());
+	}
+	let content = fs::read_to_string(path).expect("Failed to read file");
+	let res = runner::python::run_code_with_trace::<String, Vec<i64>>(content, None::<&String>, None::<&[String]>);
+	match res {
+		Ok((_output, trace)) => {
+			let mut t = trace.into_iter().collect::<Vec<_>>();
+			t.sort_by_key(|x| x.0);
+			t.into_iter()
+				.filter_map(|(_, output)| {
+					if output.is_empty() {
+						None
+					} else {
+						Some(output)
+					}
+				})
+				.collect::<Vec<_>>()
+		}
+		Err(e) => panic!("Failed to run code: {:?}", e),
+	}
+}
+
+fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<suite::test_suite::TestResult> {
+	_result
+		.iter()
+		.zip(_answer.iter())
+		.map(|(result, answer)| {
+			if result.len() != answer.len() {
+				return suite::test_suite::TestResult::builder()
+					.passed(false)
+					.infos(Some(HashMap::from_iter(vec![(
+						String::from("Length"),
+						format!("Expected: <{:?}>, Got: <{:?}>", answer, result),
+					)])))
+					.build();
+			}
+			for (r, a) in result.iter().zip(answer.iter()) {
+				if r != a {
+					return suite::test_suite::TestResult::builder()
+						.passed(false)
+						.infos(Some(HashMap::from_iter(vec![(
+							String::from("Output"),
+							format!("Expected: <{:?}>, Got: <{:?}>", a, r),
+						)])))
+						.build();
+				}
+			}
+			suite::test_suite::TestResult::builder()
+				.passed(true)
+				.build()
+		})
 		.collect()
 }
 
-// lazy_static!(
-// 	static ref ANSWERS: Vec<String> = get_answer();
-// 	pub static ref SEQUENCE_TEST_SUITE: suite::test_suite::TestSuite<
-// 		Vec<String>,
-// 		Vec<String>,
-// 		for<'a> fn(&'a std::path::Path) -> Vec<String>,
-// 		for<'a, 'b> fn(&'a Vec<String>, &'b Vec<String>) -> Vec<suite::test_suite::TestResult>,
-// 	> = suite::test_suite::TestSuite::builder()
-// 		.inputs(Vec::new())
-// 		.answers(ANSWERS.to_vec())
-// 		.runner(RUNNER_FUNC as fn(&std::path::Path) -> Vec<String>)
-// 		.judge(JUDGE_FUNC as fn(&Vec<String>, &Vec<String>) -> Vec<suite::test_suite::TestResult>)
-// 		.build();
-// )
-
+define_test_suite!(
+	pub name = SEQUENCE_TEST_SUITE,
+	inputs = {
+		type = InputType,
+		init = None::<()>,
+		clone = |x: & InputType| *x
+	},
+	answers = {
+		type = OutputType,
+		init = get_answer(),
+		clone = |x: &OutputType| x.clone()
+	},
+	runner = runner_fn,
+	judge = judge_fn
+);
 
 #[cfg(test)]
 mod tests {
@@ -41,6 +110,9 @@ mod tests {
 	#[test]
 	fn test_get_answer() {
 		let answer = get_answer();
-		assert_eq!(answer.len(), 2);
+		for a in &answer {
+			println!("{:?}", a);
+		}
+		assert_eq!(answer.len(), 3);
 	}
 }
