@@ -10,7 +10,7 @@ log = "0.4.26"
 typed-builder = "0.20.0"
 lab.workspace = true
 runner.workspace = true
-dialoguer = { version = "0.11.0", features=["fuzzy-select"] }
+dialoguer = { version = "0.11.0", features = ["fuzzy-select"] }
 itertools = "0.14.0"
 serde = { version = "1.0.218", features = ["derive"] }
 toml = "0.8.20"

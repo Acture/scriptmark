@@ -1,12 +1,11 @@
 use suite::define_test_suite;
-use lazy_static::lazy_static;
 use runner;
 use std::clone::Clone;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use suite;
-use suite::test_suite::{TestResult, TestSuite};
+use suite::test_suite::{TestResult};
 use util;
 
 const SOLUTION_CODE: &str = include_str!("solutions/population.py");
@@ -95,7 +94,10 @@ define_test_suite!(
 	},
 	answers = {
 		type = String,
-		init = runner::python::run_code(SOLUTION_CODE, None, None),
+		init = match runner::python::run_code(SOLUTION_CODE, None::<&String>, None::<&[String]>){
+			Ok(output) => output,
+			Err(e) => panic!("Failed to get answer: {:?}", e),
+		},
 		clone = |x: &String| x.clone()
 	},
 	runner = runner_fn,
@@ -107,7 +109,11 @@ fn runner_fn(path: &Path) -> String {
 		panic!("Test file not found: {}", path.display());
 	}
 	let content = fs::read_to_string(path).expect("Failed to read file");
-	runner::python::run_code(content, None, None)
+
+	match runner::python::run_code(content, None::<String>, None::<&[String]>) {
+		Ok(output) => output,
+		Err(e) => panic!("Failed to run code: {:?}", e),
+	}
 }
 
 fn judge_fn(result: &String, expected: &String) -> Vec<TestResult> {

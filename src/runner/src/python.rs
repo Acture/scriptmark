@@ -1,93 +1,47 @@
-use std::sync::mpsc;
-use std::fmt::Debug;
-use std::thread;
+use anyhow::anyhow;
+use anyhow::Result;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::Python;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::fmt::Debug;
+use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
 use typed_builder::TypedBuilder;
-
-pub fn run_code<S: AsRef<str> + Debug>(
-	code: S,
-	std_in: Option<S>,
-	libs_to_import: Option<&[S]>,
-) -> String {
-	let (tx, rx) = mpsc::channel();
-
-	// 克隆数据用于线程
-	let code_owned = code.as_ref().to_owned();
-	let std_in_owned = std_in.map(|s| s.as_ref().to_owned());
-	let libs_owned = libs_to_import.map(|libs|
-		libs.into_iter()
-			.map(|s| s.as_ref().to_owned())
-			.collect::<Vec<_>>()
-	);
-
-
-	let c_code = CString::new(code_owned).expect("Transform <Code> into CString Failed");
-	thread::spawn(move ||
-		{
-			let result = Python::with_gil(|py| {
-				let globals = PyDict::new(py);
-				globals
-					.set_item("__name__", "__main__")
-					.expect("Failed to set __name__ as __main__");
-				let sys = py.import("sys").expect("Failed to load sys");
-				let io = py.import("io").expect("Failed to load io");
-				if let Some(std_in_owned) = std_in_owned {
-					let args = (std_in_owned,);
-					let input = io
-						.call_method1("StringIO", args)
-						.expect("Failed to prepare input");
-					sys.setattr("stdin", &input).expect("Failed to set stdin");
-				}
-
-				if let Some(lib_names) = libs_owned {
-					for lib_name in lib_names {
-						let lib = py.import(&lib_name).expect("Failed to load lib");
-						globals
-							.set_item(
-								lib.getattr("__name__").expect(&format!(
-									"Failed to get __name__ for lib {:?}",
-									&lib_name
-								)),
-								lib,
-							)
-							.expect("Failed to set lib");
-					}
-				}
-
-				let output = io
-					.call_method0("StringIO")
-					.expect("Failed to prepare output");
-				sys.setattr("stdout", &output).expect("Failed to set io");
-				let res = py.run(c_code.as_c_str(), Some(&globals), Some(&globals));
-				match res {
-					Ok(_) => output
-						.getattr("getvalue")
-						.expect("Failed to getvalue")
-						.call0()
-						.expect("Failed to getvalue")
-						.extract::<String>()
-						.expect("Failed to getvalue"),
-					Err(e) => panic!("Failed to run code: {:?}", e),
-				}
-			});
-			tx.send(result).unwrap();
-
-		}
-	);
-	rx.recv().unwrap()
-}
 
 macro_rules! create_python_trace {
 	($code:expr) => {
 		r#"import sys
 
-trace_output = {}
-exclude_names = {"trace_output", "trace_func", "sys", "exclude_names"}
+trace_output = dict()
+exclude_names = set(["trace_output", "trace_func", "sys", "exclude_names", "is_basic_type_or_container"])
+
+def is_basic_type_or_container(v, depth=0, max_depth=3):
+	# 防止递归太深
+	if depth > max_depth:
+		return False
+
+	# 基本类型判断
+	if isinstance(v, (int, float, str, bool, type(None))):
+		return True
+
+	# 容器类型判断
+	if isinstance(v, (list, tuple)):
+		return all(is_basic_type_or_container(x, depth + 1, max_depth) for x in v)
+
+	if isinstance(v, dict):
+		return (all(isinstance(k, (str, int)) for k in v.keys()) and  # 键必须是字符串或整数
+				all(is_basic_type_or_container(val, depth + 1, max_depth) for val in v.values()))
+
+	if isinstance(v, set):
+		return all(is_basic_type_or_container(x, depth + 1, max_depth) for x in v)
+
+	# 排除模块和其他复杂类型
+	return False
+
 
 def trace_func(frame, event, arg):
     try:
@@ -95,8 +49,9 @@ def trace_func(frame, event, arg):
             if frame.f_code.co_filename == '<string>':
                 lineno = frame.f_lineno
                 local_vars = frame.f_locals.copy()
-                filtered_vars = {k: str(v) for k, v in local_vars.items() if not k.startswith('_') and k not in exclude_names}
-                trace_output[lineno] = filtered_vars
+                filtered_vars = {str(k): v for k, v in local_vars.items() if not k.startswith('_') and k not in exclude_names and is_basic_type_or_container(v)}
+                if filtered_vars:
+                    trace_output[lineno] = filtered_vars
     except Exception as e:
         trace_output.append(f"Trace error: {str(e)}")
     return trace_func
@@ -110,79 +65,208 @@ finally:
 "#
 	};
 }
+pub fn run_code<R>(
+	code: impl AsRef<str>,
+	std_in: Option<impl AsRef<str>>,
+	libs_to_import: Option<&[impl AsRef<str>]>,
+) -> Result<R>
+where
+	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+{
+	let (result, _) = run_code_internal::<R, Empty>(code, std_in, libs_to_import, false)?;
+	Ok(result)
+}
 
-pub fn run_code_with_trace<S: AsRef<str> + Debug + Send + Sync + 'static>(
-	code: S,
-	std_in: Option<S>,
-	libs_to_import: Option<&[S]>,
-) -> (String, HashMap<i64, HashMap<String, String>>) {
-	let wrapped_code = create_python_trace!(code.as_ref());
-	let c_code = CString::new(wrapped_code).expect("Transform <Code> into CString Failed");
-	Python::with_gil(|py| {
-		let globals = PyDict::new(py);
-		globals
-			.set_item("__name__", "__main__")
-			.expect("Failed to set __name__ as __main__");
-		let sys = py.import("sys").expect("Failed to load sys");
-		let io = py.import("io").expect("Failed to load io");
+#[derive(Debug)]
+struct Empty;
 
-		if let Some(std_in) = std_in {
-			let input = io
-				.call_method1("StringIO", (std_in.as_ref(),))
-				.expect("Failed to prepare input");
-			sys.setattr("stdin", &input).expect("Failed to set stdin");
-		}
+impl<'source> FromPyObject<'source> for Empty {
+	fn extract_bound(_ob: &pyo3::Bound<'source, pyo3::PyAny>) -> pyo3::PyResult<Self> {
+		Ok(Empty)
+	}
+}
 
-		// 创建跟踪输出列表
+pub fn run_code_with_trace<R, T>(
+	code: impl AsRef<str>,
+	std_in: Option<impl AsRef<str>>,
+	libs_to_import: Option<&[impl AsRef<str>]>,
+) -> Result<(R, HashMap<i64, HashMap<String, T>>)>
+where
+	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+	T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+{
+	let (result, trace) = run_code_internal(code, std_in, libs_to_import, true)?;
+	Ok((result, trace.expect("Trace should be enabled")))
+}
 
-		if let Some(lib_names) = libs_to_import {
-			for lib_name in lib_names {
-				let lib = py.import(lib_name.as_ref()).expect("Failed to load lib");
-				globals
-					.set_item(
-						lib.getattr("__name__").expect(&format!(
-							"Failed to get __name__ for lib {:?}",
-							lib_name.as_ref()
-						)),
-						lib,
-					)
-					.expect("Failed to set lib");
+fn run_code_internal<R, T>(
+	code: impl AsRef<str>,
+	std_in: Option<impl AsRef<str>>,
+	libs_to_import: Option<&[impl AsRef<str>]>,
+	enable_trace: bool,
+) -> Result<(R, Option<HashMap<i64, HashMap<String, T>>>)>
+where
+	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+	T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+{
+	let (tx, rx) = mpsc::channel();
+
+	// 克隆数据用于线程
+	let code_owned = code.as_ref().to_owned();
+	let std_in_owned = std_in.map(|s| s.as_ref().to_owned());
+	let libs_owned = libs_to_import.map(|libs| {
+		libs.iter()
+			.map(|s| s.as_ref().to_owned())
+			.collect::<Vec<_>>()
+	});
+
+	let wrapped_code = if enable_trace {
+		create_python_trace!(&code_owned) // 插入 trace 变量
+	} else {
+		code_owned
+	};
+
+	let c_code = CString::new(wrapped_code)
+		.map_err(|e| anyhow!("Transform <Code> into CString Failed: {:?}", e))?;
+
+	let flush_code = CString::new("import sys; sys.stdout.flush(); sys.stderr.flush()")
+		.expect("Failed to transform <Code> into CString");
+
+	thread::spawn(move || {
+		let result: Result<(
+			Result<R, anyhow::Error>,
+			Option<Result<HashMap<i64, HashMap<String, T>>>>,
+		)> = Python::with_gil(|py| {
+			let globals = PyDict::new(py);
+			globals
+				.set_item("__name__", "__main__")
+				.map_err(|e| anyhow!("Failed to set __name__ as __main__: {:?}", e))?;
+			py.run(&flush_code, None, Some(&globals))
+				.expect("Failed to flush Python stdout/stderr");
+
+			let sys = py
+				.import("sys")
+				.map_err(|e| anyhow!("Failed to load sys: {:?}", e))?;
+			let io = py
+				.import("io")
+				.map_err(|e| anyhow!("Failed to load io: {:?}", e))?;
+
+			let original_stdin = sys.getattr("stdin")?;
+
+			// 设置 stdin
+			if let Some(std_in) = &std_in_owned {
+				let input = io
+					.call_method1("StringIO", (std_in,))
+					.map_err(|e| anyhow!("Failed to prepare input: {:?}", e))?;
+				sys.setattr("stdin", &input).expect("Failed to set stdin");
 			}
-		}
 
-		let output = io
-			.call_method0("StringIO")
-			.expect("Failed to prepare output");
-		sys.setattr("stdout", &output).expect("Failed to set io");
-		sys.call_method1("settrace", (py.None(),))
-			.expect("Failed to settrace");
-		let res = py.run(c_code.as_c_str(), Some(&globals), Some(&globals));
+			// 导入库
+			if let Some(lib_names) = &libs_owned {
+				for lib_name in lib_names {
+					let lib = py
+						.import(lib_name)
+						.map_err(|e| anyhow!("Failed to load lib: {:?}", e))?;
+					globals
+						.set_item(lib_name.as_str(), lib)
+						.map_err(|e| anyhow!("Failed to set lib: {:?}", e))?;
+				}
+			}
 
-		let output = match res {
-			Ok(_) => output
+			let original_stdout = sys.getattr("stdout")?;
+
+			let output = io
+				.call_method0("StringIO")
+				.map_err(|e| anyhow!("Failed to prepare output: {:?}", e))?;
+			sys.setattr("stdout", &output)
+				.map_err(|e| anyhow!("Failed to set stdout: {:?}", e))?;
+
+			if enable_trace {
+				sys.call_method1("settrace", (py.None(),))
+					.map_err(|e| anyhow!("Failed to settrace: {:?}", e))?;
+			}
+
+			py.run(c_code.as_c_str(), Some(&globals), Some(&globals))
+				.map_err(|e| anyhow!("Failed to run code: {:?}", e))?;
+
+			let output = output
 				.getattr("getvalue")
 				.expect("Failed to getvalue")
 				.call0()
 				.expect("Failed to getvalue")
-				.extract::<String>()
-				.expect("Failed to getvalue"),
-			Err(e) => e.to_string(),
-		};
-		println!("{}", output);
-		// 获取变量跟踪日志
-		let trace_output = match globals.get_item("trace_output") {
-			Ok(trace_list) => trace_list
-				.expect("Failed to get trace_list")
-				.extract::<HashMap<i64, HashMap<String, String>>>()
-				.expect("Failed to extact trace_list"),
-			Err(e) => {
-				println!("Failed to get trace_output: {:?}", e);
-				HashMap::new()
-			}
-		};
+				.extract::<R>()
+				.map_err(|e| anyhow!("Failed to extract output: {:?}", e));
 
-		(output, trace_output)
-	})
+			// 获取 trace 输出
+			let trace_output = if enable_trace {
+				match globals.get_item("trace_output") {
+					Ok(Some(trace_obj)) => {
+						let trace_obj = trace_obj
+							.extract::<HashMap<i64, HashMap<String, T>>>()
+							.map_err(|e| anyhow!("Failed to extract trace_output: {:?}", e));
+						Some(trace_obj)
+					}
+					_ => Some(Err(anyhow!("Failed to get trace_output"))),
+				}
+			} else {
+				None
+			};
+
+			// 恢复 stdin
+			sys.setattr("stdin", original_stdin)
+				.expect("Failed to restore stdin");
+			sys.setattr("stdout", original_stdout)
+				.expect("Failed to restore stdout");
+
+			Ok((output, trace_output))
+		});
+
+		tx.send(result).unwrap();
+	});
+
+	// 处理 `recv()`
+	match rx.recv() {
+		Ok(Ok((output, trace))) => Ok((
+			output.map_err(|e| anyhow!(e))?,
+			match trace {
+				Some(trace) => Some(trace.map_err(|e| anyhow!(e))?),
+				None => None,
+			},
+		)),
+		Ok(Err(e)) => Err(anyhow!(e)),
+		Err(e) => Err(anyhow!(e)),
+	}
+}
+
+pub fn run_from_file<R>(
+	code_path: impl AsRef<Path>,
+	std_in: Option<impl AsRef<str>>,
+	libs_to_import: Option<&[impl AsRef<str>]>,
+) -> Result<R>
+where
+	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+{
+	let code = std::fs::read_to_string(code_path.as_ref())
+		.map_err(|e| anyhow!("Failed to read file: {:?}", e))?;
+
+	let (res, _) = run_code_internal::<R, Empty>(code, std_in, libs_to_import, false)?;
+	Ok(res)
+}
+
+pub fn run_from_file_with_trace<R, T>(
+	code_path: impl AsRef<Path>,
+	std_in: Option<impl AsRef<str>>,
+	libs_to_import: Option<&[impl AsRef<str>]>,
+) -> Result<(R, HashMap<i64, HashMap<String, T>>)>
+where
+	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+	T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+{
+	let code = std::fs::read_to_string(code_path.as_ref())
+		.map_err(|e| anyhow!("Failed to read file: {:?}", e))?;
+
+	let (res, trace) = run_code_internal(code, std_in, libs_to_import, true)?;
+	Ok((res, trace.expect("Trace should be enabled")))
 }
 
 #[cfg(test)]
@@ -195,8 +279,11 @@ mod tests {
 import sys
 t = input()
 print(t)"#;
-		let res = run_code(code, Some("test"), Some(&["math"]));
-		assert_eq!(res, "test\n");
+		let res: Result<String, anyhow::Error> = run_code(code, Some("test"), Some(&["math"]));
+		match res {
+			Ok(output) => assert_eq!(output, "test\n"),
+			Err(e) => panic!("Failed to run code: {:?}", e),
+		}
 	}
 
 	#[test]
@@ -207,9 +294,15 @@ b = a[21::2]
 b.append(123)
 b.extend(list(range(200, 301, 2)))
 "#;
-		let (res, trace) = run_code_with_trace(code, None, None);
-		println!("{}", res);
-		println!("{:?}", trace);
+		let res = run_code_with_trace::<String, Vec<i64>>(code, None::<String>, None::<&[String]>);
+		match res {
+			Ok((output, trace)) => {
+				assert_eq!(output, "");
+				assert_eq!(trace.len(), 3);
+				println!("{:?}", trace);
+			}
+			Err(e) => panic!("Failed to run code: {:?}", e),
+		}
 	}
 }
 

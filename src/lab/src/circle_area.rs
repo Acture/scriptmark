@@ -1,15 +1,21 @@
-use suite::define_test_suite;
-use lazy_static::lazy_static;
 use runner;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::test_suite::{TestResult, TestSuite};
+use suite::define_test_suite;
+use suite::test_suite::TestResult;
 
 const SOLUTION_CODE: &str = include_str!("solutions/circle_area.py");
 
 pub fn get_answer(input: f64) -> String {
-	runner::python::run_code(SOLUTION_CODE, Some(&input.to_string()), None)
+	match runner::python::run_code::<String>(
+		SOLUTION_CODE,
+		Some(&input.to_string()),
+		None::<&[String]>,
+	) {
+		Ok(output) => output,
+		Err(e) => panic!("Failed to get answer: {:?}", e),
+	}
 }
 
 // lazy_static! {
@@ -47,10 +53,6 @@ define_test_suite!(
 	judge = judge_fn
 );
 
-
-
-
-
 fn runner_fn(path: &Path) -> Vec<String> {
 	if !path.exists() {
 		panic!("Test file not found: {}", path.display());
@@ -58,7 +60,16 @@ fn runner_fn(path: &Path) -> Vec<String> {
 	let content = fs::read_to_string(&path).expect("Failed to read file");
 	INPUTS
 		.iter()
-		.map(|input| runner::python::run_code(content.clone(), Some(input.to_string()), None))
+		.map(|input| {
+			match runner::python::run_code(
+				content.clone(),
+				Some(input.to_string()),
+				None::<&[String]>,
+			) {
+				Ok(output) => output,
+				Err(e) => panic!("Failed to run code: {:?}", e),
+			}
+		})
 		.collect::<Vec<_>>()
 }
 
