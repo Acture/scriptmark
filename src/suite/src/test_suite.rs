@@ -51,7 +51,9 @@ pub trait TestSuiteTrait {
 }
 
 pub trait TestSuiteObject: Any + Send + Sync {
-	fn get_data(&self) -> Box<dyn Any>;
+	fn get_input_type(&self) -> &'static str;
+	fn get_output_type(&self) -> &'static str;
+	fn get_data_any(&self) -> Box<dyn Any>;
 	fn get_answer_any(&self) -> Box<dyn Any>;
 	fn run_any(&self, path: &Path) -> Box<dyn Any>;
 	fn judge_any(&self, result: &dyn Any, expected: &dyn Any) -> Vec<TestResult>;
@@ -59,11 +61,18 @@ pub trait TestSuiteObject: Any + Send + Sync {
 
 impl<T> TestSuiteObject for T
 where
-	T: TestSuiteTrait + Send + Sync + 'static,  // 约束 T 必须实现 TestSuiteTrait
-	T::Input: 'static,  // 确保 Input 可以转换为 Box<dyn Any>
-	T::Output: 'static, // 确保 Output 可以转换为 Box<dyn Any>
+	T: TestSuiteTrait + Send + Sync + 'static, // 约束 T 必须实现 TestSuiteTrait
+	T::Input: 'static,                         // 确保 Input 可以转换为 Box<dyn Any>
+	T::Output: 'static,                        // 确保 Output 可以转换为 Box<dyn Any>
 {
-	fn get_data(&self) -> Box<dyn Any> {
+	fn get_input_type(&self) -> &'static str {
+		std::any::type_name::<T::Input>()
+	}
+
+	fn get_output_type(&self) -> &'static str {
+		std::any::type_name::<T::Output>()
+	}
+	fn get_data_any(&self) -> Box<dyn Any> {
 		let data = <T as TestSuiteTrait>::get_data(self);
 		Box::new(data)
 	}
@@ -209,4 +218,86 @@ macro_rules! define_test_suite {
 	};
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
 
+	#[test]
+	fn test_additional_status() {
+		let status = AdditionalStatus::None;
+		assert_eq!(status.to_string(), "None");
+		assert_eq!(AdditionalStatus::from_string("None"), status);
+	}
+
+	#[test]
+	fn test_test_result() {
+		let result = TestResult::builder().passed(true).build();
+		assert_eq!(result.passed, true);
+		assert_eq!(result.infos, None);
+		assert_eq!(result.additional_status, None);
+		assert_eq!(result.additional_infos, None);
+	}
+
+	#[test]
+	fn test_test_suite() {
+		let suite = TestSuite::new(
+			42,
+			"Hello, world!".to_string(),
+			|_| "Hello, world!".to_string(),
+			|_, _| vec![],
+		);
+		let data = suite.get_data();
+		let answer = suite.get_answer();
+
+		assert_eq!(data, 42);
+		assert_eq!(answer, "Hello, world!".to_string());
+	}
+
+	#[test]
+	fn test_test_trait() {
+		let suite = TestSuite::new(
+			42,
+			"Hello, world!".to_string(),
+			|_| "Hello, world!".to_string(),
+			|_, _| vec![],
+		);
+		let boxed =
+			Box::new(suite.clone()) as Box<dyn TestSuiteTrait<Input = i32, Output = String>>;
+		let data = suite.get_data();
+		let answer = suite.get_answer();
+		let boxed_data = boxed.get_data();
+		let boxed_answer = boxed.get_answer();
+
+		assert_eq!(data, boxed_data);
+		assert_eq!(answer, boxed_answer);
+	}
+
+	#[test]
+	fn test_test_suite_object() {
+		let suite = TestSuite::new(
+			42,
+			"Hello, world!".to_string(),
+			|_| "Hello, world!".to_string(),
+			|_, _| vec![],
+		);
+
+		let trait_object =
+			Box::new(suite.clone()) as Box<dyn TestSuiteTrait<Input = i32, Output = String>>;
+
+		let object = Box::new(suite.clone()) as Box<dyn TestSuiteObject>;
+
+		let data = suite.get_data();
+		let trait_data = trait_object.get_data();
+		let object_data = object.get_data_any();
+		let fake_test = Box::new(suite.get_answer()) as Box<dyn Any>;
+		let answer = Box::new(suite.get_answer()) as Box<dyn Any>;
+
+		assert_eq!(data, trait_data);
+
+		println!("{:?}", object.get_input_type());
+		println!("{:?}", object.get_output_type());
+
+		let judge_res = object.judge_any(answer.as_ref(), fake_test.as_ref());
+		println!("{:?}", judge_res);
+	}
+}
