@@ -6,7 +6,6 @@ use itertools::Itertools;
 use log::info;
 use std::collections::HashMap;
 use std::process::exit;
-use std::string::String;
 use suite::test_suite::{AdditionalStatus, TestResult};
 
 pub fn select_class(classes: &[class::Class]) {
