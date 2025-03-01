@@ -1,11 +1,11 @@
-use suite::define_test_suite;
 use runner;
 use std::clone::Clone;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use suite;
-use suite::test_suite::{TestResult};
+use suite::define_test_suite;
+use suite::test_suite::TestResult;
 use util;
 
 const SOLUTION_CODE: &str = include_str!("solutions/population.py");
@@ -110,9 +110,9 @@ fn runner_fn(path: &Path) -> String {
 	}
 	let content = fs::read_to_string(path).expect("Failed to read file");
 
-	match runner::python::run_code(content, None::<String>, None::<&[String]>) {
+	match runner::python::run_code(&content, None::<String>, None::<&[String]>) {
 		Ok(output) => output,
-		Err(e) => panic!("Failed to run code: {:?}", e),
+		Err(e) => format!("Failed to run code: {:?}\n\nContent:\n\n{}\n\n", e, content),
 	}
 }
 

@@ -67,7 +67,7 @@ fn runner_fn(path: &Path) -> Vec<String> {
 				None::<&[String]>,
 			) {
 				Ok(output) => output,
-				Err(e) => panic!("Failed to run code: {:?}", e),
+				Err(e) => format!("Failed to run code: {:?}\n\nContent:\n\n{}\n\n", e, content),
 			}
 		})
 		.collect::<Vec<_>>()
