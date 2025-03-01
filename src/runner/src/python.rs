@@ -200,11 +200,34 @@ where
 			// 获取 trace 输出
 			let trace_output = if enable_trace {
 				match globals.get_item("trace_output") {
-					Ok(Some(trace_obj)) => {
-						let trace_obj = trace_obj
-							.extract::<HashMap<i64, HashMap<String, T>>>()
-							.map_err(|e| anyhow!("Failed to extract trace_output: {:?}", e));
-						Some(trace_obj)
+					Ok(Some(raw_trace_obj)) => {
+						let parsed = raw_trace_obj
+							.extract::<HashMap<i64, HashMap<String, PyObject>>>()
+							.ok() // 提取 `PyObject` 失败时返回 `None`
+							.map(|pyobj_trace_obj| {
+								pyobj_trace_obj
+									.into_iter()
+									.filter_map(|(k, v)| {
+										let parsed_map = v
+											.into_iter()
+											.filter_map(|(k, v)| {
+												v.extract::<T>(py).ok().map(|v| (k, v))
+											}) // 过滤无效的转换
+											.collect::<HashMap<String, T>>();
+
+										if parsed_map.is_empty() {
+											None
+										} else {
+											Some((k, parsed_map))
+										}
+									})
+									.collect::<HashMap<i64, HashMap<String, T>>>()
+							})
+							.ok_or(anyhow!(
+								"Failed to extract trace_output: {:?}",
+								raw_trace_obj
+							))?;
+						Some(Ok(parsed))
 					}
 					_ => Some(Err(anyhow!("Failed to get trace_output"))),
 				}

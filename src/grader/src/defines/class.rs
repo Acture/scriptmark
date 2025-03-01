@@ -1,5 +1,6 @@
 use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
+use log::warn;
 use std::collections::HashMap;
 use std::path;
 use std::path::{Path, PathBuf};
@@ -89,14 +90,17 @@ impl Class {
 		assignment
 			.group_by_student(&self.students)
 			.iter()
-			.map(|(id, file_paths)| {
+			.filter_map(|(id, file_paths)| {
 				match self
 					.students
 					.iter()
 					.find(|student: &&Student| student.sis_login_id == *id)
 				{
-					Some(student) => (student.clone(), file_paths.clone()),
-					None => panic!("未找到学生"),
+					Some(student) => Some((student.clone(), file_paths.clone())),
+					None => {
+						warn!("未找到对应学生 - {}", id);
+						None
+					}
 				}
 			})
 			.collect()
@@ -105,9 +109,9 @@ impl Class {
 
 #[cfg(test)]
 mod tests {
-	use std::fs;
-use super::*;
+	use super::*;
 	use crate::config::Config;
+	use std::fs;
 
 	#[test]
 	fn test_load_class() {
@@ -123,7 +127,8 @@ use super::*;
 	fn test_load_assignments() {
 		let config = Config::builder()
 			.data_dir(path::Path::new("../../data").to_path_buf())
-			.build();		let mut classes = Class::load_class(&config.data_dir);
+			.build();
+		let mut classes = Class::load_class(&config.data_dir);
 		let test_class = &mut classes[0];
 		test_class.load_assignments();
 		let assignments = &test_class.assignments;
@@ -134,7 +139,8 @@ use super::*;
 	fn test_get_student_assignments() {
 		let config = Config::builder()
 			.data_dir(path::Path::new("../../data").to_path_buf())
-			.build();		let mut classes = Class::prepare_class(&config.data_dir);
+			.build();
+		let mut classes = Class::prepare_class(&config.data_dir);
 		let test_class = &mut classes[0];
 		let student_assignments = test_class.get_student_assignments("lab1_population".to_string());
 		println!("{:?}", student_assignments);
