@@ -52,13 +52,13 @@ jobs:
             -   name: List Built Files
                 run: ls -l target/release/
 
-            - name: Upload Build Artifacts
-              uses: actions/upload-artifact@v4
-              with:
-                  name: grader-${{ matrix.os }}
-                  path: |
-                      target/release/grader
-                      target/release/grader.exe
+            -   name: Upload Build Artifacts
+                uses: actions/upload-artifact@v4
+                with:
+                    name: grader-${{ matrix.os }}
+                    path: |
+                        target/release/grader
+                        target/release/grader.exe
 
     release:
         needs: build  # 确保在 build 任务成功后才执行
@@ -73,16 +73,10 @@ jobs:
                 with:
                     path: artifacts
 
-            -   name: Get Latest Tag
-                id: get_latest_tag
+            -   name: Extract Build Artifacts
                 run: |
-                    latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-                    if [[ -z "$latest_tag" ]]; then
-                        latest_tag="$(date +'%Y%m%d-%H%M%S')"
-                    else
-                        latest_tag="${latest_tag}-$(date +'%Y%m%d-%H%M%S')"
-                    fi
-                    echo "RELEASE_TAG=$latest_tag" >> $GITHUB_ENV
+                    mkdir -p extracted
+                    find artifacts/ -name "*.zip" -exec unzip -o {} -d extracted/ \;
 
             -   name: Create GitHub Release (Draft)
                 uses: softprops/action-gh-release@v2
@@ -92,6 +86,6 @@ jobs:
                     name: "Grader Release ${{ env.RELEASE_TAG }}"
                     body: "This is an auto-generated release draft for Grader."
                     files: |
-                        artifacts/grader-*
+                        files: extracted/grader*
                 env:
                     GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
