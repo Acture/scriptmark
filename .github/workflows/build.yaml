@@ -1,0 +1,87 @@
+name: Rust Build (Grader)
+
+on:
+  workflow_dispatch:  # 允许手动触发（GitHub Actions UI）
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        rust: [stable]  # 仅构建 stable 版本
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ matrix.rust }}
+
+      - name: Set up MSVC (Windows only)
+        if: matrix.os == 'windows-latest'
+        run: rustup default stable-msvc
+
+      - name: Install Python (for pyo3)
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.x"
+
+      - name: Set up Cargo Cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rust-${{ matrix.os }}-${{ matrix.rust }}
+
+      - name: Build `grader`
+        run: cargo build --release --package grader
+
+      - name: List Built Files
+        run: ls -l target/release/
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: grader-${{ matrix.os }}
+          path: target/release/grader*
+
+  release:
+    needs: build  # 确保在 build 任务成功后才执行
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Generate Release Tag
+        id: release_tag
+        run: echo "RELEASE_TAG=v0.1-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
+
+      - name: Create GitHub Release (Draft)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          draft: true  # 创建草稿发布
+          name: "Grader Release ${{ env.RELEASE_TAG }}"
+          body: "This is an auto-generated release draft for Grader."
+          files: artifacts/grader-*/grader*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
