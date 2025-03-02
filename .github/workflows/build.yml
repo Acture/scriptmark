@@ -73,10 +73,19 @@ jobs:
                 uses: actions/download-artifact@v4
                 with:
                     path: artifacts
-                    pattern: grader-*
-                    merge-multiple: true
             -   name: List Built Files
                 run: ls -l artifacts
+
+            -   name: Organize Build Artifacts
+                run: |
+                    mkdir -p release
+                    cp artifacts/grader-macos-latest/grader release/grader-macos
+                    cp artifacts/grader-ubuntu-latest/grader release/grader-linux
+                    cp artifacts/grader-windows-latest/grader.exe release/grader-windows.exe
+
+            -   name: List Release Files
+                run: ls -l release
+
             -   name: Get Latest Tag
                 id: get_latest_tag
                 run: |
@@ -95,7 +104,8 @@ jobs:
                     draft: true  # 创建草稿发布
                     name: "Grader Release ${{ env.RELEASE_TAG }}"
                     body: "This is an auto-generated release draft for Grader."
+                    fail_on_unmatched_files: true
                     files: |
-                        files: artifacts/*
+                        release/*
                 env:
                     GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
