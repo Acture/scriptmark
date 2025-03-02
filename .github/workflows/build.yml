@@ -43,9 +43,10 @@ jobs:
                         ~/.cargo/bin
                         ~/.cargo/registry
                         ~/.cargo/git
-                        target
-                    key: rust-${{ matrix.os }}-${{ matrix.rust }}
-
+                        target/release
+                    key: rust-${{ matrix.os }}-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+                    restore-keys: |
+                        rust-${{ matrix.os }}-${{ matrix.rust }}-
             -   name: Build `grader`
                 run: cargo build --release --package grader
 
@@ -78,6 +79,17 @@ jobs:
                     mkdir -p extracted
                     find artifacts/ -name "*.zip" -exec unzip -o {} -d extracted/ \;
 
+            -   name: Get Latest Tag
+                id: get_latest_tag
+                run: |
+                    latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+                    if [[ -z "$latest_tag" ]]; then
+                        latest_tag="$(date +'%Y%m%d')"
+                    else
+                        latest_tag="${latest_tag}-$(date +'%Y%m%d-%H%M%S')"
+                    fi
+                    echo "RELEASE_TAG=$latest_tag" >> $GITHUB_ENV
+
             -   name: Create GitHub Release (Draft)
                 uses: softprops/action-gh-release@v2
                 with:
@@ -86,6 +98,6 @@ jobs:
                     name: "Grader Release ${{ env.RELEASE_TAG }}"
                     body: "This is an auto-generated release draft for Grader."
                     files: |
-                        files: extracted/grader*
+                        files: extracted/*
                 env:
                     GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
