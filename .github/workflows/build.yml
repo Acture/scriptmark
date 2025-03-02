@@ -89,6 +89,8 @@ jobs:
                     draft: true  # 创建草稿发布
                     name: "Grader Release ${{ env.RELEASE_TAG }}"
                     body: "This is an auto-generated release draft for Grader."
-                    files: artifacts/grader-*/grader*
+                    files: |
+                        artifacts/grader-*/grader
+                        artifacts/grader-*/grader.exe
                 env:
                     GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
