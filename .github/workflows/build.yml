@@ -71,9 +71,16 @@ jobs:
                 with:
                     path: artifacts
 
-            -   name: Generate Release Tag
-                id: release_tag
-                run: echo "RELEASE_TAG=v0.1-$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_ENV
+            -   name: Get Latest Tag
+                id: get_latest_tag
+                run: |
+                    latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+                    if [[ -z "$latest_tag" ]]; then
+                        latest_tag="$(date +'%Y%m%d-%H%M%S')"
+                    else
+                        latest_tag="${latest_tag}-$(date +'%Y%m%d-%H%M%S')"
+                    fi
+                    echo "RELEASE_TAG=$latest_tag" >> $GITHUB_ENV
 
             -   name: Create GitHub Release (Draft)
                 uses: softprops/action-gh-release@v2
@@ -84,4 +91,4 @@ jobs:
                     body: "This is an auto-generated release draft for Grader."
                     files: artifacts/grader-*/grader*
                 env:
-                    GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                    GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
