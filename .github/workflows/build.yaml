@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@latest
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
@@ -32,12 +32,12 @@ jobs:
         run: rustup default stable-msvc
 
       - name: Install Python (for pyo3)
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@latest
         with:
           python-version: "3.x"
 
       - name: Set up Cargo Cache
-        uses: actions/cache@v3
+        uses: actions/cache@latest
         with:
           path: |
             ~/.cargo/bin
@@ -53,7 +53,7 @@ jobs:
         run: ls -l target/release/
 
       - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@latest
         with:
           name: grader-${{ matrix.os }}
           path: target/release/grader*
@@ -64,10 +64,10 @@ jobs:
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@latest
 
       - name: Download All Artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@latest
         with:
           path: artifacts
 
