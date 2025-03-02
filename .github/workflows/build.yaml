@@ -1,13 +1,13 @@
-name: Rust Build (Grader)
+name: Build
 
 on:
   workflow_dispatch:  # 允许手动触发（GitHub Actions UI）
   push:
     branches:
-      - main
+      - master
   pull_request:
     branches:
-      - main
+      - master
 
 jobs:
   build:
