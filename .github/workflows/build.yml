@@ -52,11 +52,13 @@ jobs:
             -   name: List Built Files
                 run: ls -l target/release/
 
-            -   name: Upload Build Artifacts
-                uses: actions/upload-artifact@v4
-                with:
-                    name: grader-${{ matrix.os }}
-                    path: target/release/grader*
+            - name: Upload Build Artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: grader-${{ matrix.os }}
+                  path: |
+                      target/release/grader
+                      target/release/grader.exe
 
     release:
         needs: build  # 确保在 build 任务成功后才执行
@@ -90,7 +92,6 @@ jobs:
                     name: "Grader Release ${{ env.RELEASE_TAG }}"
                     body: "This is an auto-generated release draft for Grader."
                     files: |
-                        artifacts/grader-*/grader
-                        artifacts/grader-*/grader.exe
+                        artifacts/grader-*
                 env:
                     GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
