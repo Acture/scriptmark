@@ -73,15 +73,10 @@ jobs:
                 uses: actions/download-artifact@v4
                 with:
                     path: artifacts
-
+                    pattern: grader-*
+                    merge-multiple: true
             -   name: List Built Files
                 run: ls -l artifacts
-
-            -   name: Extract Build Artifacts
-                run: |
-                    mkdir -p extracted
-                    find artifacts/ -name "*.zip" -exec unzip -o {} -d extracted/ \;
-
             -   name: Get Latest Tag
                 id: get_latest_tag
                 run: |
@@ -101,6 +96,6 @@ jobs:
                     name: "Grader Release ${{ env.RELEASE_TAG }}"
                     body: "This is an auto-generated release draft for Grader."
                     files: |
-                        files: extracted/*
+                        files: artifacts/*
                 env:
                     GITHUB_TOKEN: ${{ secrets.GRADER_RELEASE_TOKEN }}
