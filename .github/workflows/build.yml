@@ -29,7 +29,7 @@ jobs:
 
             -   name: Set up MSVC (Windows only)
                 if: matrix.os == 'windows-latest'
-                run: rustup default stable-msvc
+                run: rustup set default-host x86_64-pc-windows-msvc
 
             -   name: Install Python (for pyo3)
                 uses: actions/setup-python@v5
@@ -73,6 +73,9 @@ jobs:
                 uses: actions/download-artifact@v4
                 with:
                     path: artifacts
+
+            -   name: List Built Files
+                run: ls -l artifacts
 
             -   name: Extract Build Artifacts
                 run: |
