@@ -90,12 +90,12 @@ fn judge(s: &str, t: &str) -> TestResult {
 				let s_extracted = util::extract_numbers::<f64>(s_line);
 				let t_extracted = util::extract_numbers::<f64>(t_line);
 
-				if s_extracted.len() != 1 || t_extracted.len() != 1 {
+				if s_extracted.len() != t_extracted.len(){
 					res.infos
 						.get_or_insert_with(HashMap::new)
 						.entry("More Than One Number".to_string())
 						.or_insert(format!(
-							"Expected: 1, Got: s: {}, t: {}",
+							"Expected: <{}>, Got: <{}>",
 							s_extracted.len(),
 							t_extracted.len()
 						));

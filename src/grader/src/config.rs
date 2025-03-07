@@ -13,6 +13,8 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[builder(default = 42)]
     pub seed: u64,
+    #[builder(default = true)]
+    pub custom_solution: bool,
 }
 
 impl Config {
