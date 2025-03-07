@@ -2,6 +2,9 @@ name: Build
 
 on:
     workflow_dispatch:  # 允许手动触发（GitHub Actions UI）
+    push:
+        tags:
+            - "v*.*.*"  # 只有 tag 触发 release
     pull_request:
         branches:
             - master
@@ -59,6 +62,7 @@ jobs:
                 uses: actions/upload-artifact@v4
                 with:
                     name: grader-${{ matrix.os }}
+                    retention-days: 7
                     path: |
                         target/release/grader
                         target/release/grader.exe
@@ -100,21 +104,21 @@ jobs:
                         echo "PREVIOUS_HASH_EXISTS=false" >> $GITHUB_ENV
                     fi
             -   name: Compare Build Hashes
-                    id: check_hash
-                    run: |
-                        if [[ "$PREVIOUS_HASH_EXISTS" == "true" ]]; then
-                            if cmp -s build-hash.txt previous-build-hash.txt; then
-                                echo "BUILD_CHANGED=false" >> $GITHUB_ENV
-                            else
-                                echo "BUILD_CHANGED=true" >> $GITHUB_ENV
-                            fi
+                id: check_hash
+                run: |
+                    if [[ "$PREVIOUS_HASH_EXISTS" == "true" ]]; then
+                        if cmp -s build-hash.txt previous-build-hash.txt; then
+                            echo "BUILD_CHANGED=false" >> $GITHUB_ENV
                         else
                             echo "BUILD_CHANGED=true" >> $GITHUB_ENV
                         fi
+                    else
+                        echo "BUILD_CHANGED=true" >> $GITHUB_ENV
+                    fi
 
             -   name: Skip Release If No Changes
-                    if: env.BUILD_CHANGED == 'false'
-                    run: echo "No changes detected. Skipping release."
+                if: env.BUILD_CHANGED == 'false'
+                run: echo "No changes detected. Skipping release."
 
             -   name: Organize Build Artifacts
                 run: |
