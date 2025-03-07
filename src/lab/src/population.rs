@@ -1,27 +1,21 @@
-use runner;
 use std::clone::Clone;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite;
 use suite::define_test_suite;
 use suite::test_suite::TestResult;
-use util;
 
 const SOLUTION_CODE: &str = include_str!("solutions/population.py");
 
-fn judge_results<'a, 'b>(answer: &'a String, to_test: &'b String) -> TestResult {
+fn judge_results(answer: & String, to_test: & String) -> TestResult {
 	let lines = answer
 		.split("\n")
 		.filter(|line| !line.trim().is_empty())
-		.into_iter()
 		.zip(
             to_test
 				.split("\n")
 				.filter(|line| !line.trim().is_empty())
-				.into_iter(),
-		)
-		.into_iter();
+		);
 
 	let mut res = TestResult::builder().passed(true).build();
 
@@ -43,7 +37,7 @@ fn judge_results<'a, 'b>(answer: &'a String, to_test: &'b String) -> TestResult 
 			continue;
 		}
 
-		if b_nums.len() == 0 {
+		if b_nums.is_empty(){
 			res.passed = false;
 			res.infos
 				.get_or_insert_with(HashMap::new)

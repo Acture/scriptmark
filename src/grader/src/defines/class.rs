@@ -86,7 +86,7 @@ impl Class {
 			.assignments
 			.iter()
 			.find(|a| a.name == assignment_name)
-			.expect(format!("{} - {} 未找到作业", self.name, assignment_name).as_str());
+			.unwrap_or_else(|| panic!("{} - {} 未找到作业", self.name, assignment_name));
 		assignment
 			.group_by_student(&self.students)
 			.iter()

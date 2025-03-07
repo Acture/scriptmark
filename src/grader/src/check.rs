@@ -4,7 +4,6 @@ use lab::TestSuiteType;
 use log::{debug};
 use std::collections::HashMap;
 use suite::test_suite::TestResult;
-use util;
 
 pub fn check_assignment(
 	selected_class: &class::Class,
@@ -60,7 +59,7 @@ pub fn check_assignment(
 			let file_hash = util::calculate_hash_from_file(file).expect("Failed to calculate hash");
 			hash_map
 				.entry(file_hash)
-				.or_insert_with(Vec::new)
+				.or_default()
 				.push(student.clone());
 			let result = test_suite.run_any(file);
 			let answer = test_suite.get_answer_any();

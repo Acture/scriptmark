@@ -1,3 +1,5 @@
+use std::str::FromStr;
+use std::fmt;
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,21 +12,27 @@ pub enum AdditionalStatus {
 	Full,
 }
 
-impl AdditionalStatus {
-	pub fn to_string(&self) -> String {
-		match self {
-			AdditionalStatus::None => "None".to_string(),
-			AdditionalStatus::Partial => "Partial".to_string(),
-			AdditionalStatus::Full => "Full".to_string(),
-		}
+impl fmt::Display for AdditionalStatus {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		let s = match self {
+			AdditionalStatus::None => "None",
+			AdditionalStatus::Partial => "Partial",
+			AdditionalStatus::Full => "Full",
+		};
+		write!(f, "{}", s)
 	}
+}
 
-	pub fn from_string(s: &str) -> Self {
+
+impl FromStr for AdditionalStatus {
+	type Err = String; // 可以使用自定义错误类型
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
 		match s {
-			"None" => AdditionalStatus::None,
-			"Partial" => AdditionalStatus::Partial,
-			"Full" => AdditionalStatus::Full,
-			_ => panic!("Invalid AdditionalStatus: {}", s),
+			"None" => Ok(AdditionalStatus::None),
+			"Partial" => Ok(AdditionalStatus::Partial),
+			"Full" => Ok(AdditionalStatus::Full),
+			_ => Err(format!("Invalid value for AdditionalStatus: {}", s)),
 		}
 	}
 }
@@ -226,7 +234,12 @@ mod tests {
 	fn test_additional_status() {
 		let status = AdditionalStatus::None;
 		assert_eq!(status.to_string(), "None");
-		assert_eq!(AdditionalStatus::from_string("None"), status);
+		match AdditionalStatus::from_str("None") {
+			Ok(AdditionalStatus::None) => {
+				assert_eq!(status, AdditionalStatus::None);
+			}
+			_ => panic!("Expected None"),
+		}
 	}
 
 	#[test]

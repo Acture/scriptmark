@@ -56,7 +56,7 @@ fn runner_fn(path: &Path) -> OutputType {
     if !path.exists() {
         panic!("Test file not found: {}", path.display());
     }
-    let content = fs::read_to_string(&path).expect("Failed to read file");
+    let content = fs::read_to_string(path).expect("Failed to read file");
     INPUTS
         .iter()
         .map(|input| {
@@ -76,7 +76,7 @@ fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite
     result
         .iter()
         .zip(expected.iter())
-        .filter_map(|(res, ans)| {
+        .map(|(res, ans)| {
             let mut test_result = TestResult::builder().build();
             res.lines()
                 .zip(ans.lines())
@@ -140,7 +140,7 @@ fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite
                     }
                 });
 
-            Some(test_result)
+            test_result
         })
         .collect::<Vec<TestResult>>()
 }

@@ -16,8 +16,7 @@ pub enum SelectStatus {
 pub fn select_class(classes: &[class::Class]) -> (SelectStatus, Option<&class::Class>) {
     let class_options = classes
         .iter()
-        .enumerate()
-        .map(|(_i, class)| class.name.as_str())
+        .map(| class| class.name.as_str())
         .chain(std::iter::once("退出"))
         .collect::<Vec<_>>();
     let class_selector = Select::new()
@@ -106,17 +105,13 @@ pub fn select_test_result<'a>(
                     })
             };
 
-            let hash_collision_status = if _hash_map.iter().filter(|(_, v)| v.len() > 1).any(
+            let hash_collision_status = _hash_map.iter().filter(|(_, v)| v.len() > 1).any(
                 |(_hash, same_hash_students)| {
                     same_hash_students
                         .iter()
                         .any(|same_hash_student| *student == same_hash_student)
                 },
-            ) {
-                true
-            } else {
-                false
-            };
+            );
 
             format!(
                 "{:<10}\t{:<10}\t{:<4}\t{:>4}\t{:>2}/{:>2}\t{:<5}\t{:>2} infos\t{:>2} add_infos",
