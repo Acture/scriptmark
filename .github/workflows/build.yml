@@ -2,12 +2,11 @@ name: Build
 
 on:
     workflow_dispatch:  # 允许手动触发（GitHub Actions UI）
-    push:
-        branches:
-            - master
     pull_request:
         branches:
             - master
+    schedule:
+        -   cron: "0 0 * * 1"  # 每周一 00:00 UTC 运
 
 jobs:
     build:
@@ -50,6 +49,9 @@ jobs:
             -   name: Build `grader`
                 run: cargo build --release --package grader
 
+            -   name: Generate Build Hash
+                run: sha256sum target/release/grader* | cut -c1-8 > build-hash-${{ matrix.os }}.txt
+
             -   name: List Built Files
                 run: ls -l target/release/
 
@@ -60,6 +62,8 @@ jobs:
                     path: |
                         target/release/grader
                         target/release/grader.exe
+                        build-hash-${{ matrix.os }}.txt
+
 
     release:
         needs: build  # 确保在 build 任务成功后才执行
@@ -73,8 +77,44 @@ jobs:
                 uses: actions/download-artifact@v4
                 with:
                     path: artifacts
+            -   name: Aggregate Build Hashes
+                run: |
+                    find artifacts/ -name "build-hash-*.txt" | sort | xargs cat > build-hash.txt
+
             -   name: List Built Files
-                run: ls -l artifacts
+                run: |
+                    ls -l artifacts
+
+            -   name: Get Latest Release Info
+                id: get_latest_release
+                run: |
+                    API_URL="https://api.github.com/repos/${{ github.repository }}/releases/latest"
+                    LATEST_RELEASE=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" "$API_URL")
+                    
+                    ASSET_URL=$(echo "$LATEST_RELEASE" | jq -r '.assets[] | select(.name=="build-hash.txt") | .browser_download_url')
+                    
+                    if [[ -n "$ASSET_URL" ]]; then
+                        curl -s -L -o previous-build-hash.txt "$ASSET_URL"
+                        echo "PREVIOUS_HASH_EXISTS=true" >> $GITHUB_ENV
+                    else
+                        echo "PREVIOUS_HASH_EXISTS=false" >> $GITHUB_ENV
+                    fi
+            -   name: Compare Build Hashes
+                    id: check_hash
+                    run: |
+                        if [[ "$PREVIOUS_HASH_EXISTS" == "true" ]]; then
+                            if cmp -s build-hash.txt previous-build-hash.txt; then
+                                echo "BUILD_CHANGED=false" >> $GITHUB_ENV
+                            else
+                                echo "BUILD_CHANGED=true" >> $GITHUB_ENV
+                            fi
+                        else
+                            echo "BUILD_CHANGED=true" >> $GITHUB_ENV
+                        fi
+
+            -   name: Skip Release If No Changes
+                    if: env.BUILD_CHANGED == 'false'
+                    run: echo "No changes detected. Skipping release."
 
             -   name: Organize Build Artifacts
                 run: |
@@ -82,11 +122,13 @@ jobs:
                     cp artifacts/grader-macos-latest/grader release/grader-macos
                     cp artifacts/grader-ubuntu-latest/grader release/grader-linux
                     cp artifacts/grader-windows-latest/grader.exe release/grader-windows.exe
+                    cp artifacts/build-hash.txt release/build-hash.txt
 
             -   name: List Release Files
                 run: ls -l release
 
             -   name: Get Latest Tag
+                if: env.BUILD_CHANGED == 'true'
                 id: get_latest_tag
                 run: |
                     latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -98,6 +140,7 @@ jobs:
                     echo "RELEASE_TAG=$latest_tag" >> $GITHUB_ENV
 
             -   name: Create GitHub Release (Draft)
+                if: env.BUILD_CHANGED == 'true'
                 uses: softprops/action-gh-release@v2
                 with:
                     tag_name: ${{ env.RELEASE_TAG }}
