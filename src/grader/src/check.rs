@@ -9,6 +9,7 @@ use util;
 pub fn check_assignment(
 	selected_class: &class::Class,
 	selected_assignment_name: &str,
+	allow_custom: bool,
 ) -> (
 	HashMap<Student, Vec<TestResult>>,
 	HashMap<u64, Vec<Student>>,
@@ -19,7 +20,11 @@ pub fn check_assignment(
 	let select_assignment_type = match TestSuiteType::from_endwith(selected_assignment_name){
 		Some(select_assignment_type) => select_assignment_type,
 		None => {
-			panic!("未找到对应的测试套件");
+			if allow_custom {
+				unimplemented!("自定义测试套件");
+			} else {
+				panic!("未找到对应的测试套件");
+			}
 		}
 	};
 
