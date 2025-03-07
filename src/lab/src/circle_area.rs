@@ -76,7 +76,7 @@ fn runner_fn(path: &Path) -> Vec<String> {
 fn judge_fn(result: &Vec<String>, expected: &Vec<String>) -> Vec<TestResult> {
 	result
 		.iter()
-		.zip(expected.into_iter())
+		.zip(expected.iter())
 		.map(|(result, expected)| judge(result, expected))
 		.collect::<Vec<TestResult>>()
 }

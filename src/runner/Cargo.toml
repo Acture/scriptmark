@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rand = "0.9.0"
 typed-builder = "0.20.0"
 pyo3.workspace = true
-log = { version = "0.4.26", features = [] }
 anyhow = "1.0.96"
