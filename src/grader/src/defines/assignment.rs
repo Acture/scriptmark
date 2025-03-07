@@ -10,7 +10,7 @@ pub struct Assignment {
 }
 
 impl Assignment {
-    pub fn group_by_student<'a>(&self, students: &'a [Student]) -> HashMap<String, Vec<PathBuf>> {
+    pub fn group_by_student(&self, students: &[Student]) -> HashMap<String, Vec<PathBuf>> {
         let mut rec: HashMap<String, Vec<PathBuf>> = students
             .iter()
             .map(|student| (student.sis_login_id.to_string(), vec![]))
@@ -32,7 +32,7 @@ impl Assignment {
                         let entry = entry.expect("entry failed");
                         let path = entry.path();
                         if path.extension() == Some("py".as_ref()) {
-                            rec.entry(id.clone()).or_insert_with(Vec::new).push(path);
+                            rec.entry(id.clone()).or_default().push(path);
                         }
                     });
             } else if path.is_file() && path.extension() == Some("py".as_ref()) {
@@ -46,7 +46,7 @@ impl Assignment {
                     .next()
                     .expect("split failed")
                     .to_string();
-                rec.entry(id.clone()).or_insert_with(Vec::new).push(path);
+                rec.entry(id.clone()).or_default().push(path);
             }
         }
 
@@ -63,7 +63,7 @@ impl Assignment {
                         Err(_) => {
                             let new_path =
                                 dir.join(file_path.file_name().expect("file_name failed"));
-                            std::fs::rename(&file_path, &new_path).expect("rename failed");
+                            std::fs::rename(file_path, &new_path).expect("rename failed");
                             new_path
                         }
                     })

@@ -23,12 +23,7 @@ pub enum TestSuiteType {
 
 impl TestSuiteType {
 	pub fn from_endwith(s: &str) -> Option<TestSuiteType> {
-		for variant in TestSuiteType::iter() {
-			if s.ends_with(variant.as_ref()) {
-				return Some(variant);
-			}
-		}
-		None
+		TestSuiteType::iter().find(|variant| s.ends_with(variant.as_ref()))
 	}
 }
 

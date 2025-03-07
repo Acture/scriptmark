@@ -4,7 +4,6 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use toml;
 use typed_builder::TypedBuilder;
 
 #[derive(Debug, Serialize, Deserialize, TypedBuilder)]

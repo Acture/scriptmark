@@ -1,5 +1,4 @@
 use crate::defines::class::Class;
-use env_logger;
 use lazy_static::lazy_static;
 use log::info;
 use std::env;

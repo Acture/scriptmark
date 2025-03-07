@@ -43,7 +43,7 @@ impl Student {
 
         let indices: Vec<usize> = required_headers
             .into_iter()
-            .map(|h| header_map.get(h).copied().expect(&format!("缺少列: {}", h)))
+            .map(|h| header_map.get(h).copied().unwrap_or_else(|| panic!("缺少列: {}", h)))
             .collect();
 
         let [name_index, id_index, sis_login_index]: [usize; 3] =

@@ -1,4 +1,3 @@
-use runner;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -57,7 +56,7 @@ fn runner_fn(path: &Path) -> Vec<String> {
 	if !path.exists() {
 		panic!("Test file not found: {}", path.display());
 	}
-	let content = fs::read_to_string(&path).expect("Failed to read file");
+	let content = fs::read_to_string(path).expect("Failed to read file");
 	INPUTS
 		.iter()
 		.map(|input| {
