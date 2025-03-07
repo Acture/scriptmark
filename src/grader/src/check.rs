@@ -16,7 +16,12 @@ pub fn check_assignment(
 	let student_assignments =
 		selected_class.get_student_assignments(selected_assignment_name.to_string());
 
-	let select_assignment_type = TestSuiteType::from_endwith(selected_assignment_name);
+	let select_assignment_type = match TestSuiteType::from_endwith(selected_assignment_name){
+		Some(select_assignment_type) => select_assignment_type,
+		None => {
+			panic!("未找到对应的测试套件");
+		}
+	};
 
 	let solution_map = &lab::TEST_SUITE_MAP;
 	let test_suite = solution_map
