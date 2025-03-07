@@ -1,11 +1,9 @@
-use crate::check;
 use crate::defines::class;
 use crate::defines::student::Student;
 use dialoguer::{FuzzySelect, Select};
 use itertools::Itertools;
 use log::info;
 use std::collections::HashMap;
-use std::process::exit;
 use suite::test_suite::{AdditionalStatus, TestResult};
 
 #[derive(Debug, PartialEq, Eq)] // 让它支持 Debug 和比较
