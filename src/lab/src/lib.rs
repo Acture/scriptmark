@@ -1,45 +1,37 @@
+use strum::IntoEnumIterator;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use suite::test_suite::TestSuiteObject;
+use strum_macros::{EnumString, Display, EnumIter, AsRefStr};
 
-pub mod circle_area;
-pub mod population;
+mod circle_area;
+mod population;
 mod sequence;
+mod three_number;
 
-#[derive(Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, PartialEq, Hash, EnumString, Display, EnumIter, AsRefStr)]
 pub enum TestSuiteType {
+	#[strum(serialize = "circle_area")]
 	CircleArea,
+	#[strum(serialize = "population")]
 	Population,
+	#[strum(serialize = "sequence")]
 	Sequence,
+	#[strum(serialize = "three_number")]
+	ThreeNumber,
 }
 
 impl TestSuiteType {
-	pub fn from_str(s: &str) -> TestSuiteType {
-		match s {
-			"circle_area" => TestSuiteType::CircleArea,
-			"population" => TestSuiteType::Population,
-			"sequence" => TestSuiteType::Sequence,
-			_ => panic!("Invalid test suite type: {}", s),
-		}
-	}
-
-	pub fn from_endwith(s: &str) -> TestSuiteType {
-		for possible in ["circle_area", "population", "sequence"].iter() {
-			if s.ends_with(possible) {
-				return TestSuiteType::from_str(possible);
+	pub fn from_endwith(s: &str) -> Option<TestSuiteType> {
+		for variant in TestSuiteType::iter() {
+			if s.ends_with(variant.as_ref()) {
+				return Some(variant);
 			}
 		}
-		panic!("Invalid test suite type: {}", s)
-	}
-
-	pub fn to_string(&self) -> String {
-		match self {
-			TestSuiteType::CircleArea => "circle_area".to_string(),
-			TestSuiteType::Population => "population".to_string(),
-			TestSuiteType::Sequence => "sequence".to_string(),
-		}
+		None
 	}
 }
+
 
 lazy_static! {
 	pub static ref TEST_SUITE_MAP: HashMap<TestSuiteType, Box<dyn TestSuiteObject>> =
@@ -55,6 +47,11 @@ lazy_static! {
 			(
 				TestSuiteType::Sequence,
 				Box::new(sequence::SEQUENCE_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::ThreeNumber,
+				Box::new(three_number::THREE_NUMBER_TEST_SUITE.clone())
+					as Box<dyn TestSuiteObject>,
 			),
 		])
 	;
