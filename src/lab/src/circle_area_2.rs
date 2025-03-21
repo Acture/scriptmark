@@ -17,27 +17,8 @@ pub fn get_answer(input: f64) -> String {
     }
 }
 
-// lazy_static! {
-// 	static ref INPUTS: Vec<f64> = util::generate(42, 20, 1.0, 100.0);
-// 	static ref ANSWERS: Vec<String> = INPUTS
-// 		.iter()
-// 		.map(|input| get_answer(*input))
-// 		.collect::<Vec<_>>();
-// 	pub static ref CIRCLE_AREA_TEST_SUITE: TestSuite<
-// 		Vec<f64>,
-// 		Vec<String>,
-// 		for<'a> fn(&'a Path) -> Vec<String>,
-// 		for<'a, 'b> fn(&'a Vec<String>, &'b Vec<String>) -> Vec<suite::test_suite::TestResult>,
-// 	> = TestSuite::builder()
-// 		.inputs(INPUTS.to_vec())
-// 		.answers(ANSWERS.to_vec())
-// 		.runner(RUNNER_FUNC as fn(&Path) -> Vec<String>)
-// 		.judge(JUDGE_FUNC as fn(&Vec<String>, &Vec<String>) -> Vec<TestResult>)
-// 		.build();
-// }
-
 define_test_suite!(
-    pub name = CIRCLE_AREA_TEST_SUITE,
+    pub name = CIRCLE_AREA_TEST_2_SUITE,
     inputs = {
         type = Vec<f64>,
         init = util::generate(42, 20, 1.0, 100.0),

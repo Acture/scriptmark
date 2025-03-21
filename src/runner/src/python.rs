@@ -66,273 +66,273 @@ finally:
 	};
 }
 pub fn run_code<R>(
-	code: impl AsRef<str>,
-	std_in: Option<impl AsRef<str>>,
-	libs_to_import: Option<&[impl AsRef<str>]>,
+    code: impl AsRef<str>,
+    std_in: Option<impl AsRef<str>>,
+    libs_to_import: Option<&[impl AsRef<str>]>,
 ) -> Result<R>
 where
-	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
 {
-	let (result, _) = run_code_internal::<R, Empty>(code, std_in, libs_to_import, false)?;
-	Ok(result)
+    let (result, _) = run_code_internal::<R, Empty>(code, std_in, libs_to_import, false)?;
+    Ok(result)
 }
 
 #[derive(Debug)]
 struct Empty;
 
 impl<'source> FromPyObject<'source> for Empty {
-	fn extract_bound(_ob: &pyo3::Bound<'source, pyo3::PyAny>) -> pyo3::PyResult<Self> {
-		Ok(Empty)
-	}
+    fn extract_bound(_ob: &pyo3::Bound<'source, pyo3::PyAny>) -> pyo3::PyResult<Self> {
+        Ok(Empty)
+    }
 }
 
 pub fn run_code_with_trace<R, T>(
-	code: impl AsRef<str>,
-	std_in: Option<impl AsRef<str>>,
-	libs_to_import: Option<&[impl AsRef<str>]>,
+    code: impl AsRef<str>,
+    std_in: Option<impl AsRef<str>>,
+    libs_to_import: Option<&[impl AsRef<str>]>,
 ) -> Result<(R, HashMap<i64, HashMap<String, T>>)>
 where
-	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
-	T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
 {
-	let (result, trace) = run_code_internal(code, std_in, libs_to_import, true)?;
-	Ok((result, trace.expect("Trace should be enabled")))
+    let (result, trace) = run_code_internal(code, std_in, libs_to_import, true)?;
+    Ok((result, trace.expect("Trace should be enabled")))
 }
 
 fn run_code_internal<R, T>(
-	code: impl AsRef<str>,
-	std_in: Option<impl AsRef<str>>,
-	libs_to_import: Option<&[impl AsRef<str>]>,
-	enable_trace: bool,
+    code: impl AsRef<str>,
+    std_in: Option<impl AsRef<str>>,
+    libs_to_import: Option<&[impl AsRef<str>]>,
+    enable_trace: bool,
 ) -> Result<(R, Option<HashMap<i64, HashMap<String, T>>>)>
 where
-	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
-	T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
 {
-	let (tx, rx) = mpsc::channel();
+    let (tx, rx) = mpsc::channel();
 
-	// 克隆数据用于线程
-	let code_owned = code.as_ref().to_owned();
-	let std_in_owned = std_in.map(|s| s.as_ref().to_owned());
-	let libs_owned = libs_to_import.map(|libs| {
-		libs.iter()
-			.map(|s| s.as_ref().to_owned())
-			.collect::<Vec<_>>()
-	});
+    // 克隆数据用于线程
+    let code_owned = code.as_ref().to_owned();
+    let std_in_owned = std_in.map(|s| s.as_ref().to_owned());
+    let libs_owned = libs_to_import.map(|libs| {
+        libs.iter()
+            .map(|s| s.as_ref().to_owned())
+            .collect::<Vec<_>>()
+    });
 
-	let wrapped_code = if enable_trace {
-		create_python_trace!(&code_owned) // 插入 trace 变量
-	} else {
-		code_owned
-	};
+    let wrapped_code = if enable_trace {
+        create_python_trace!(&code_owned) // 插入 trace 变量
+    } else {
+        code_owned
+    };
 
-	let c_code = CString::new(wrapped_code)
-		.map_err(|e| anyhow!("Transform <Code> into CString Failed: {:?}", e))?;
+    let c_code = CString::new(wrapped_code)
+        .map_err(|e| anyhow!("Transform <Code> into CString Failed: {:?}", e))?;
 
-	let flush_code = CString::new("import sys; sys.stdout.flush(); sys.stderr.flush()")
-		.expect("Failed to transform <Code> into CString");
+    let flush_code = CString::new("import sys; sys.stdout.flush(); sys.stderr.flush()")
+        .expect("Failed to transform <Code> into CString");
 
-	thread::spawn(move || {
-		let result: Result<(
-			Result<R, anyhow::Error>,
-			Option<Result<HashMap<i64, HashMap<String, T>>>>,
-		)> = Python::with_gil(|py| {
-			let globals = PyDict::new(py);
-			globals
-				.set_item("__name__", "__main__")
-				.map_err(|e| anyhow!("Failed to set __name__ as __main__: {:?}", e))?;
-			py.run(&flush_code, None, Some(&globals))
-				.expect("Failed to flush Python stdout/stderr");
+    thread::spawn(move || {
+        let result: Result<(
+            Result<R, anyhow::Error>,
+            Option<Result<HashMap<i64, HashMap<String, T>>>>,
+        )> = Python::with_gil(|py| {
+            let globals = PyDict::new(py);
+            globals
+                .set_item("__name__", "__main__")
+                .map_err(|e| anyhow!("Failed to set __name__ as __main__: {:?}", e))?;
+            py.run(&flush_code, None, Some(&globals))
+                .expect("Failed to flush Python stdout/stderr");
 
-			let sys = py
-				.import("sys")
-				.map_err(|e| anyhow!("Failed to load sys: {:?}", e))?;
-			let io = py
-				.import("io")
-				.map_err(|e| anyhow!("Failed to load io: {:?}", e))?;
+            let sys = py
+                .import("sys")
+                .map_err(|e| anyhow!("Failed to load sys: {:?}", e))?;
+            let io = py
+                .import("io")
+                .map_err(|e| anyhow!("Failed to load io: {:?}", e))?;
 
-			let original_stdin = sys.getattr("stdin")?;
+            let original_stdin = sys.getattr("stdin")?;
 
-			// 设置 stdin
-			if let Some(std_in) = &std_in_owned {
-				let input = io
-					.call_method1("StringIO", (std_in,))
-					.map_err(|e| anyhow!("Failed to prepare input: {:?}", e))?;
-				sys.setattr("stdin", &input).expect("Failed to set stdin");
-			}
+            // 设置 stdin
+            if let Some(std_in) = &std_in_owned {
+                let input = io
+                    .call_method1("StringIO", (std_in,))
+                    .map_err(|e| anyhow!("Failed to prepare input: {:?}", e))?;
+                sys.setattr("stdin", &input).expect("Failed to set stdin");
+            }
 
-			// 导入库
-			if let Some(lib_names) = &libs_owned {
-				for lib_name in lib_names {
-					let lib = py
-						.import(lib_name)
-						.map_err(|e| anyhow!("Failed to load lib: {:?}", e))?;
-					globals
-						.set_item(lib_name.as_str(), lib)
-						.map_err(|e| anyhow!("Failed to set lib: {:?}", e))?;
-				}
-			}
+            // 导入库
+            if let Some(lib_names) = &libs_owned {
+                for lib_name in lib_names {
+                    let lib = py
+                        .import(lib_name)
+                        .map_err(|e| anyhow!("Failed to load lib: {:?}", e))?;
+                    globals
+                        .set_item(lib_name.as_str(), lib)
+                        .map_err(|e| anyhow!("Failed to set lib: {:?}", e))?;
+                }
+            }
 
-			let original_stdout = sys.getattr("stdout")?;
+            let original_stdout = sys.getattr("stdout")?;
 
-			let output = io
-				.call_method0("StringIO")
-				.map_err(|e| anyhow!("Failed to prepare output: {:?}", e))?;
-			sys.setattr("stdout", &output)
-				.map_err(|e| anyhow!("Failed to set stdout: {:?}", e))?;
+            let output = io
+                .call_method0("StringIO")
+                .map_err(|e| anyhow!("Failed to prepare output: {:?}", e))?;
+            sys.setattr("stdout", &output)
+                .map_err(|e| anyhow!("Failed to set stdout: {:?}", e))?;
 
-			if enable_trace {
-				sys.call_method1("settrace", (py.None(),))
-					.map_err(|e| anyhow!("Failed to settrace: {:?}", e))?;
-			}
+            if enable_trace {
+                sys.call_method1("settrace", (py.None(),))
+                    .map_err(|e| anyhow!("Failed to settrace: {:?}", e))?;
+            }
 
-			py.run(c_code.as_c_str(), Some(&globals), Some(&globals))
-				.map_err(|e| anyhow!("Failed to run code: {:?}", e))?;
+            py.run(c_code.as_c_str(), Some(&globals), Some(&globals))
+                .map_err(|e| anyhow!("PyRun Error: {:?}", e))?;
 
-			let output = output
-				.getattr("getvalue")
-				.expect("Failed to getvalue")
-				.call0()
-				.expect("Failed to getvalue")
-				.extract::<R>()
-				.map_err(|e| anyhow!("Failed to extract output: {:?}", e));
+            let output = output
+                .getattr("getvalue")
+                .expect("Failed to getvalue")
+                .call0()
+                .expect("Failed to getvalue")
+                .extract::<R>()
+                .map_err(|e| anyhow!("Failed to extract output: {:?}", e));
 
-			// 获取 trace 输出
-			let trace_output = if enable_trace {
-				match globals.get_item("trace_output") {
-					Ok(Some(raw_trace_obj)) => {
-						let parsed = raw_trace_obj
-							.extract::<HashMap<i64, HashMap<String, PyObject>>>()
-							.ok() // 提取 `PyObject` 失败时返回 `None`
-							.map(|pyobj_trace_obj| {
-								pyobj_trace_obj
-									.into_iter()
-									.filter_map(|(k, v)| {
-										let parsed_map = v
-											.into_iter()
-											.filter_map(|(k, v)| {
-												v.extract::<T>(py).ok().map(|v| (k, v))
-											}) // 过滤无效的转换
-											.collect::<HashMap<String, T>>();
+            // 获取 trace 输出
+            let trace_output = if enable_trace {
+                match globals.get_item("trace_output") {
+                    Ok(Some(raw_trace_obj)) => {
+                        let parsed = raw_trace_obj
+                            .extract::<HashMap<i64, HashMap<String, PyObject>>>()
+                            .ok() // 提取 `PyObject` 失败时返回 `None`
+                            .map(|pyobj_trace_obj| {
+                                pyobj_trace_obj
+                                    .into_iter()
+                                    .filter_map(|(k, v)| {
+                                        let parsed_map = v
+                                            .into_iter()
+                                            .filter_map(|(k, v)| {
+                                                v.extract::<T>(py).ok().map(|v| (k, v))
+                                            }) // 过滤无效的转换
+                                            .collect::<HashMap<String, T>>();
 
-										if parsed_map.is_empty() {
-											None
-										} else {
-											Some((k, parsed_map))
-										}
-									})
-									.collect::<HashMap<i64, HashMap<String, T>>>()
-							})
-							.ok_or(anyhow!(
-								"Failed to extract trace_output: {:?}",
-								raw_trace_obj
-							))?;
-						Some(Ok(parsed))
-					}
-					_ => Some(Err(anyhow!("Failed to get trace_output"))),
-				}
-			} else {
-				None
-			};
+                                        if parsed_map.is_empty() {
+                                            None
+                                        } else {
+                                            Some((k, parsed_map))
+                                        }
+                                    })
+                                    .collect::<HashMap<i64, HashMap<String, T>>>()
+                            })
+                            .ok_or(anyhow!(
+                                "Failed to extract trace_output: {:?}",
+                                raw_trace_obj
+                            ))?;
+                        Some(Ok(parsed))
+                    }
+                    _ => Some(Err(anyhow!("Failed to get trace_output"))),
+                }
+            } else {
+                None
+            };
 
-			// 恢复 stdin
-			sys.setattr("stdin", original_stdin)
-				.expect("Failed to restore stdin");
-			sys.setattr("stdout", original_stdout)
-				.expect("Failed to restore stdout");
+            // 恢复 stdin
+            sys.setattr("stdin", original_stdin)
+                .expect("Failed to restore stdin");
+            sys.setattr("stdout", original_stdout)
+                .expect("Failed to restore stdout");
 
-			Ok((output, trace_output))
-		});
+            Ok((output, trace_output))
+        });
 
-		tx.send(result).unwrap();
-	});
+        tx.send(result).unwrap();
+    });
 
-	// 处理 `recv()`
-	match rx.recv() {
-		Ok(Ok((output, trace))) => Ok((
-			output.map_err(|e| anyhow!(e))?,
-			match trace {
-				Some(trace) => Some(trace.map_err(|e| anyhow!(e))?),
-				None => None,
-			},
-		)),
-		Ok(Err(e)) => Err(anyhow!(e)),
-		Err(e) => Err(anyhow!(e)),
-	}
+    // 处理 `recv()`
+    match rx.recv() {
+        Ok(Ok((output, trace))) => Ok((
+            output.map_err(|e| anyhow!(e))?,
+            match trace {
+                Some(trace) => Some(trace.map_err(|e| anyhow!(e))?),
+                None => None,
+            },
+        )),
+        Ok(Err(e)) => Err(anyhow!(e)),
+        Err(e) => Err(anyhow!(e)),
+    }
 }
 
 pub fn run_from_file<R>(
-	code_path: impl AsRef<Path>,
-	std_in: Option<impl AsRef<str>>,
-	libs_to_import: Option<&[impl AsRef<str>]>,
+    code_path: impl AsRef<Path>,
+    std_in: Option<impl AsRef<str>>,
+    libs_to_import: Option<&[impl AsRef<str>]>,
 ) -> Result<R>
 where
-	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
 {
-	let code = std::fs::read_to_string(code_path.as_ref())
-		.map_err(|e| anyhow!("Failed to read file: {:?}", e))?;
+    let code = std::fs::read_to_string(code_path.as_ref())
+        .map_err(|e| anyhow!("Failed to read file: {:?}", e))?;
 
-	let (res, _) = run_code_internal::<R, Empty>(code, std_in, libs_to_import, false)?;
-	Ok(res)
+    let (res, _) = run_code_internal::<R, Empty>(code, std_in, libs_to_import, false)?;
+    Ok(res)
 }
 
 pub fn run_from_file_with_trace<R, T>(
-	code_path: impl AsRef<Path>,
-	std_in: Option<impl AsRef<str>>,
-	libs_to_import: Option<&[impl AsRef<str>]>,
+    code_path: impl AsRef<Path>,
+    std_in: Option<impl AsRef<str>>,
+    libs_to_import: Option<&[impl AsRef<str>]>,
 ) -> Result<(R, HashMap<i64, HashMap<String, T>>)>
 where
-	R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
-	T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    R: for<'a> FromPyObject<'a> + Debug + Send + 'static,
+    T: for<'a> FromPyObject<'a> + Debug + Send + 'static,
 {
-	let code = std::fs::read_to_string(code_path.as_ref())
-		.map_err(|e| anyhow!("Failed to read file: {:?}", e))?;
+    let code = std::fs::read_to_string(code_path.as_ref())
+        .map_err(|e| anyhow!("Failed to read file: {:?}", e))?;
 
-	let (res, trace) = run_code_internal(code, std_in, libs_to_import, true)?;
-	Ok((res, trace.expect("Trace should be enabled")))
+    let (res, trace) = run_code_internal(code, std_in, libs_to_import, true)?;
+    Ok((res, trace.expect("Trace should be enabled")))
 }
 
 #[cfg(test)]
 mod tests {
-	use crate::python::{run_code, run_code_with_trace};
+    use crate::python::{run_code, run_code_with_trace};
 
-	#[test]
-	fn test_run_python_code() {
-		let code = r#"
+    #[test]
+    fn test_run_python_code() {
+        let code = r#"
 import sys
 t = input()
 print(t)"#;
-		let res: Result<String, anyhow::Error> = run_code(code, Some("test"), Some(&["math"]));
-		match res {
-			Ok(output) => assert_eq!(output, "test\n"),
-			Err(e) => panic!("Failed to run code: {:?}", e),
-		}
-	}
+        let res: Result<String, anyhow::Error> = run_code(code, Some("test"), Some(&["math"]));
+        match res {
+            Ok(output) => assert_eq!(output, "test\n"),
+            Err(e) => panic!("Failed to run code: {:?}", e),
+        }
+    }
 
-	#[test]
-	fn test_run_python_code_with_trace() {
-		let code = r#"
+    #[test]
+    fn test_run_python_code_with_trace() {
+        let code = r#"
 a = list(range(0, 100))
 b = a[21::2]
 b.append(123)
 b.extend(list(range(200, 301, 2)))
 "#;
-		let res = run_code_with_trace::<String, Vec<i64>>(code, None::<String>, None::<&[String]>);
-		match res {
-			Ok((output, trace)) => {
-				assert_eq!(output, "");
-				assert_eq!(trace.len(), 3);
-				println!("{:?}", trace);
-			}
-			Err(e) => panic!("Failed to run code: {:?}", e),
-		}
-	}
+        let res = run_code_with_trace::<String, Vec<i64>>(code, None::<String>, None::<&[String]>);
+        match res {
+            Ok((output, trace)) => {
+                assert_eq!(output, "");
+                assert_eq!(trace.len(), 3);
+                println!("{:?}", trace);
+            }
+            Err(e) => panic!("Failed to run code: {:?}", e),
+        }
+    }
 }
 
 #[derive(Debug, TypedBuilder, Eq, PartialEq, Hash)]
 pub struct Message {
-	#[builder(default=String::new())]
-	pub title: String,
-	#[builder(default=String::new())]
-	pub description: String,
+    #[builder(default=String::new())]
+    pub title: String,
+    #[builder(default=String::new())]
+    pub description: String,
 }
