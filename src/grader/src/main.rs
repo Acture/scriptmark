@@ -56,13 +56,13 @@ fn main() {
                         None => panic!("未找到对应作业"),
                     };
                     info!("所选作业：{}", selected_assignment_name);
-                    let (results, hash_map) = check::check_assignment(
+                    let (mut results, hash_map) = check::check_assignment(
                         selected_class,
                         &selected_assignment_name,
                         CONFIG.custom_solution,
                     );
                     'select_submissions_by_student: loop {
-                        match tui::select_test_result(&results, &hash_map) {
+                        match tui::select_test_result(&mut results, &hash_map) {
                             (tui::SelectStatus::Exit, _) => {
                                 info!("退出程序");
                                 exit(0);
