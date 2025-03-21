@@ -16,7 +16,7 @@ pub enum SelectStatus {
 pub fn select_class(classes: &[class::Class]) -> (SelectStatus, Option<&class::Class>) {
     let class_options = classes
         .iter()
-        .map(| class| class.name.as_str())
+        .map(|class| class.name.as_str())
         .chain(std::iter::once("退出"))
         .collect::<Vec<_>>();
     let class_selector = Select::new()
@@ -64,17 +64,20 @@ pub fn select_assignment(selected_class: &class::Class) -> (SelectStatus, Option
 }
 
 pub fn select_test_result<'a>(
-    submissions: &'a HashMap<Student, Vec<TestResult>>,
+    submissions: &'a mut HashMap<Student, Vec<TestResult>>,
     _hash_map: &'a HashMap<u64, Vec<Student>>,
 ) -> (SelectStatus, Option<&'a [TestResult]>) {
     let results_keys = submissions
         .keys()
+        .cloned()
         .sorted_by(|a, b| a.sis_login_id.cmp(&b.sis_login_id))
         .collect::<Vec<_>>();
     let record_options = results_keys
         .iter()
         .map(|student| -> std::string::String {
-            let record = submissions.get(student).expect("Failed to get test result");
+            let record: &mut Vec<TestResult> = submissions
+                .get_mut(student)
+                .expect("Failed to get test result");
             let pass_count = record.iter().filter(|r| r.passed).count();
             let info_count = record.iter().filter(|r| r.infos.is_some()).count();
             let add_info_count = record
@@ -105,13 +108,32 @@ pub fn select_test_result<'a>(
                     })
             };
 
-            let hash_collision_status = _hash_map.iter().filter(|(_, v)| v.len() > 1).any(
-                |(_hash, same_hash_students)| {
-                    same_hash_students
-                        .iter()
-                        .any(|same_hash_student| *student == same_hash_student)
-                },
-            );
+            let collided_students: Vec<_> = _hash_map
+                .iter()
+                .filter(|(_, v)| v.len() > 1 && v.contains(student))
+                .flat_map(|(_hash, v)| {
+                    v.iter()
+                        .filter(|s| s.sis_login_id != student.sis_login_id)
+                        .map(|s| format!("{} - {}", s.name, s.sis_login_id))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            record.push(TestResult {
+                passed: false,
+                infos: Some(HashMap::from([(
+                    "Hash Collision".to_string(),
+                    format!(
+                        "Collided with {} students: {}",
+                        collided_students.len(),
+                        collided_students.join(", ")
+                    ),
+                )])),
+                additional_infos: None,
+                additional_status: Some(AdditionalStatus::None),
+            });
+
+            let hash_collision_status = !collided_students.is_empty();
 
             format!(
                 "{:<10}\t{:<10}\t{:<4}\t{:>4}\t{:>2}/{:>2}\t{:<5}\t{:>2} infos\t{:>2} add_infos",
@@ -149,7 +171,7 @@ pub fn select_test_result<'a>(
         "退出" => (SelectStatus::Exit, None),
         _ => {
             let selected_test_result = submissions
-                .get(results_keys[selected_record_index])
+                .get(&results_keys[selected_record_index])
                 .expect("Failed to get test result");
             (SelectStatus::Selected, Some(selected_test_result))
         }
