@@ -78,6 +78,45 @@ pub fn select_test_result<'a>(
             let record: &mut Vec<TestResult> = submissions
                 .get_mut(student)
                 .expect("Failed to get test result");
+
+            let collided_students: Vec<_> = _hash_map
+                .iter()
+                .filter(|(_, v)| v.len() > 1 && v.contains(student))
+                .flat_map(|(_hash, v)| {
+                    v.iter()
+                        .filter(|s| s.sis_login_id != student.sis_login_id)
+                        .map(|s| format!("{} - {}", s.name, s.sis_login_id))
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+
+            let collide_test_result = match collided_students.is_empty() {
+                true => TestResult {
+                    passed: true,
+                    infos: None,
+                    additional_infos: None,
+                    additional_status: Some(AdditionalStatus::None),
+                },
+                false => TestResult {
+                    passed: false,
+                    infos: Some(HashMap::from([(
+                        "Hash Collision detected".to_string(),
+                        format!(
+                            "Collided with {} students: {}",
+                            collided_students.len(),
+                            collided_students.join(", ")
+                        ),
+                    )])),
+                    additional_infos: None,
+                    additional_status: Some(AdditionalStatus::None),
+                },
+            };
+
+            let hash_collision_status = !collide_test_result.passed;
+
+            if !record.contains(&collide_test_result) {
+                record.push(collide_test_result);
+            }
             let pass_count = record.iter().filter(|r| r.passed).count();
             let info_count = record.iter().filter(|r| r.infos.is_some()).count();
             let add_info_count = record
@@ -108,40 +147,13 @@ pub fn select_test_result<'a>(
                     })
             };
 
-            let collided_students: Vec<_> = _hash_map
-                .iter()
-                .filter(|(_, v)| v.len() > 1 && v.contains(student))
-                .flat_map(|(_hash, v)| {
-                    v.iter()
-                        .filter(|s| s.sis_login_id != student.sis_login_id)
-                        .map(|s| format!("{} - {}", s.name, s.sis_login_id))
-                        .collect::<Vec<_>>()
-                })
-                .collect();
-
-            record.push(TestResult {
-                passed: false,
-                infos: Some(HashMap::from([(
-                    "Hash Collision".to_string(),
-                    format!(
-                        "Collided with {} students: {}",
-                        collided_students.len(),
-                        collided_students.join(", ")
-                    ),
-                )])),
-                additional_infos: None,
-                additional_status: Some(AdditionalStatus::None),
-            });
-
-            let hash_collision_status = !collided_students.is_empty();
-
             format!(
                 "{:<10}\t{:<10}\t{:<4}\t{:>4}\t{:>2}/{:>2}\t{:<5}\t{:>2} infos\t{:>2} add_infos",
                 student.name,
                 student.sis_login_id,
-                match record.is_empty() {
-                    true => "未提交",
-                    false => "已提交",
+                match record.len() > 1 {
+                    true => "已提交",
+                    false => "未提交",
                 },
                 match hash_collision_status {
                     true => "冲突",
