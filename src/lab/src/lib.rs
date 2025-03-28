@@ -8,6 +8,7 @@ mod bigger;
 mod chicken_rabbit;
 mod circle_area;
 mod circle_area_2;
+mod grading;
 mod poem;
 mod population;
 mod sequence;
@@ -31,6 +32,8 @@ pub enum TestSuiteType {
     Poem,
     #[strum(serialize = "bigger")]
     Bigger,
+    #[strum(serialize = "grading")]
+    Grading,
 }
 
 impl TestSuiteType {
@@ -75,6 +78,10 @@ lazy_static! {
             (
                 TestSuiteType::Bigger,
                 Box::new(bigger::BIGGER_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
+            ),
+            (
+                TestSuiteType::Grading,
+                Box::new(grading::GRADING_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
             )
         ]);
 }
