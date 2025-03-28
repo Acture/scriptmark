@@ -7,6 +7,7 @@ use suite::test_suite::TestSuiteObject;
 mod chicken_rabbit;
 mod circle_area;
 mod circle_area_2;
+mod poem;
 mod population;
 mod sequence;
 mod three_number;
@@ -25,6 +26,8 @@ pub enum TestSuiteType {
     CircleArea2,
     #[strum(serialize = "chicken_rabbit")]
     ChickenRabbit,
+    #[strum(serialize = "poem")]
+    Poem,
 }
 
 impl TestSuiteType {
@@ -61,6 +64,10 @@ lazy_static! {
                 TestSuiteType::ChickenRabbit,
                 Box::new(chicken_rabbit::CHICKEN_RABBIT_TEST_SUITE.clone())
                     as Box<dyn TestSuiteObject>,
+            ),
+            (
+                TestSuiteType::Poem,
+                Box::new(poem::POEM_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
             ),
         ]);
 }
