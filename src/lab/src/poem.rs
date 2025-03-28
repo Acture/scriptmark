@@ -18,7 +18,7 @@ fn get_answers() -> OutputType {
     (1..20).map(|_| vec!["".to_string()]).collect()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, _expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
     let mut rec_set = HashSet::new();
     result
         .iter()

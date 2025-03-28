@@ -209,7 +209,6 @@ mod tests {
     #[test]
     fn test_runner_fn() {
         let inputs = generate_inputs();
-        let current_path = std::env::current_dir().expect("Failed to get current directory");
         let path = Path::new("src/solutions/chicken_rabbit.py");
         let result = runner_fn(&path);
         assert_eq!(
