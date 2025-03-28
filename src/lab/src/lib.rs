@@ -4,6 +4,7 @@ use strum::IntoEnumIterator;
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
 use suite::test_suite::TestSuiteObject;
 
+mod bigger;
 mod chicken_rabbit;
 mod circle_area;
 mod circle_area_2;
@@ -28,6 +29,8 @@ pub enum TestSuiteType {
     ChickenRabbit,
     #[strum(serialize = "poem")]
     Poem,
+    #[strum(serialize = "bigger")]
+    Bigger,
 }
 
 impl TestSuiteType {
@@ -69,5 +72,9 @@ lazy_static! {
                 TestSuiteType::Poem,
                 Box::new(poem::POEM_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
             ),
+            (
+                TestSuiteType::Bigger,
+                Box::new(bigger::BIGGER_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
+            )
         ]);
 }
