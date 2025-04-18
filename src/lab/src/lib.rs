@@ -9,8 +9,11 @@ mod chicken_rabbit;
 mod circle_area;
 mod circle_area_2;
 mod grading;
+mod hundred_chickens;
+mod k_number;
 mod poem;
 mod population;
+mod rhombus;
 mod sequence;
 mod three_number;
 
