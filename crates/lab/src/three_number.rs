@@ -24,7 +24,7 @@ fn get_answer(inputs: &InputType) -> OutputType {
 }
 
 fn generate_inputs() -> Vec<String> {
-	util::generate(42, 60, 1, 100)
+	common::utils::generate(42, 60, 1, 100)
 		.chunks_exact(3)
 		.map(|chunk| {
 			chunk
@@ -82,8 +82,8 @@ fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite
 				.zip(ans.lines())
 				.enumerate()
 				.for_each(|(i, (res_line, ans_line))| {
-					let res_nums = util::extract_numbers::<i64>(res_line);
-					let ans_nums = util::extract_numbers::<i64>(ans_line);
+					let res_nums = common::utils::extract_numbers::<i64>(res_line);
+					let ans_nums = common::utils::extract_numbers::<i64>(ans_line);
 
 					let t = match i {
 						0 => "Maximum",

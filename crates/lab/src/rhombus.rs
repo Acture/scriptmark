@@ -30,7 +30,7 @@ type INPUT_TYPE = Vec<i64>;
 type OUTPUT_TYPE = Vec<String>;
 
 fn get_inputs() -> INPUT_TYPE {
-	util::generate(42, 10, 1, 20)
+	common::utils::generate(42, 10, 1, 20)
 }
 
 fn get_answer_rhombus(radius: usize) -> String {
@@ -73,7 +73,7 @@ fn judge_fn(_results: &OUTPUT_TYPE, _answers: &OUTPUT_TYPE) -> Vec<suite::test_s
 			let mut test_result = TestResult::builder().passed(true).build();
 
 			result.lines().zip(answer.lines()).enumerate().for_each(
-				|(i, (result_line, answer_line))| {
+                |(i, (result_line, answer_line))| {
 					let reversed_answer = reverse_string(answer_line);
 					if result_line != answer_line
 						&& result_line != reversed_answer
@@ -138,7 +138,7 @@ mod tests {
 		let answers = get_answers();
 		for (input, answer) in inputs.iter().zip(answers.iter()) {
 			let result = runner_fn(&Path::new(
-				"../../data/COMP110042_09/lab6_rhombus/20300120010_145502_5566366_lab6.1.py",
+                "../../data/COMP110042_09/lab6_rhombus/20300120010_145502_5566366_lab6.1.py",
 			));
 			println!("input: {}, answer: {}", input, answer);
 			println!("result: {}", result[0]);
@@ -150,7 +150,7 @@ mod tests {
 		let inputs = get_inputs();
 		let answers = get_answers();
 		let test_examples = runner_fn(&Path::new(
-			"../../data/COMP110042_09/lab6_rhombus/23300120006_231161_5570103_Lab6_1.py",
+            "../../data/COMP110042_09/lab6_rhombus/23300120006_231161_5570103_Lab6_1.py",
 		));
 		let result = judge_fn(&test_examples, &answers);
 
