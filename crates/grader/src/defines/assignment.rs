@@ -1,75 +1,41 @@
-use crate::defines::student::Student;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use crate::defines::keyed::{ArcKey, Keyed};
+use crate::defines::task::Task;
+use itertools::Itertools;
+use serde::{Deserialize, Serialize};
+use std::fmt::{Display, Formatter};
+use std::hash::Hash;
 use typed_builder::TypedBuilder;
 
-#[derive(Debug, TypedBuilder)]
+type StudentName = String;
+
+
+#[derive(TypedBuilder, Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
 	pub name: String,
-	pub path: PathBuf,
+	#[builder(default = vec!())]
+	pub tasks: Vec<Task>,
+	#[builder(default = 100.0)]
+	pub points_possible: f64,
 }
 
-impl Assignment {
-	pub fn group_by_student(&self, students: &[Student]) -> HashMap<String, Vec<PathBuf>> {
-		let mut rec: HashMap<String, Vec<PathBuf>> = students
-			.iter()
-			.map(|student| (student.sis_login_id.to_string(), vec![]))
-			.collect();
+impl PartialEq for Assignment {
+	fn eq(&self, other: &Self) -> bool {
+		self.name == other.name
+	}
+}
 
-		for entry in self.path.read_dir().expect("read_dir call failed") {
-			let entry = entry.expect("entry failed");
-			let path = entry.path();
+impl Eq for Assignment {}
 
-			if path.is_dir() {
-				let id = path
-					.file_stem()
-					.expect("file_stem failed")
-					.to_string_lossy()
-					.to_string();
-				path.read_dir()
-					.expect("read_dir call failed")
-					.for_each(|entry| {
-						let entry = entry.expect("entry failed");
-						let path = entry.path();
-						if path.extension() == Some("py".as_ref()) {
-							rec.entry(id.clone()).or_default().push(path);
-						}
-					});
-			} else if path.is_file() && path.extension() == Some("py".as_ref()) {
-				let file_name = path
-					.file_name()
-					.expect("file_name failed")
-					.to_string_lossy()
-					.to_string();
-				let id = file_name
-					.split('_')
-					.next()
-					.expect("split failed")
-					.to_string();
-				rec.entry(id.clone()).or_default().push(path);
-			}
-		}
+impl Hash for Assignment {
+	fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+		self.name.hash(state);
+	}
+}
 
-		rec.iter()
-			.map(|(id, file_paths)| {
-				let dir = self.path.join(id);
-				if !dir.exists() {
-					std::fs::create_dir(&dir).expect("create_dir failed");
-				}
-				let new_paths: Vec<PathBuf> = file_paths
-					.iter()
-					.map(|file_path| match file_path.strip_prefix(&dir) {
-						Ok(_) => file_path.to_path_buf(),
-						Err(_) => {
-							let new_path =
-								dir.join(file_path.file_name().expect("file_name failed"));
-							std::fs::rename(file_path, &new_path).expect("rename failed");
-							new_path
-						}
-					})
-					.collect();
-				(id.clone(), new_paths)
-			})
-			.collect()
+
+impl Keyed for Assignment {
+	type Key = String;
+	fn key(&self) -> Self::Key {
+		self.name.clone()
 	}
 }

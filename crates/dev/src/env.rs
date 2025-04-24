@@ -28,25 +28,21 @@ mod tests {
 	#[test]
 	fn test_get_dev_crate_dir() {
 		assert!(DEV_CRATE_DIR.exists());
-		println!("DEV_CRATE_DIR: {:?}", DEV_CRATE_DIR.display());
 	}
 
 	#[test]
 	fn test_get_crates_dir() {
 		assert!(CRATES_DIR.exists());
-		println!("CRATES_DIR: {:?}", CRATES_DIR.display());
 	}
 
 	#[test]
 	fn test_get_project_dir() {
 		assert!(PROJECT_DIR.exists());
-		println!("PROJECT_DIR: {:?}", PROJECT_DIR.display());
 	}
 	
 	#[test]
 	fn test_get_data_dir() {
 		assert!(DATA_DIR.exists());
-		println!("DATA_DIR: {:?}", DATA_DIR.display());
 	}
 }
 

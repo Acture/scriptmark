@@ -57,134 +57,100 @@ fn runner_fn(path: &Path) -> Vec<String> {
 		panic!("Test file not found: {}", path.display());
 	}
 	let content = fs::read_to_string(path).expect("Failed to read file");
-	INPUTS
-		.iter()
-		.map(|input| {
-			match runner::python::run_code(
-				content.clone(),
-				Some(input.to_string()),
-				None::<&[String]>,
-			) {
-				Ok(output) => output,
-				Err(e) => format!("Failed to run code: {:?}\n\nContent:\n\n{}\n\n", e, content),
-			}
-		})
-		.collect::<Vec<_>>()
+	INPUTS.iter().map(|input| {
+		match runner::python::run_code(
+			content.clone(),
+			Some(input.to_string()),
+			None::<&[String]>,
+		) {
+			Ok(output) => output,
+			Err(e) => format!("Failed to run code: {:?}\n\nContent:\n\n{}\n\n", e, content),
+		}
+	}).collect::<Vec<_>>()
 }
 
 fn judge_fn(result: &Vec<String>, expected: &Vec<String>) -> Vec<TestResult> {
-	result
-		.iter()
-		.zip(expected.iter())
-		.map(|(result, expected)| judge(result, expected))
-		.collect::<Vec<TestResult>>()
+	result.iter().zip(expected.iter()).map(|(result, expected)| judge(result, expected)).collect::<Vec<TestResult>>()
 }
 fn judge(s: &str, t: &str) -> TestResult {
 	let mut res = TestResult::builder().build();
-	s.lines()
-		.zip(t.lines())
-		.enumerate()
-		.for_each(|(i, (s_line, t_line))| match i {
-			0 => {
-				let s_extracted = common::utils::extract_numbers::<f64>(s_line);
-				let t_extracted = common::utils::extract_numbers::<f64>(t_line);
+	s.lines().zip(t.lines()).enumerate().for_each(|(i, (s_line, t_line))| match i {
+		0 => {
+			let s_extracted = common::utils::extract_numbers::<f64>(s_line);
+			let t_extracted = common::utils::extract_numbers::<f64>(t_line);
 
-				if s_extracted.len() != t_extracted.len(){
-					res.infos
-						.get_or_insert_with(HashMap::new)
-						.entry("More Than One Number".to_string())
-						.or_insert(format!(
-							"Expected: <{}>, Got: <{}>",
-							s_extracted.len(),
-							t_extracted.len()
-						));
-				}
-				let s_area = match s_extracted.first() {
-					Some(value) => *value,
-					None => {
-						res.passed = false;
-						res.infos
-							.get_or_insert_with(HashMap::new)
-							.entry("Area".to_string())
-							.or_insert(format!(
-								"Failed to extract number from line {}: {:?}",
-								i, s
-							));
-						return;
-					}
-				};
-				let t_area = match t_extracted.first() {
-					Some(value) => *value,
-					None => {
-						res.passed = false;
-						res.infos
-							.get_or_insert_with(HashMap::new)
-							.entry("Area".to_string())
-							.or_insert(format!(
-								"Failed to extract number from line {}: {:?}",
-								i, t
-							));
-						return;
-					}
-				};
-				let offset_percent = 0.0001;
-				if (s_area - t_area).abs() > offset_percent * s_area {
+			if s_extracted.len() != t_extracted.len() {
+				res.infos.get_or_insert_with(HashMap::new).entry("More Than One Number".to_string()).or_insert(format!(
+					"Expected: <{}>, Got: <{}>",
+					s_extracted.len(),
+					t_extracted.len()
+				));
+			}
+			let s_area = match s_extracted.first() {
+				Some(value) => *value,
+				None => {
 					res.passed = false;
-					res.infos
-						.get_or_insert_with(HashMap::new)
-						.entry("Area".to_string())
-						.or_insert(format!("Expected: <{}>, Got: <{}>", t_area, s_area));
-				} else {
-					res.passed = true;
+					res.infos.get_or_insert_with(HashMap::new).entry("Area".to_string()).or_insert(format!(
+						"Failed to extract number from line {}: {:?}",
+						i, s
+					));
+					return;
 				}
-			}
-			1 => {
-				let s_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
-					Some(value) => value,
-					None => {
-						res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
-						res.additional_infos
-							.get_or_insert_with(HashMap::new)
-							.entry("Count".to_string())
-							.or_insert(format!(
-								"Failed to extract number from line {}: {:?}",
-								i, s
-							));
-						return;
-					}
-				};
-				let t_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
-					Some(value) => value,
-					None => {
-						res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
-						res.additional_infos
-							.get_or_insert_with(HashMap::new)
-							.entry("Count".to_string())
-							.or_insert(format!(
-								"Failed to extract number from line {}: {:?}",
-								i, t
-							));
-						return;
-					}
-				};
-				if s_count != t_count {
-					res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
-					res.additional_infos
-						.get_or_insert_with(HashMap::new)
-						.entry("Count".to_string())
-						.or_insert(format!("Expected: <{}>, Got: <{}>", t_count, s_count));
-				} else {
-					res.additional_status = Some(suite::test_suite::AdditionalStatus::Full);
+			};
+			let t_area = match t_extracted.first() {
+				Some(value) => *value,
+				None => {
+					res.passed = false;
+					res.infos.get_or_insert_with(HashMap::new).entry("Area".to_string()).or_insert(format!(
+						"Failed to extract number from line {}: {:?}",
+						i, t
+					));
+					return;
 				}
-			}
-			_ => {
+			};
+			let offset_percent = 0.0001;
+			if (s_area - t_area).abs() > offset_percent * s_area {
 				res.passed = false;
-				res.infos
-					.get_or_insert_with(HashMap::new)
-					.entry("Extra Lines".to_string())
-					.or_insert(format!("Extra line: {}", s_line));
+				res.infos.get_or_insert_with(HashMap::new).entry("Area".to_string()).or_insert(format!("Expected: <{}>, Got: <{}>", t_area, s_area));
+			} else {
+				res.passed = true;
 			}
-		});
+		}
+		1 => {
+			let s_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
+				Some(value) => value,
+				None => {
+					res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+					res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!(
+						"Failed to extract number from line {}: {:?}",
+						i, s
+					));
+					return;
+				}
+			};
+			let t_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
+				Some(value) => value,
+				None => {
+					res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+					res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!(
+						"Failed to extract number from line {}: {:?}",
+						i, t
+					));
+					return;
+				}
+			};
+			if s_count != t_count {
+				res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+				res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!("Expected: <{}>, Got: <{}>", t_count, s_count));
+			} else {
+				res.additional_status = Some(suite::test_suite::AdditionalStatus::Full);
+			}
+		}
+		_ => {
+			res.passed = false;
+			res.infos.get_or_insert_with(HashMap::new).entry("Extra Lines".to_string()).or_insert(format!("Extra line: {}", s_line));
+		}
+	});
 	res
 }
 
