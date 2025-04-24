@@ -28,12 +28,12 @@ impl Display for Class {
 }
 
 impl SaveNLoad for Class {
-	fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
-		let file_name = path.as_ref().join(PathBuf::from(format!("{} - {}.json", self.id, self.name)));
+	fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+		let file_name = path.to_path_buf().join(PathBuf::from(format!("{} - {}.json", self.id, self.name)));
 		serde_json::to_writer_pretty(File::create(file_name)?, self)?;
 		Ok(())
 	}
-	fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+	fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
 		let class: Class = serde_json::from_reader(File::open(path)?)?;
 		Ok(class)
 	}
@@ -61,9 +61,9 @@ impl Class {
 	pub fn prepare_class(p0: &Path) -> Vec<Class> {
 		todo!()
 	}
-	pub fn parse_from_csv(csv_path: PathBuf, class_dir: PathBuf,
-                            name: Option<&str>, id: Option<&str>, infer_from_path: bool)
-                            -> Result<Class, Box<dyn std::error::Error>> {
+	pub fn parse_from_csv(	csv_path: PathBuf, class_dir: PathBuf,
+							name: Option<&str>, id: Option<&str>, infer_from_path: bool)
+							-> Result<Class, Box<dyn std::error::Error>> {
 		let (name, id) = match (infer_from_path, name, id) {
 			(true, _, _) => try_find_class_name_and_id_from_path(&csv_path)?,
 			(false, Some(name), Some(id)) => (name.to_string(), id.to_string()),

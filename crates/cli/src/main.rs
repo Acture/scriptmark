@@ -1,21 +1,16 @@
-use log::{info, warn};
-use once_cell::sync::Lazy;
+use clap::Parser;
+use log::{error, info, warn};
 use std::env;
-use std::fmt::Debug;
-use std::ops::Deref;
+use std::path::Path;
 
 mod tui;
+mod args;
+
+use crate::args::Args;
 use common::config;
+use common::defines;
+use common::traits::savenload::SaveNLoad;
 
-
-pub static CONFIG: Lazy<config::Config> = Lazy::new(|| {
-	let c = config::prepare_config();
-	c.unwrap_or_else(|e| {
-		warn!("解析配置失败: {}", e);
-		config::Config::builder()
-			.build()
-	})
-});
 
 fn init_logger() {
 	env_logger::Builder::new()
@@ -24,12 +19,46 @@ fn init_logger() {
 		.init();
 }
 
+fn load_saving(storage_path: &Path) -> Result<Vec<defines::class::Class>, Box<dyn std::error::Error>> {
+	storage_path.read_dir()?.filter_map(
+		|entry| {
+			let path = entry.ok()?.path();
+			match path.extension()?.to_str()?.eq_ignore_ascii_case("json") {
+				true => {
+					Some(defines::class::Class::load(&path))
+				}
+				false => None,
+			}
+		}
+	).collect()
+}
+
 fn main() {
 	init_logger();
 
-	info!("数据目录：{}, 存储目录：{}", CONFIG.data_dir.to_string_lossy(), CONFIG.storage_dir.to_string_lossy());
+	let args = Args::parse();
 
-	println!("{:?}", *CONFIG);
+	let config = config::prepare_config(&args.config_path).unwrap_or_else(|e| {
+		warn!("解析配置失败: {}", e);
+		let c = config::Config::builder()
+			.build();
+		c.save(&args.config_path).expect("Failed to save config");
+		c
+	});
+
+	info!("数据目录：{}, 存储目录：{}", config.data_dir().to_string_lossy(), config.storage_dir().to_string_lossy());
+
+	let classes = load_saving(config.storage_dir()).unwrap_or_else(|e| {
+		error!("{}", e);
+		vec![]
+	});
+
+	info!("{} classes loaded", classes.len());
+
+	for class in classes {
+		println!("{}", class);
+	}
+
 	// init_logger();
 	//
 	// info!("开始加载班级信息...");
