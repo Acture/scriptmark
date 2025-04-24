@@ -1,13 +1,13 @@
+use common::define_test_suite;
+use common::defines::test_suite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
-use suite::test_suite::TestResult;
 
 const SOLUTION_CODE: &str = include_str!("solutions/circle_area.py");
 
 pub fn get_answer(input: f64) -> String {
-	match runner::python::run_code::<String>(
+	match code_runner::python::run_code::<String>(
 		SOLUTION_CODE,
 		Some(&input.to_string()),
 		None::<&[String]>,
@@ -27,7 +27,7 @@ pub fn get_answer(input: f64) -> String {
 // 		Vec<f64>,
 // 		Vec<String>,
 // 		for<'a> fn(&'a Path) -> Vec<String>,
-// 		for<'a, 'b> fn(&'a Vec<String>, &'b Vec<String>) -> Vec<suite::test_suite::TestResult>,
+// 		for<'a, 'b> fn(&'a Vec<String>, &'b Vec<String>) -> Vec<common::defines::test_suite::TestResult>,
 // 	> = TestSuite::builder()
 // 		.inputs(INPUTS.to_vec())
 // 		.answers(ANSWERS.to_vec())
@@ -58,7 +58,7 @@ fn runner_fn(path: &Path) -> Vec<String> {
 	}
 	let content = fs::read_to_string(path).expect("Failed to read file");
 	INPUTS.iter().map(|input| {
-		match runner::python::run_code(
+		match code_runner::python::run_code(
 			content.clone(),
 			Some(input.to_string()),
 			None::<&[String]>,
@@ -120,7 +120,7 @@ fn judge(s: &str, t: &str) -> TestResult {
 			let s_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
 				Some(value) => value,
 				None => {
-					res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+					res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Partial);
 					res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!(
 						"Failed to extract number from line {}: {:?}",
 						i, s
@@ -131,7 +131,7 @@ fn judge(s: &str, t: &str) -> TestResult {
 			let t_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
 				Some(value) => value,
 				None => {
-					res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+					res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Partial);
 					res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!(
 						"Failed to extract number from line {}: {:?}",
 						i, t
@@ -140,10 +140,10 @@ fn judge(s: &str, t: &str) -> TestResult {
 				}
 			};
 			if s_count != t_count {
-				res.additional_status = Some(suite::test_suite::AdditionalStatus::Partial);
+				res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Partial);
 				res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!("Expected: <{}>, Got: <{}>", t_count, s_count));
 			} else {
-				res.additional_status = Some(suite::test_suite::AdditionalStatus::Full);
+				res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Full);
 			}
 		}
 		_ => {

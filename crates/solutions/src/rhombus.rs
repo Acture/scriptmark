@@ -1,8 +1,8 @@
+use common::define_test_suite;
+use common::defines::test_suite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
-use suite::test_suite::TestResult;
 
 fn get_rhombus<T: Into<usize>>(radius: T, symbol: char, padding_symbol: char) -> String {
 	let r = radius.into();
@@ -51,7 +51,7 @@ fn runner_fn(path: &Path) -> OUTPUT_TYPE {
 	inputs
 		.iter()
 		.map(|input| {
-			runner::python::run_code::<String>(
+			code_runner::python::run_code::<String>(
 				content.clone(),
 				Some(input.to_string()),
 				None::<&[String]>,
@@ -65,7 +65,7 @@ fn reverse_string(s: &str) -> String {
 	s.chars().rev().collect::<String>()
 }
 
-fn judge_fn(_results: &OUTPUT_TYPE, _answers: &OUTPUT_TYPE) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(_results: &OUTPUT_TYPE, _answers: &OUTPUT_TYPE) -> Vec<common::defines::test_suite::TestResult> {
 	_results
 		.iter()
 		.zip(_answers.iter())

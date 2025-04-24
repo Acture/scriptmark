@@ -179,16 +179,16 @@ macro_rules! define_test_suite {
 		::lazy_static::lazy_static! {
 			static ref INPUTS: $input_type = $input_init;
 			static ref ANSWERS: $answer_type = $answer_init;
-			pub static ref $suite_name: ::suite::test_suite::TestSuite<
+			pub static ref $suite_name: ::common::defines::test_suite::TestSuite<
 				$input_type,
 				$answer_type,
 				for<'a> fn(&'a ::std::path::Path) -> $answer_type,
-				for<'a, 'b> fn(&'a $answer_type, &'b $answer_type) -> Vec<::suite::test_suite::TestResult>,
-			> = ::suite::test_suite::TestSuite::builder()
+				for<'a, 'b> fn(&'a $answer_type, &'b $answer_type) -> Vec<::common::defines::test_suite::TestResult>,
+			> = ::common::defines::test_suite::TestSuite::builder()
 				.inputs($input_clone(&INPUTS))
 				.answers($answer_clone(&ANSWERS))
 				.runner($runner as fn(&::std::path::Path) -> $answer_type)
-				.judge($judge as fn(&$answer_type, &$answer_type) -> Vec<::suite::test_suite::TestResult>)
+				.judge($judge as fn(&$answer_type, &$answer_type) -> Vec<::common::defines::test_suite::TestResult>)
 				.build();
 		}
 	};

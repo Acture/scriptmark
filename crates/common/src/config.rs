@@ -1,4 +1,3 @@
-use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -23,22 +22,21 @@ impl Config {
 	}
 }
 
-pub fn prepare_config() -> Config {
+pub fn prepare_config() -> Result<Config, Box<dyn std::error::Error>
+> {
 	let config_path = "config.toml";
 
 	// 检查配置文件是否存在
 	match Path::new(config_path).exists() {
 		true => {
-			info!("配置文件已存在: {}", config_path);
-			Config::load(config_path)
+			Ok(Config::load(config_path))
 		}
 		false => {
-			warn!("配置文件不存在，正在创建默认 config.toml...");
 			let default_config = Config::builder().build();
 			let mut file = fs::File::create(config_path).expect("无法创建配置文件");
 			let toml = toml::to_string(&default_config).expect("无法序列化配置文件");
 			file.write_all(toml.as_bytes()).expect("无法写入配置文件");
-			default_config
+			Ok(default_config)
 		}
 	}
 }

@@ -1,8 +1,8 @@
+use common::define_test_suite;
 use itertools::EitherOrBoth;
 use itertools::Itertools;
 use std::collections::HashMap;
 use std::path::Path;
-use suite::define_test_suite;
 type InputType = Vec<Vec<i64>>;
 type OutputType = Vec<Vec<String>>;
 
@@ -12,7 +12,7 @@ fn get_answer(inputs: &InputType) -> OutputType {
 	inputs
 		.iter()
 		.map(|input| {
-			let res = runner::python::run_code::<String>(
+			let res = code_runner::python::run_code::<String>(
 				SOLUTION_CODE,
 				Some(input.iter().map(|x| x.to_string()).join("\n")),
 				None::<&[String]>,
@@ -65,7 +65,7 @@ fn runner_fn(path: &Path) -> OutputType {
 	inputs
 		.iter()
 		.map(|input| {
-			match runner::python::run_code::<String>(
+			match code_runner::python::run_code::<String>(
 				content.clone(),
 				Some(input.iter().map(|x| x.to_string()).join("\n")),
 				None::<&[String]>,
@@ -77,12 +77,12 @@ fn runner_fn(path: &Path) -> OutputType {
 		.collect::<Vec<_>>()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
 	result
 		.iter()
 		.zip_longest(expected.iter())
 		.map(|pair| {
-			let mut res = suite::test_suite::TestResult::builder().build();
+			let mut res = common::defines::test_suite::TestResult::builder().build();
 			match pair {
 				EitherOrBoth::Both(result, expected) => {
 					expected.iter().zip(result.iter()).enumerate().for_each(

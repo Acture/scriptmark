@@ -1,9 +1,9 @@
 [package]
-name = "runner"
+name = "code_runner"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-typed-builder = "0.20.0"
-pyo3.workspace = true
+typed-builder = "0.21.0"
 anyhow = "1.0.96"
+pyo3 = "0.24.2"

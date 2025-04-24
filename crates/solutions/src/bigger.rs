@@ -1,6 +1,6 @@
+use common::define_test_suite;
 use std::cmp::max;
 use std::collections::HashMap;
-use suite::define_test_suite;
 
 type InputType = Vec<(i64, i64)>;
 type OutputType = Vec<String>;
@@ -28,7 +28,7 @@ fn runner_fn(path: &std::path::Path) -> OutputType {
 	inputs
 		.iter()
 		.map(|(a, b)| {
-			match runner::python::run_code::<String>(
+			match code_runner::python::run_code::<String>(
 				content.clone(),
 				Some(format!("{}\n{}\n", a, b)),
 				None::<&[String]>,
@@ -40,12 +40,12 @@ fn runner_fn(path: &std::path::Path) -> OutputType {
 		.collect()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
 	result
 		.iter()
 		.zip(expected.iter())
 		.map(|(result, expected)| {
-			let mut res = suite::test_suite::TestResult::builder().build();
+			let mut res = common::defines::test_suite::TestResult::builder().build();
 			let extracted_res_nums = common::utils::extract_numbers::<i64>(result);
 			let extracted_expected_nums = common::utils::extract_numbers::<i64>(expected);
 			let res_num_o = extracted_res_nums.last();

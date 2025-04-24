@@ -1,13 +1,13 @@
+use common::define_test_suite;
+use common::defines::test_suite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
-use suite::test_suite::TestResult;
 
 const SOLUTION_CODE: &str = include_str!("solutions/circle_area.py");
 
 pub fn get_answer(input: f64) -> String {
-	match runner::python::run_code::<String>(
+	match code_runner::python::run_code::<String>(
 		SOLUTION_CODE,
 		Some(&input.to_string()),
 		None::<&[String]>,
@@ -41,7 +41,7 @@ fn runner_fn(path: &Path) -> Vec<String> {
 	INPUTS
 		.iter()
 		.map(|input| {
-			match runner::python::run_code(
+			match code_runner::python::run_code(
 				content.clone(),
 				Some(input.to_string()),
 				None::<&[String]>,

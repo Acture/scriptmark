@@ -1,8 +1,8 @@
+use common::define_test_suite;
 use itertools::{EitherOrBoth, Itertools};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
 
 const SOLUTION_CODE: &str = include_str!("solutions/sequence.py");
 
@@ -10,7 +10,7 @@ type InputType = Option<()>;
 type OutputType = Vec<HashMap<String, Vec<i64>>>;
 
 fn get_answer() -> OutputType {
-	let result = runner::python::run_code_with_trace::<String, Vec<i64>>(
+	let result = code_runner::python::run_code_with_trace::<String, Vec<i64>>(
 		SOLUTION_CODE,
 		None::<&String>,
 		None::<&[String]>,
@@ -40,7 +40,7 @@ fn runner_fn(path: &Path) -> OutputType {
 		panic!("Test file not found: {}", path.display());
 	}
 	let content = fs::read_to_string(path).expect("Failed to read file");
-	let res = runner::python::run_code_with_trace::<String, Vec<i64>>(
+	let res = code_runner::python::run_code_with_trace::<String, Vec<i64>>(
 		content,
 		None::<&String>,
 		None::<&[String]>,
@@ -63,14 +63,14 @@ fn runner_fn(path: &Path) -> OutputType {
 	}
 }
 
-fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
 	_result
 		.iter()
 		.zip_longest(_answer.iter())
 		.map(|pair| {
 			match pair {
 				EitherOrBoth::Both(result, answer) => {
-					let mut test_result = suite::test_suite::TestResult::builder()
+					let mut test_result = common::defines::test_suite::TestResult::builder()
 						.passed(true)
 						.build();
 
@@ -124,14 +124,14 @@ fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<suite::test_suite
 
 					test_result
 				}
-				EitherOrBoth::Left(result) => suite::test_suite::TestResult::builder()
+				EitherOrBoth::Left(result) => common::defines::test_suite::TestResult::builder()
 					.passed(false)
 					.infos(Some(HashMap::from([(
 						String::from("Extra Result"),
 						format!("Result: <{:?}>", result),
 					)])))
 					.build(),
-				EitherOrBoth::Right(answer) => suite::test_suite::TestResult::builder()
+				EitherOrBoth::Right(answer) => common::defines::test_suite::TestResult::builder()
 					.passed(false)
 					.infos(Some(HashMap::from([(
 						String::from("Extra Answer"),

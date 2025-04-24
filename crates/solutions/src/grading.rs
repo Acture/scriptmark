@@ -1,5 +1,5 @@
+use common::define_test_suite;
 use std::collections::HashMap;
-use suite::define_test_suite;
 
 type InputType = Vec<i64>;
 type OutputType = Vec<String>;
@@ -43,7 +43,7 @@ fn runner_fn(path: &std::path::Path) -> OutputType {
 	inputs
 		.iter()
 		.map(|&score| {
-			match runner::python::run_code::<String>(
+			match code_runner::python::run_code::<String>(
 				content.clone(),
 				Some(format!("{}\n", score)),
 				None::<&[String]>,
@@ -55,12 +55,12 @@ fn runner_fn(path: &std::path::Path) -> OutputType {
 		.collect()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
 	result
 		.iter()
 		.zip(expected.iter())
 		.map(|(result, expected)| {
-			let mut res = suite::test_suite::TestResult::builder().build();
+			let mut res = common::defines::test_suite::TestResult::builder().build();
 			let res_letter_o = result.lines().next();
 			let expected_letter_o = expected.lines().next();
 			let (res_letter, expected_letter) = match (res_letter_o, expected_letter_o) {

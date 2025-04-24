@@ -1,8 +1,8 @@
+use common::define_test_suite;
+use common::defines::test_suite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
-use suite::test_suite::TestResult;
 
 type InputType = Vec<String>;
 type OutputType = Vec<String>;
@@ -14,7 +14,7 @@ fn get_answer(inputs: &InputType) -> OutputType {
 		.iter()
 		.map(|input| {
 			let res =
-				runner::python::run_code::<String>(SOLUTION_CODE, Some(input), None::<&[String]>);
+				code_runner::python::run_code::<String>(SOLUTION_CODE, Some(input), None::<&[String]>);
 			match res {
 				Ok(output) => output,
 				Err(e) => panic!("Failed to get answer: {:?}", e),
@@ -60,7 +60,7 @@ fn runner_fn(path: &Path) -> OutputType {
 	INPUTS
 		.iter()
 		.map(|input| {
-			match runner::python::run_code::<String>(
+			match code_runner::python::run_code::<String>(
 				content.clone(),
 				Some(input),
 				None::<&[String]>,
@@ -72,7 +72,7 @@ fn runner_fn(path: &Path) -> OutputType {
 		.collect::<Vec<_>>()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
 	result
 		.iter()
 		.zip(expected.iter())
