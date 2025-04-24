@@ -18,6 +18,10 @@ pub static PROJECT_DIR: Lazy<PathBuf> = Lazy::new(|| {
 	CRATES_DIR.parent().unwrap_or_else(|| panic!("Failed to get parent of crates dir {}", CRATES_DIR.display())).to_path_buf()
 });
 
+pub static DATA_DIR: Lazy<PathBuf> = Lazy::new(|| {
+	PROJECT_DIR.join("data")
+});
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -37,6 +41,12 @@ mod tests {
 	fn test_get_project_dir() {
 		assert!(PROJECT_DIR.exists());
 		println!("PROJECT_DIR: {:?}", PROJECT_DIR.display());
+	}
+	
+	#[test]
+	fn test_get_data_dir() {
+		assert!(DATA_DIR.exists());
+		println!("DATA_DIR: {:?}", DATA_DIR.display());
 	}
 }
 
