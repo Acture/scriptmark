@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use toml::de::Error;
 use typed_builder::TypedBuilder;
 
 #[derive(TypedBuilder, Debug, Serialize, Deserialize)]
@@ -10,24 +11,23 @@ pub struct Config {
 	#[builder(default = PathBuf::from("./data"))]
 	pub data_dir: PathBuf,
 	#[builder(default = PathBuf::from("./data"))]
-	pub store_dir: PathBuf,
+	pub storage_dir: PathBuf,
 }
 
 impl Config {
-	pub fn load<P: AsRef<Path>>(config_path: P) -> Self {
+	pub fn load<P: AsRef<Path>>(config_path: P) -> Result<Config, Error> {
 		let config_str = fs::read_to_string(config_path).expect("无法读取配置文件");
-		toml::from_str(&config_str).expect("无法解析配置文件")
+		toml::from_str(&config_str)
 	}
 }
 
-pub fn prepare_config() -> Result<Config, Box<dyn std::error::Error>
-> {
+pub fn prepare_config() -> Result<Config, Box<dyn std::error::Error>> {
 	let config_path = "config.toml";
 
 	// 检查配置文件是否存在
 	match Path::new(config_path).exists() {
 		true => {
-			Ok(Config::load(config_path))
+			Ok(Config::load(config_path)?)
 		}
 		false => {
 			let default_config = Config::builder().build();

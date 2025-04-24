@@ -1,5 +1,7 @@
+use log::{info, warn};
 use once_cell::sync::Lazy;
 use std::env;
+use std::fmt::Debug;
 use std::ops::Deref;
 
 mod tui;
@@ -7,7 +9,12 @@ use common::config;
 
 
 pub static CONFIG: Lazy<config::Config> = Lazy::new(|| {
-	config::prepare_config().unwrap()
+	let c = config::prepare_config();
+	c.unwrap_or_else(|e| {
+		warn!("解析配置失败: {}", e);
+		config::Config::builder()
+			.build()
+	})
 });
 
 fn init_logger() {
@@ -20,7 +27,9 @@ fn init_logger() {
 fn main() {
 	init_logger();
 
-	println!("{:?}", CONFIG);
+	info!("数据目录：{}, 存储目录：{}", CONFIG.data_dir.to_string_lossy(), CONFIG.storage_dir.to_string_lossy());
+
+	println!("{:?}", *CONFIG);
 	// init_logger();
 	//
 	// info!("开始加载班级信息...");
