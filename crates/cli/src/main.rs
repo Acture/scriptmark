@@ -1,12 +1,14 @@
-use lazy_static::lazy_static;
+use once_cell::sync::Lazy;
 use std::env;
+use std::ops::Deref;
+
 mod tui;
 use common::config;
 
 
-lazy_static! {
-	static ref CONFIG: config::Config = config::prepare_config().unwrap();
-}
+pub static CONFIG: Lazy<config::Config> = Lazy::new(|| {
+	config::prepare_config().unwrap()
+});
 
 fn init_logger() {
 	env_logger::Builder::new()
@@ -16,12 +18,15 @@ fn init_logger() {
 }
 
 fn main() {
+	init_logger();
+
+	println!("{:?}", CONFIG);
 	// init_logger();
-	// 
+	//
 	// info!("开始加载班级信息...");
 	// let classes = Class::prepare_class(&CONFIG.data_dir);
 	// info!("班级信息加载完成");
-	// 
+	//
 	// 'select_class: loop {
 	// 	let selected_class = match tui::select_class(&classes) {
 	// 		(tui::SelectStatus::Exit, _) => {
