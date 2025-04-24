@@ -1,15 +1,15 @@
 [workspace]
-members = ["src/grader",
-	"src/lab", "src/runner", "src/suite", "src/grader"
-	, "src/util"]
-default-members = ["src/grader"] # 默认主项目
+members = ["crates/grader",
+	"crates/lab", "crates/runner", "crates/suite", "crates/grader"
+	, "crates/util"]
+default-members = ["crates/grader"] # 默认主项目
 
 resolver = "2"
 
 [workspace.dependencies]
-lab = { path = "src/lab" }
-runner = { path = "src/runner" }
-suite = { path = "src/suite" }
-grader = { path = "src/grader" }
-util = { path = "src/util" }
+lab = { path = "crates/lab" }
+runner = { path = "crates/runner" }
+suite = { path = "crates/suite" }
+grader = { path = "crates/grader" }
+util = { path = "crates/util" }
 pyo3 = { version = "0.23.5", features = ["auto-initialize", "generate-import-lib"] }
