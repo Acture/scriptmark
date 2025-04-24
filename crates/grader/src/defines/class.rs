@@ -1,5 +1,6 @@
 use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
+use crate::traits::savable::Savable;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -7,7 +8,6 @@ use std::fmt::Display;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use typed_builder::TypedBuilder;
-
 #[derive(TypedBuilder, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Class {
 	pub id: String,
@@ -120,6 +120,15 @@ impl Class {
 	}
 }
 
+impl Savable for Class {
+	fn save(&self, save_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+		let file = std::fs::File::create(save_dir)?;
+		serde_json::to_writer_pretty(file, self)?;
+		Ok(())
+	}
+}
+
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -131,6 +140,8 @@ mod tests {
 		assert!(class.is_ok());
 		let class = class.unwrap();
 		assert_eq!(class.id, "AIB110002.13");
+		let class_dir = dev::env::DATA_DIR.to_path_buf().join("class.json");
+		class.save(&class_dir).expect("TODO: panic message");
 		println!("{}", class);
 	}
 }
