@@ -9,6 +9,7 @@ mod tui;
 
 mod defines;
 mod utils;
+mod traits;
 
 lazy_static! {
 	static ref CONFIG: config::Config = config::prepare_config();

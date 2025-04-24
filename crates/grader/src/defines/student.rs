@@ -1,4 +1,3 @@
-use crate::defines::keyed::Keyed;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,12 +44,5 @@ impl Hash for Student {
 
 impl Student {}
 
-impl Keyed for Student {
-	type Key = (String, String);
-
-	fn key(&self) -> Self::Key {
-		(self.id.clone(), self.name.clone())
-	}
-}
 #[cfg(test)]
 mod tests {}
