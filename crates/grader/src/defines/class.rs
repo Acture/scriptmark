@@ -1,6 +1,6 @@
 use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
-use crate::traits::savable::Savable;
+use crate::traits::saveload::{Loadable, Savable};
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -8,6 +8,7 @@ use std::fmt::Display;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use typed_builder::TypedBuilder;
+
 #[derive(TypedBuilder, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Class {
 	pub id: String,
@@ -48,9 +49,9 @@ impl Class {
 	pub fn prepare_class(p0: &Path) -> Vec<Class> {
 		todo!()
 	}
-	pub fn load_from_csv(	csv_path: PathBuf,
-							name: Option<&str>, id: Option<&str>, infer_from_path: bool)
-							-> Result<Class, Box<dyn std::error::Error>> {
+	pub fn parse_from_csv(csv_path: PathBuf,
+                            name: Option<&str>, id: Option<&str>, infer_from_path: bool)
+                            -> Result<Class, Box<dyn std::error::Error>> {
 		let (name, id) = match (infer_from_path, name, id) {
 			(true, _, _) => try_find_class_name_and_id_from_path(&csv_path)?,
 			(false, Some(name), Some(id)) => (name.to_string(), id.to_string()),
@@ -120,14 +121,6 @@ impl Class {
 	}
 }
 
-impl Savable for Class {
-	fn save(&self, save_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-		let file = std::fs::File::create(save_dir)?;
-		serde_json::to_writer_pretty(file, self)?;
-		Ok(())
-	}
-}
-
 
 #[cfg(test)]
 mod tests {
@@ -136,12 +129,21 @@ mod tests {
 	#[test]
 	fn test_load_from_csv() {
 		let test_csv_path = dev::env::DATA_DIR.to_path_buf().join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
-		let class = Class::load_from_csv(test_csv_path, None, None, true);
+		let class = Class::parse_from_csv(test_csv_path, None, None, true);
 		assert!(class.is_ok());
 		let class = class.unwrap();
 		assert_eq!(class.id, "AIB110002.13");
-		let class_dir = dev::env::DATA_DIR.to_path_buf().join("class.json");
-		class.save(&class_dir).expect("TODO: panic message");
+		let class_save = dev::env::DATA_DIR.to_path_buf().join("class.json");
+		class.save(&class_save).expect("TODO: panic message");
 		println!("{}", class);
+	}
+
+	#[test]
+	fn test_save_load() {
+		let class_dir = dev::env::DATA_DIR.to_path_buf().join("class.json");
+		let loaded_class = Class::load(class_dir).unwrap();
+		let test_csv_path = dev::env::DATA_DIR.to_path_buf().join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
+		let parsed_class = Class::parse_from_csv(test_csv_path, None, None, true).unwrap();
+		assert_eq!(loaded_class, parsed_class);
 	}
 }
