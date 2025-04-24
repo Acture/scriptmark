@@ -1,6 +1,5 @@
 use crate::defines::task::Task;
 use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use typed_builder::TypedBuilder;
 
