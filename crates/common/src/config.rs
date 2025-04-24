@@ -5,14 +5,12 @@ use std::path::Path;
 use std::path::PathBuf;
 use typed_builder::TypedBuilder;
 
-#[derive(Debug, Serialize, Deserialize, TypedBuilder)]
+#[derive(TypedBuilder, Debug, Serialize, Deserialize)]
 pub struct Config {
 	#[builder(default = PathBuf::from("./data"))]
 	pub data_dir: PathBuf,
-	#[builder(default = 42)]
-	pub seed: u64,
-	#[builder(default = true)]
-	pub custom_solution: bool,
+	#[builder(default = PathBuf::from("./data"))]
+	pub store_dir: PathBuf,
 }
 
 impl Config {

@@ -8,5 +8,5 @@ common.workspace = true
 dialoguer = { version = "0.11.0", features = ["completion", "fuzzy-matcher", "fuzzy-select", "history"] }
 env_logger = "0.11.8"
 itertools = "0.14.0"
-lazy_static = "1.5.0"
 log = "0.4.27"
+once_cell = "1.21.3"
