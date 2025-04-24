@@ -17,6 +17,11 @@ pub struct Class {
 }
 
 impl Class {
+	pub fn load_from_csv<P: AsRef<Path>>(path: P) -> Class {
+		let path = path.as_ref();
+		unimplemented!()
+	}
+
 	pub fn prepare_class<P: AsRef<Path>>(path: P) -> Vec<Class> {
 		let mut classes = Class::load_class(path);
 		classes.iter_mut().for_each(|class| {
@@ -32,22 +37,13 @@ impl Class {
 	pub(crate) fn load_class<P: AsRef<Path>>(path: P) -> Vec<Class> {
 		let path = path.as_ref();
 		let mut classes = Vec::new();
-		for entry in path
-			.read_dir()
-			.expect(format!("Read Path <{}> failed.", path.display()).as_str())
-		{
+		for entry in path.read_dir().expect(format!("Read Path <{}> failed.", path.display()).as_str()) {
 			let entry = entry.expect("entry failed");
 			let path = entry.path();
 			if path.is_dir() {
-				let class = Class::builder()
-					.name(
-                        path.file_stem()
-							.expect("file_stem failed")
-							.to_string_lossy()
-							.to_string(),
-					)
-					.path(path)
-					.build();
+				let class = Class::builder().name(
+                    path.file_stem().expect("file_stem failed").to_string_lossy().to_string(),
+				).path(path).build();
 				classes.push(class);
 			}
 		}
@@ -63,15 +59,9 @@ impl Class {
 			let entry = entry.expect("entry failed");
 			let path = entry.path();
 			if path.is_dir() {
-				let assignment = Assignment::builder()
-					.name(
-                        path.file_stem()
-							.expect("file_stem failed")
-							.to_string_lossy()
-							.to_string(),
-					)
-					.path(path)
-					.build();
+				let assignment = Assignment::builder().name(
+                    path.file_stem().expect("file_stem failed").to_string_lossy().to_string(),
+				).path(path).build();
 				self.assignments.push(assignment);
 			}
 		}
@@ -85,28 +75,16 @@ impl Class {
 		&self,
 		assignment_name: String,
 	) -> HashMap<Student, Vec<PathBuf>> {
-		let assignment = self
-			.assignments
-			.iter()
-			.find(|a| a.name == assignment_name)
-			.unwrap_or_else(|| panic!("{} - {} 未找到作业", self.name, assignment_name));
-		assignment
-			.group_by_student(&self.students)
-			.iter()
-			.filter_map(|(id, file_paths)| {
-				match self
-					.students
-					.iter()
-					.find(|student: &&Student| student.sis_login_id == *id)
-				{
-					Some(student) => Some((student.clone(), file_paths.clone())),
-					None => {
-						warn!("未找到对应学生 - {}", id);
-						None
-					}
+		let assignment = self.assignments.iter().find(|a| a.name == assignment_name).unwrap_or_else(|| panic!("{} - {} 未找到作业", self.name, assignment_name));
+		assignment.group_by_student(&self.students).iter().filter_map(|(id, file_paths)| {
+			match self.students.iter().find(|student: &&Student| student.sis_login_id == *id) {
+				Some(student) => Some((student.clone(), file_paths.clone())),
+				None => {
+					warn!("未找到对应学生 - {}", id);
+					None
 				}
-			})
-			.collect()
+			}
+		}).collect()
 	}
 }
 
@@ -114,13 +92,11 @@ impl Class {
 mod tests {
 	use super::*;
 	use crate::config::Config;
-	use std::fs;
+use std::fs;
 
 	#[test]
 	fn test_load_class() {
-		let config = Config::builder()
-			.data_dir(path::Path::new("../../data").to_path_buf())
-			.build();
+		let config = Config::builder().data_dir(path::Path::new("../../data").to_path_buf()).build();
 		println!("{:?}", fs::canonicalize(config.data_dir.clone()));
 		let classes = Class::load_class(&config.data_dir);
 		println!("{:?}", classes);
@@ -128,9 +104,7 @@ mod tests {
 
 	#[test]
 	fn test_load_assignments() {
-		let config = Config::builder()
-			.data_dir(path::Path::new("../../data").to_path_buf())
-			.build();
+		let config = Config::builder().data_dir(path::Path::new("../../data").to_path_buf()).build();
 		let mut classes = Class::load_class(&config.data_dir);
 		let test_class = &mut classes[0];
 		test_class.load_assignments();
@@ -140,12 +114,16 @@ mod tests {
 
 	#[test]
 	fn test_get_student_assignments() {
-		let config = Config::builder()
-			.data_dir(path::Path::new("../../data").to_path_buf())
-			.build();
+		let config = Config::builder().data_dir(path::Path::new("../../data").to_path_buf()).build();
 		let mut classes = Class::prepare_class(&config.data_dir);
 		let test_class = &mut classes[0];
 		let student_assignments = test_class.get_student_assignments("lab1_population".to_string());
 		println!("{:?}", student_assignments);
+	}
+
+	#[test]
+	fn test_load_from_csv() {
+		let class = Class::load_from_csv("../../data/class/class1/roster.csv");
+		println!("{:?}", class);
 	}
 }

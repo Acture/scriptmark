@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/grader",
 	"crates/lab", "crates/runner", "crates/suite", "crates/grader"
-	, "crates/util"]
+	, "crates/util", "crates/common"]
 default-members = ["crates/grader"] # 默认主项目
 
 resolver = "2"
