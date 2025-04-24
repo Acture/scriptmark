@@ -1,9 +1,9 @@
+use common::define_test_suite;
+use common::defines::test_suite::TestResult;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
-use suite::test_suite::TestResult;
 
 type InputType = Vec<Vec<i64>>;
 type OutputType = Vec<Vec<String>>;
@@ -18,7 +18,7 @@ fn get_answers() -> OutputType {
 	(1..20).map(|_| vec!["".to_string()]).collect()
 }
 
-fn judge_fn(result: &OutputType, _expected: &OutputType) -> Vec<suite::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, _expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
 	let mut rec_set = HashSet::new();
 	result
 		.iter()
@@ -47,7 +47,7 @@ fn runner_fn(path: &Path) -> OutputType {
 	inputs
 		.iter()
 		.map(|input| {
-			match runner::python::run_code::<String>(
+			match code_runner::python::run_code::<String>(
 				content.clone(),
 				Some(
                     input

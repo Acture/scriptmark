@@ -3,3 +3,5 @@ pub mod class;
 pub mod student;
 pub mod submission;
 pub mod task;
+
+pub mod test_suite;

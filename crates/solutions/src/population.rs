@@ -1,9 +1,9 @@
+use common::define_test_suite;
+use common::defines::test_suite::TestResult;
 use std::clone::Clone;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use suite::define_test_suite;
-use suite::test_suite::TestResult;
 
 const SOLUTION_CODE: &str = include_str!("solutions/population.py");
 
@@ -65,12 +65,12 @@ fn judge_results(answer: & String, to_test: & String) -> TestResult {
 //
 // lazy_static! {
 // 	static ref INPUTS: Option<()> = None::<()>;
-// 	static ref ANSWERS: String = runner::python::run_code(SOLUTION_CODE, None, None);
+// 	static ref ANSWERS: String = code_runner::python::run_code(SOLUTION_CODE, None, None);
 // 	pub static ref POPULATION_TEST_SUITE: TestSuite<
 // 	Option<()>,
 // 	String,
 // 	for<'a> fn(&'a Path) -> String,
-// 	for<'a, 'b> fn(&'a String, &'b String) -> Vec<suite::test_suite::TestResult>,
+// 	for<'a, 'b> fn(&'a String, &'b String) -> Vec<common::defines::test_suite::TestResult>,
 // > = TestSuite::builder()
 // 	.inputs(INPUTS.clone())
 // 	.answers(ANSWERS.clone())
@@ -88,7 +88,7 @@ define_test_suite!(
 	},
 	answers = {
 		type = String,
-		init = match runner::python::run_code(SOLUTION_CODE, None::<&String>, None::<&[String]>){
+		init = match code_runner::python::run_code(SOLUTION_CODE, None::<&String>, None::<&[String]>){
 			Ok(output) => output,
 			Err(e) => panic!("Failed to get answer: {:?}", e),
 		},
@@ -104,7 +104,7 @@ fn runner_fn(path: &Path) -> String {
 	}
 	let content = fs::read_to_string(path).expect("Failed to read file");
 
-	match runner::python::run_code(&content, None::<String>, None::<&[String]>) {
+	match code_runner::python::run_code(&content, None::<String>, None::<&[String]>) {
 		Ok(output) => output,
 		Err(e) => format!("Failed to run code: {:?}\n\nContent:\n\n{}\n\n", e, content),
 	}

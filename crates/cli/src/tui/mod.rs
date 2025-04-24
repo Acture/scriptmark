@@ -1,10 +1,10 @@
-use crate::defines::class;
-use crate::defines::student::Student;
+use common::defines::class;
+use common::defines::student::Student;
+use common::defines::test_suite::{AdditionalStatus, TestResult};
 use dialoguer::{FuzzySelect, Select};
 use itertools::Itertools;
 use log::info;
 use std::collections::HashMap;
-use suite::test_suite::{AdditionalStatus, TestResult};
 
 #[derive(Debug, PartialEq, Eq)] // 让它支持 Debug 和比较
 pub enum SelectStatus {
@@ -132,7 +132,7 @@ pub fn select_test_result<'a>(
 					.map(|r| {
 						r.additional_status
 							.as_ref()
-							.unwrap_or(&suite::test_suite::AdditionalStatus::None)
+							.unwrap_or(&common::defines::test_suite::AdditionalStatus::None)
 					})
 					.fold(AdditionalStatus::Full, |acc, status| {
 						if *status == AdditionalStatus::Partial || acc == AdditionalStatus::Partial

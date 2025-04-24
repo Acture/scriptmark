@@ -1,8 +1,8 @@
+use common::defines::test_suite::TestSuiteObject;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;
 use strum_macros::{AsRefStr, Display, EnumIter, EnumString};
-use suite::test_suite::TestSuiteObject;
 
 mod bigger;
 mod chicken_rabbit;

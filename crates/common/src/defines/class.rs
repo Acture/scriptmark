@@ -1,7 +1,6 @@
 use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
 use crate::traits::savenload::SaveNLoad;
-use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -47,8 +46,7 @@ pub fn try_find_class_name_and_id_from_path(path: &Path) -> Result<(String, Stri
 	let parts: Vec<&str> = file_stem.split('_').collect();
 
 	if parts.len() != 3 {
-		warn!("File name '{}' does not match expected format (e.g. prefix_class-123_name)", file_stem);
-		return Err("Invalid file name format".into());
+		return Err(format!("File name '{}' does not match expected format (e.g. prefix_class-123_name)", file_stem).into());
 	}
 
 	let class_id = parts[1].split('-').nth(1).ok_or("Missing '-' in class ID segment")?.to_string();
