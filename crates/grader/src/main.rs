@@ -15,8 +15,7 @@ lazy_static! {
 }
 
 fn init_logger() {
-	env_logger::Builder::new()
-		.parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())) // 默认 info
+	env_logger::Builder::new().parse_filters(&env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string())) // 默认 info
 		.init();
 }
 

@@ -1,129 +1,142 @@
 use crate::defines::assignment::Assignment;
+use crate::defines::keyed::ArcKey;
 use crate::defines::student::Student;
+use crate::defines::submission::Submission;
+use csv::StringRecord;
+use itertools::Itertools;
 use log::warn;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path;
+use std::fmt::Display;
+use std::fs::File;
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use typed_builder::TypedBuilder;
 
-#[derive(Debug, TypedBuilder)]
+#[derive(TypedBuilder, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Class {
+	pub id: String,
 	pub name: String,
-	pub path: path::PathBuf,
-	#[builder(default = Vec::new())]
+	pub submission_path: PathBuf,
+	#[builder(default)]
 	pub students: Vec<Student>,
-	#[builder(default = Vec::new())]
+	#[builder(default)]
 	pub assignments: Vec<Assignment>,
 }
 
+impl Display for Class {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Class {{ {} - {}, {} students, {} assignments }}", self.id, self.name, self.students.len(), self.assignments.len())
+	}
+}
+
+
+pub fn try_find_class_name_and_id_from_path(path: &Path) -> Result<(String, String), Box<dyn std::error::Error>> {
+	let file_stem = path.file_stem().ok_or("Missing file stem in path")?.to_str().ok_or("File stem is not valid UTF-8")?;
+
+	let parts: Vec<&str> = file_stem.split('_').collect();
+
+	if parts.len() != 3 {
+		warn!("File name '{}' does not match expected format (e.g. prefix_class-123_name)", file_stem);
+		return Err("Invalid file name format".into());
+	}
+
+	let class_id = parts[1].split('-').nth(1).ok_or("Missing '-' in class ID segment")?.to_string();
+
+	let class_name = parts[2].to_string();
+
+	Ok((class_name, class_id))
+}
+
+
 impl Class {
-	pub fn load_from_csv<P: AsRef<Path>>(path: P) -> Class {
-		let path = path.as_ref();
-		unimplemented!()
+	pub fn prepare_class(p0: &Path) -> Vec<Class> {
+		todo!()
 	}
-
-	pub fn prepare_class<P: AsRef<Path>>(path: P) -> Vec<Class> {
-		let mut classes = Class::load_class(path);
-		classes.iter_mut().for_each(|class| {
-			class.load_students();
-			class.load_assignments();
-			class.assignments.iter().for_each(|assignment| {
-				let _group = assignment.group_by_student(&class.students);
-			})
-		});
-		classes
-	}
-
-	pub(crate) fn load_class<P: AsRef<Path>>(path: P) -> Vec<Class> {
-		let path = path.as_ref();
-		let mut classes = Vec::new();
-		for entry in path.read_dir().expect(format!("Read Path <{}> failed.", path.display()).as_str()) {
-			let entry = entry.expect("entry failed");
-			let path = entry.path();
-			if path.is_dir() {
-				let class = Class::builder().name(
-                    path.file_stem().expect("file_stem failed").to_string_lossy().to_string(),
-				).path(path).build();
-				classes.push(class);
-			}
+	pub fn load_from_csv(	csv_path: PathBuf,
+							name: Option<&str>, id: Option<&str>, infer_from_path: bool)
+							-> Result<Class, Box<dyn std::error::Error>> {
+		let (name, id) = match (infer_from_path, name, id) {
+			(true, _, _) => try_find_class_name_and_id_from_path(&csv_path)?,
+			(false, Some(name), Some(id)) => (name.to_string(), id.to_string()),
+			_ => panic!("Missing class name or ID")
+		};
+		let file = File::open(&csv_path)?;
+		let mut rdr = csv::Reader::from_reader(file);
+		let headers = rdr.headers()?.clone();
+		let get_index = |h: &str| headers.iter().position(|x| x == h).ok_or(format!("Missing '{}' header", h));
+		let (student_name_index, student_id_index, student_sis_login_id, score_range) = {
+			let s = get_index("Student")?;
+			let i = get_index("ID")?;
+			let l = get_index("SIS Login ID")?;
+			let section = get_index("Section")?;
+			let points = get_index("作业 Current Points")?;
+			(s, i, l, (section + 1)..points)
+		};
+		let points_possible_record = rdr.records().nth(0).ok_or("Missing points possible row")?.unwrap();
+		if !points_possible_record.get(0).unwrap().contains("Points Possible") {
+			return Err("Expected first row to be 'Points Possible' row".into());
 		}
-		classes
-	}
+		let assignments: Vec<Assignment> = score_range.clone().map(|i| {
+			let name = headers.get(i).unwrap().to_string();
+			let score = points_possible_record.get(i).unwrap().parse::<f64>().unwrap();
+			Assignment::builder()
+				.name(name)
+				.points_possible(score)
+				.build()
+		}).collect();
+		let mut students = Vec::new();
 
-	pub fn roster_path(&self) -> path::PathBuf {
-		self.path.join("roster.csv")
-	}
-
-	pub(crate) fn load_assignments(&mut self) {
-		for entry in self.path.read_dir().expect("read_dir call failed") {
-			let entry = entry.expect("entry failed");
-			let path = entry.path();
-			if path.is_dir() {
-				let assignment = Assignment::builder().name(
-                    path.file_stem().expect("file_stem failed").to_string_lossy().to_string(),
-				).path(path).build();
-				self.assignments.push(assignment);
+		for result in rdr.records().skip(1) {
+			let record = result?;
+			let name = record.get(student_name_index).unwrap().to_string();
+			if name == "测验学生" {
+				continue;
 			}
-		}
-	}
+			let submissions: HashMap<String, f64> = score_range
+				.clone()
+				.zip(assignments.iter())
+				.filter_map(|(i, assignment)| {
+					let score = record.get(i)?.parse::<f64>().ok()?;
+					Some((assignment.name.clone(), score))
+				})
+				.collect();
+			let student = Student::builder()
+				.id(record.get(student_id_index).unwrap().to_string())
+				.name(record.get(student_name_index).unwrap().to_string())
+				.sis_login_id(record.get(student_sis_login_id).unwrap().to_string())
+				.submissions(submissions)
+				.build();
+			students.push(
+				student
+			);
+		};
 
-	pub(crate) fn load_students(&mut self) {
-		self.students = Student::load_from_roster(self.roster_path())
-	}
 
-	pub fn get_student_assignments(
-		&self,
-		assignment_name: String,
-	) -> HashMap<Student, Vec<PathBuf>> {
-		let assignment = self.assignments.iter().find(|a| a.name == assignment_name).unwrap_or_else(|| panic!("{} - {} 未找到作业", self.name, assignment_name));
-		assignment.group_by_student(&self.students).iter().filter_map(|(id, file_paths)| {
-			match self.students.iter().find(|student: &&Student| student.sis_login_id == *id) {
-				Some(student) => Some((student.clone(), file_paths.clone())),
-				None => {
-					warn!("未找到对应学生 - {}", id);
-					None
-				}
-			}
-		}).collect()
+		Ok(
+			Class::builder()
+				.id(id.to_string())
+				.name(name.to_string())
+				.submission_path(csv_path)
+				.students(students)
+				.assignments(assignments)
+				.build()
+		)
 	}
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::config::Config;
-use std::fs;
-
-	#[test]
-	fn test_load_class() {
-		let config = Config::builder().data_dir(path::Path::new("../../data").to_path_buf()).build();
-		println!("{:?}", fs::canonicalize(config.data_dir.clone()));
-		let classes = Class::load_class(&config.data_dir);
-		println!("{:?}", classes);
-	}
-
-	#[test]
-	fn test_load_assignments() {
-		let config = Config::builder().data_dir(path::Path::new("../../data").to_path_buf()).build();
-		let mut classes = Class::load_class(&config.data_dir);
-		let test_class = &mut classes[0];
-		test_class.load_assignments();
-		let assignments = &test_class.assignments;
-		println!("{:?}", assignments);
-	}
-
-	#[test]
-	fn test_get_student_assignments() {
-		let config = Config::builder().data_dir(path::Path::new("../../data").to_path_buf()).build();
-		let mut classes = Class::prepare_class(&config.data_dir);
-		let test_class = &mut classes[0];
-		let student_assignments = test_class.get_student_assignments("lab1_population".to_string());
-		println!("{:?}", student_assignments);
-	}
 
 	#[test]
 	fn test_load_from_csv() {
-		let class = Class::load_from_csv("../../data/class/class1/roster.csv");
-		println!("{:?}", class);
+		let test_csv_path = dev::env::DATA_DIR.to_path_buf().join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
+		let class = Class::load_from_csv(test_csv_path, None, None, true);
+		assert!(class.is_ok());
+		let class = class.unwrap();
+		assert_eq!(class.id, "AIB110002.13");
+		println!("{}", class);
 	}
 }
