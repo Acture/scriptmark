@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 runner.workspace = true
 suite.workspace = true
-util.workspace = true
+common.workspace = true
 lazy_static = "1.5.0"
 strum = "0.27.1"
 strum_macros = "0.27.1"

@@ -4,9 +4,9 @@ use suite::define_test_suite;
 type InputType = Vec<i64>;
 type OutputType = Vec<String>;
 fn generate_inputs() -> InputType {
-	util::generate(42, 15, 60, 100)
+	common::utils::generate(42, 15, 60, 100)
 		.into_iter()
-		.chain(util::generate(42, 3, 0, 60))
+		.chain(common::utils::generate(42, 3, 0, 60))
 		.chain(vec![123])
 		.chain(vec![-123])
 		.collect()

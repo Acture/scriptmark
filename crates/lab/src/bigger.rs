@@ -6,7 +6,7 @@ type InputType = Vec<(i64, i64)>;
 type OutputType = Vec<String>;
 
 fn generate_inputs() -> InputType {
-	util::generate(42, 40, 1, 50)
+	common::utils::generate(42, 40, 1, 50)
 		.chunks_exact(2)
 		.map(|chunk| (chunk[0], chunk[1]))
 		.collect()
@@ -46,8 +46,8 @@ fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite
 		.zip(expected.iter())
 		.map(|(result, expected)| {
 			let mut res = suite::test_suite::TestResult::builder().build();
-			let extracted_res_nums = util::extract_numbers::<i64>(result);
-			let extracted_expected_nums = util::extract_numbers::<i64>(expected);
+			let extracted_res_nums = common::utils::extract_numbers::<i64>(result);
+			let extracted_expected_nums = common::utils::extract_numbers::<i64>(expected);
 			let res_num_o = extracted_res_nums.last();
 			let expected_num_o = extracted_expected_nums.first();
 			let (res_num, expected_num) = match (res_num_o, expected_num_o) {
@@ -95,7 +95,7 @@ define_test_suite!(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use std::path::Path;
+use std::path::Path;
 
 	#[test]
 	fn test_generate_inputs() {

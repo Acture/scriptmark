@@ -8,7 +8,7 @@ use suite::test_suite::TestResult;
 type InputType = Vec<Vec<i64>>;
 type OutputType = Vec<Vec<String>>;
 fn generate_inputs() -> InputType {
-	util::generate(42, 200, 1, 50)
+	common::utils::generate(42, 200, 1, 50)
 		.chunks_exact(10)
 		.map(|chunk| chunk.to_vec())
 		.collect()

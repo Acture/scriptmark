@@ -21,7 +21,7 @@ define_test_suite!(
 	pub name = CIRCLE_AREA_TEST_2_SUITE,
 	inputs = {
 		type = Vec<f64>,
-		init = util::generate(42, 20, 1.0, 100.0),
+		init = common::utils::generate(42, 20, 1.0, 100.0),
 		clone = |x: &Vec<f64>| x.to_vec()
 	},
 	answers = {
@@ -67,8 +67,8 @@ fn judge(s: &str, t: &str) -> TestResult {
 		.enumerate()
 		.for_each(|(i, (s_line, t_line))| match i {
 			0 => {
-				let s_extracted = util::extract_numbers::<f64>(s_line);
-				let t_extracted = util::extract_numbers::<f64>(t_line);
+				let s_extracted = common::utils::extract_numbers::<f64>(s_line);
+				let t_extracted = common::utils::extract_numbers::<f64>(t_line);
 
 				if s_extracted.len() != t_extracted.len() {
 					res.infos
@@ -120,7 +120,7 @@ fn judge(s: &str, t: &str) -> TestResult {
 				}
 			}
 			1 => {
-				let s_count = match util::extract_numbers::<f64>(t_line).pop() {
+				let s_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
 					Some(value) => value,
 					None => {
 						res.passed = false;
@@ -134,7 +134,7 @@ fn judge(s: &str, t: &str) -> TestResult {
 						return;
 					}
 				};
-				let t_count = match util::extract_numbers::<f64>(t_line).pop() {
+				let t_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
 					Some(value) => value,
 					None => {
 						res.passed = false;

@@ -32,7 +32,7 @@ fn get_answer(inputs: &InputType) -> OutputType {
 }
 
 fn generate_inputs() -> InputType {
-	util::generate(42, 40, 1, 50)
+	common::utils::generate(42, 40, 1, 50)
 		.chunks_exact(2)
 		.map(|chunk|
 			// 鸡、兔
@@ -86,10 +86,10 @@ fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite
 			match pair {
 				EitherOrBoth::Both(result, expected) => {
 					expected.iter().zip(result.iter()).enumerate().for_each(
-						|(i, (expected, result))| match i {
+                        |(i, (expected, result))| match i {
 							0 => {
-								let extracted_expected = util::extract_numbers::<i64>(expected);
-								let extracted_result = util::extract_numbers::<i64>(result);
+								let extracted_expected = common::utils::extract_numbers::<i64>(expected);
+								let extracted_result = common::utils::extract_numbers::<i64>(result);
 								let first_expected = extracted_expected.first();
 								let first_result = extracted_result.first();
 
@@ -119,8 +119,8 @@ fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<suite::test_suite
 								}
 							}
 							1 => {
-								let extracted_expected = util::extract_numbers::<i64>(expected);
-								let extracted_result = util::extract_numbers::<i64>(result);
+								let extracted_expected = common::utils::extract_numbers::<i64>(expected);
+								let extracted_result = common::utils::extract_numbers::<i64>(result);
 								let first_expected = extracted_expected.first();
 								let first_result = extracted_result.first();
 								if first_expected.is_none() || first_result.is_none() {

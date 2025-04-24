@@ -27,7 +27,7 @@ fn judge_results(answer: & String, to_test: & String) -> TestResult {
 			.parse::<f64>()
 			.expect("Failed to parse");
 
-		let b_nums = util::extract_numbers::<f64>(b);
+		let b_nums = common::utils::extract_numbers::<f64>(b);
 		if b_nums.len() > 2 {
 			res.passed = false;
 			res.infos
