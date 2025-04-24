@@ -4,8 +4,6 @@ use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use typed_builder::TypedBuilder;
 
-type StudentName = String;
-
 
 #[derive(TypedBuilder, Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
