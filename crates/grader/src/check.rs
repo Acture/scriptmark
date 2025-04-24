@@ -1,7 +1,7 @@
 use crate::defines::class;
 use crate::defines::student::Student;
 use lab::TestSuiteType;
-use log::{debug};
+use log::debug;
 use std::collections::HashMap;
 use suite::test_suite::TestResult;
 

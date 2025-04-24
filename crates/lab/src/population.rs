@@ -12,7 +12,7 @@ fn judge_results(answer: & String, to_test: & String) -> TestResult {
 		.split("\n")
 		.filter(|line| !line.trim().is_empty())
 		.zip(
-            to_test
+			to_test
 				.split("\n")
 				.filter(|line| !line.trim().is_empty())
 		);
