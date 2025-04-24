@@ -19,72 +19,72 @@ mod three_number;
 
 #[derive(Debug, Eq, PartialEq, Hash, EnumString, Display, EnumIter, AsRefStr)]
 pub enum TestSuiteType {
-    #[strum(serialize = "circle_area")]
-    CircleArea,
-    #[strum(serialize = "population")]
-    Population,
-    #[strum(serialize = "sequence")]
-    Sequence,
-    #[strum(serialize = "three_number")]
-    ThreeNumber,
-    #[strum(serialize = "circle_area_2")]
-    CircleArea2,
-    #[strum(serialize = "chicken_rabbit")]
-    ChickenRabbit,
-    #[strum(serialize = "poem")]
-    Poem,
-    #[strum(serialize = "bigger")]
-    Bigger,
-    #[strum(serialize = "grading")]
-    Grading,
+	#[strum(serialize = "circle_area")]
+	CircleArea,
+	#[strum(serialize = "population")]
+	Population,
+	#[strum(serialize = "sequence")]
+	Sequence,
+	#[strum(serialize = "three_number")]
+	ThreeNumber,
+	#[strum(serialize = "circle_area_2")]
+	CircleArea2,
+	#[strum(serialize = "chicken_rabbit")]
+	ChickenRabbit,
+	#[strum(serialize = "poem")]
+	Poem,
+	#[strum(serialize = "bigger")]
+	Bigger,
+	#[strum(serialize = "grading")]
+	Grading,
 }
 
 impl TestSuiteType {
-    pub fn from_endwith(s: &str) -> Option<TestSuiteType> {
-        TestSuiteType::iter().find(|variant| s.ends_with(variant.as_ref()))
-    }
+	pub fn from_endwith(s: &str) -> Option<TestSuiteType> {
+		TestSuiteType::iter().find(|variant| s.ends_with(variant.as_ref()))
+	}
 }
 
 lazy_static! {
-    pub static ref TEST_SUITE_MAP: HashMap<TestSuiteType, Box<dyn TestSuiteObject>> =
-        HashMap::from([
-            (
-                TestSuiteType::CircleArea,
-                Box::new(circle_area::CIRCLE_AREA_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::Population,
-                Box::new(population::POPULATION_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::Sequence,
-                Box::new(sequence::SEQUENCE_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::ThreeNumber,
-                Box::new(three_number::THREE_NUMBER_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::CircleArea2,
-                Box::new(circle_area_2::CIRCLE_AREA_TEST_2_SUITE.clone())
-                    as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::ChickenRabbit,
-                Box::new(chicken_rabbit::CHICKEN_RABBIT_TEST_SUITE.clone())
-                    as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::Poem,
-                Box::new(poem::POEM_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
-            ),
-            (
-                TestSuiteType::Bigger,
-                Box::new(bigger::BIGGER_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
-            ),
-            (
-                TestSuiteType::Grading,
-                Box::new(grading::GRADING_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
-            )
-        ]);
+	pub static ref TEST_SUITE_MAP: HashMap<TestSuiteType, Box<dyn TestSuiteObject>> =
+		HashMap::from([
+			(
+				TestSuiteType::CircleArea,
+				Box::new(circle_area::CIRCLE_AREA_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::Population,
+				Box::new(population::POPULATION_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::Sequence,
+				Box::new(sequence::SEQUENCE_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::ThreeNumber,
+				Box::new(three_number::THREE_NUMBER_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::CircleArea2,
+				Box::new(circle_area_2::CIRCLE_AREA_TEST_2_SUITE.clone())
+					as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::ChickenRabbit,
+				Box::new(chicken_rabbit::CHICKEN_RABBIT_TEST_SUITE.clone())
+					as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::Poem,
+				Box::new(poem::POEM_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>,
+			),
+			(
+				TestSuiteType::Bigger,
+				Box::new(bigger::BIGGER_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
+			),
+			(
+				TestSuiteType::Grading,
+				Box::new(grading::GRADING_TEST_SUITE.clone()) as Box<dyn TestSuiteObject>
+			)
+		]);
 }

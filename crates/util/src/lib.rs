@@ -1,3 +1,4 @@
+use num_traits::cast::NumCast;
 use rand::distr::uniform;
 use rand::prelude::StdRng;
 use rand::Rng;
@@ -7,7 +8,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::error::Error;
 use std::str::FromStr;
-use num_traits::cast::NumCast;  // 需要额外依赖
+// 需要额外依赖
 
 
 pub fn generate<T: uniform::SampleUniform + std::cmp::PartialOrd + Clone>(
@@ -38,13 +39,13 @@ pub fn calculate_hash_from_file(file_path: &std::path::Path) -> Result<u64, Box<
 
 pub fn extract_numbers<T: FromStr + Copy + NumCast>(s: &str) -> Vec<T>
 where
-    <T as FromStr>::Err: std::fmt::Debug,
+	<T as FromStr>::Err: std::fmt::Debug,
 {
-    let re = Regex::new(r"-?\d+(\.\d+)?").expect("正则表达式错误");
-    re.find_iter(s)
-        .filter_map(|mat| mat.as_str().parse::<f64>().ok()) // 先解析为 f64
-        .filter_map(|num| NumCast::from(num)) // 再转换为 T
-        .collect()
+	let re = Regex::new(r"-?\d+(\.\d+)?").expect("正则表达式错误");
+	re.find_iter(s)
+		.filter_map(|mat| mat.as_str().parse::<f64>().ok()) // 先解析为 f64
+		.filter_map(|num| NumCast::from(num)) // 再转换为 T
+		.collect()
 }
 
 pub fn detect_type(value: &dyn Any) -> (String, String) {
