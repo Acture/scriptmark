@@ -5,8 +5,8 @@ use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
+use std::fs;
 use std::fs::File;
-use std::path;
 use std::path::{Path, PathBuf};
 use typed_builder::TypedBuilder;
 
@@ -14,7 +14,8 @@ use typed_builder::TypedBuilder;
 pub struct Class {
 	pub id: String,
 	pub name: String,
-	pub submission_path: PathBuf,
+	pub csv_path: PathBuf,
+	pub class_path: PathBuf,
 	#[builder(default)]
 	pub students: Vec<Student>,
 	#[builder(default)]
@@ -62,9 +63,9 @@ impl Class {
 	pub fn prepare_class(p0: &Path) -> Vec<Class> {
 		todo!()
 	}
-	pub fn parse_from_csv(	csv_path: PathBuf,
-							name: Option<&str>, id: Option<&str>, infer_from_path: bool)
-							-> Result<Class, Box<dyn std::error::Error>> {
+	pub fn parse_from_csv(csv_path: PathBuf, class_dir: PathBuf,
+                            name: Option<&str>, id: Option<&str>, infer_from_path: bool)
+                            -> Result<Class, Box<dyn std::error::Error>> {
 		let (name, id) = match (infer_from_path, name, id) {
 			(true, _, _) => try_find_class_name_and_id_from_path(&csv_path)?,
 			(false, Some(name), Some(id)) => (name.to_string(), id.to_string()),
@@ -121,16 +122,36 @@ impl Class {
 			);
 		};
 
+		let class_path = class_dir.join(PathBuf::from(format!("{} - {}", id, name)));
+
 
 		Ok(
 			Class::builder()
 				.id(id.to_string())
 				.name(name.to_string())
-				.submission_path(csv_path)
+				.csv_path(csv_path)
+				.class_path(class_path)
 				.students(students)
 				.assignments(assignments)
 				.build()
 		)
+	}
+
+	pub fn create_dir_if_not_exists(&self) -> Result<(), Box<dyn std::error::Error>> {
+		for assignment in &self.assignments {
+			for task in &assignment.tasks {
+				for student in &self.students {
+					let dir = self.class_path
+						.join(&assignment.name)
+						.join(&task.name)
+						.join(&student.id);
+					if !dir.exists() {
+						fs::create_dir_all(&dir)?; // 自动创建所有父目录
+					}
+				}
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -139,10 +160,12 @@ impl Class {
 mod tests {
 	use super::*;
 
+
 	#[test]
 	fn test_load_from_csv() {
+		let data_dir = dev::env::DATA_DIR.to_path_buf();
 		let test_csv_path = dev::env::DATA_DIR.to_path_buf().join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
-		let class = Class::parse_from_csv(test_csv_path, None, None, true);
+		let class = Class::parse_from_csv(test_csv_path, data_dir, None, None, true);
 		assert!(class.is_ok());
 		let class = class.unwrap();
 		assert_eq!(class.id, "AIB110002.13");
@@ -153,10 +176,19 @@ mod tests {
 
 	#[test]
 	fn test_save_load() {
-		let class_dir = dev::env::DATA_DIR.to_path_buf().join("AIB110002.13 - Python程序设计.json");
+		let data_dir = dev::env::DATA_DIR.to_path_buf();
+		let class_dir = data_dir.join("AIB110002.13 - Python程序设计.json");
 		let loaded_class = Class::load(class_dir).unwrap();
-		let test_csv_path = dev::env::DATA_DIR.to_path_buf().join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
-		let parsed_class = Class::parse_from_csv(test_csv_path, None, None, true).unwrap();
+		let test_csv_path = data_dir.join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
+		let parsed_class = Class::parse_from_csv(test_csv_path, data_dir, None, None, true).unwrap();
 		assert_eq!(loaded_class, parsed_class);
+	}
+
+	#[test]
+	fn test_create_dir() {
+		let data_dir = dev::env::DATA_DIR.to_path_buf();
+		let class_dir = data_dir.join("AIB110002.13 - Python程序设计.json");
+		let loaded_class = Class::load(class_dir).unwrap();
+		loaded_class.create_dir_if_not_exists().unwrap();
 	}
 }
