@@ -1,6 +1,4 @@
-use crate::defines::keyed::{ArcKey, Keyed};
 use crate::defines::task::Task;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
@@ -32,10 +30,3 @@ impl Hash for Assignment {
 	}
 }
 
-
-impl Keyed for Assignment {
-	type Key = String;
-	fn key(&self) -> Self::Key {
-		self.name.clone()
-	}
-}
