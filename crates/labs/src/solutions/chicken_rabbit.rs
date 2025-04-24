@@ -6,7 +6,7 @@ use std::path::Path;
 type InputType = Vec<Vec<i64>>;
 type OutputType = Vec<Vec<String>>;
 
-const SOLUTION_CODE: &str = include_str!("solutions/chicken_rabbit.py");
+const SOLUTION_CODE: &str = include_str!("chicken_rabbit.py");
 
 fn get_answer(inputs: &InputType) -> OutputType {
 	inputs

@@ -1,6 +1,6 @@
 [workspace]
 members = [
-	"crates/solutions", "crates/code_runner",
+	"crates/labs", "crates/code_runner",
 	"crates/common", "crates/dev", "crates/cli"
 ]
 default-members = ["crates/cli"] # 默认主项目
@@ -9,7 +9,7 @@ resolver = "2"
 
 [workspace.dependencies]
 common = { path = "crates/common" }
-solutions = { path = "crates/solutions" }
+labs = { path = "crates/labs" }
 code_runner = { path = "crates/code_runner" }
 dev = { path = "crates/dev" }
 cli = { path = "crates/cli" }
