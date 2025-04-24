@@ -56,7 +56,7 @@ pub fn check_assignment(
 			}
 
 			let file = files.first().expect("Failed to get file");
-			let file_hash = util::calculate_hash_from_file(file).expect("Failed to calculate hash");
+			let file_hash = common::utils::calculate_hash_from_file(file).expect("Failed to calculate hash");
 			hash_map
 				.entry(file_hash)
 				.or_default()
