@@ -1,11 +1,12 @@
 use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
-use crate::traits::saveload::{Loadable, Savable};
+use crate::traits::savenload::SaveNLoad;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::fs::File;
+use std::path;
 use std::path::{Path, PathBuf};
 use typed_builder::TypedBuilder;
 
@@ -23,6 +24,18 @@ pub struct Class {
 impl Display for Class {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		write!(f, "Class {{ {} - {}, {} students, {} assignments }}", self.id, self.name, self.students.len(), self.assignments.len())
+	}
+}
+
+impl SaveNLoad for Class {
+	fn save<P: AsRef<Path>>(&self, path: P) -> Result<(), Box<dyn std::error::Error>> {
+		let file_name = path.as_ref().join(PathBuf::from(format!("{} - {}.json", self.id, self.name)));
+		serde_json::to_writer_pretty(File::create(file_name)?, self)?;
+		Ok(())
+	}
+	fn load<P: AsRef<Path>>(path: P) -> Result<Self, Box<dyn std::error::Error>> {
+		let class: Class = serde_json::from_reader(File::open(path)?)?;
+		Ok(class)
 	}
 }
 
@@ -49,9 +62,9 @@ impl Class {
 	pub fn prepare_class(p0: &Path) -> Vec<Class> {
 		todo!()
 	}
-	pub fn parse_from_csv(csv_path: PathBuf,
-                            name: Option<&str>, id: Option<&str>, infer_from_path: bool)
-                            -> Result<Class, Box<dyn std::error::Error>> {
+	pub fn parse_from_csv(	csv_path: PathBuf,
+							name: Option<&str>, id: Option<&str>, infer_from_path: bool)
+							-> Result<Class, Box<dyn std::error::Error>> {
 		let (name, id) = match (infer_from_path, name, id) {
 			(true, _, _) => try_find_class_name_and_id_from_path(&csv_path)?,
 			(false, Some(name), Some(id)) => (name.to_string(), id.to_string()),
@@ -133,7 +146,7 @@ mod tests {
 		assert!(class.is_ok());
 		let class = class.unwrap();
 		assert_eq!(class.id, "AIB110002.13");
-		let class_save = dev::env::DATA_DIR.to_path_buf().join("class.json");
+		let class_save = dev::env::DATA_DIR.to_path_buf();
 		class.save(&class_save).expect("TODO: panic message");
 		println!("{}", class);
 	}
