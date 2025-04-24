@@ -176,7 +176,7 @@ mod tests {
 	fn test_save_load() {
 		let data_dir = dev::env::DATA_DIR.to_path_buf();
 		let class_dir = data_dir.join("AIB110002.13 - Python程序设计.json");
-		let loaded_class = Class::load(class_dir).unwrap();
+		let loaded_class = Class::load(&class_dir).unwrap();
 		let test_csv_path = data_dir.join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
 		let parsed_class = Class::parse_from_csv(test_csv_path, data_dir, None, None, true).unwrap();
 		assert_eq!(loaded_class, parsed_class);
@@ -186,7 +186,7 @@ mod tests {
 	fn test_create_dir() {
 		let data_dir = dev::env::DATA_DIR.to_path_buf();
 		let class_dir = data_dir.join("AIB110002.13 - Python程序设计.json");
-		let loaded_class = Class::load(class_dir).unwrap();
+		let loaded_class = Class::load(&class_dir).unwrap();
 		loaded_class.create_dir_if_not_exists().unwrap();
 	}
 }
