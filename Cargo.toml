@@ -1,7 +1,7 @@
 [workspace]
 members = ["crates/grader",
 	"crates/lab", "crates/runner", "crates/suite", "crates/grader"
-	, "crates/util", "crates/common"]
+	, "crates/common", "crates/common", "crates/dev"]
 default-members = ["crates/grader"] # 默认主项目
 
 resolver = "2"
@@ -11,5 +11,6 @@ lab = { path = "crates/lab" }
 runner = { path = "crates/runner" }
 suite = { path = "crates/suite" }
 grader = { path = "crates/grader" }
-util = { path = "crates/util" }
+common = { path = "crates/common" }
+dev = { path = "crates/dev" }
 pyo3 = { version = "0.23.5", features = ["auto-initialize", "generate-import-lib"] }
