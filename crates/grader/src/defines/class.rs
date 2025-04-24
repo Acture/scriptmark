@@ -153,7 +153,7 @@ mod tests {
 
 	#[test]
 	fn test_save_load() {
-		let class_dir = dev::env::DATA_DIR.to_path_buf().join("class.json");
+		let class_dir = dev::env::DATA_DIR.to_path_buf().join("AIB110002.13 - Python程序设计.json");
 		let loaded_class = Class::load(class_dir).unwrap();
 		let test_csv_path = dev::env::DATA_DIR.to_path_buf().join("2025-04-25T0045_评分-AIB110002.13_Python程序设计.csv");
 		let parsed_class = Class::parse_from_csv(test_csv_path, None, None, true).unwrap();
