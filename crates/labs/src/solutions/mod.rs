@@ -1,0 +1,12 @@
+pub mod bigger;
+pub mod chicken_rabbit;
+pub mod circle_area;
+pub mod circle_area_2;
+pub mod grading;
+pub mod hundred_chickens;
+pub mod k_number;
+pub mod poem;
+pub mod population;
+pub mod rhombus;
+pub mod sequence;
+pub mod three_number;

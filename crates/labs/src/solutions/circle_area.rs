@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const SOLUTION_CODE: &str = include_str!("solutions/circle_area.py");
+const SOLUTION_CODE: &str = include_str!("circle_area.py");
 
 pub fn get_answer(input: f64) -> String {
 	match code_runner::python::run_code::<String>(

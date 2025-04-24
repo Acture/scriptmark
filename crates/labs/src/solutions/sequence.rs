@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const SOLUTION_CODE: &str = include_str!("solutions/sequence.py");
+const SOLUTION_CODE: &str = include_str!("sequence.py");
 
 type InputType = Option<()>;
 type OutputType = Vec<HashMap<String, Vec<i64>>>;

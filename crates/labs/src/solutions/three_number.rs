@@ -7,7 +7,7 @@ use std::path::Path;
 type InputType = Vec<String>;
 type OutputType = Vec<String>;
 
-const SOLUTION_CODE: &str = include_str!("solutions/three_number.py");
+const SOLUTION_CODE: &str = include_str!("three_number.py");
 
 fn get_answer(inputs: &InputType) -> OutputType {
 	inputs

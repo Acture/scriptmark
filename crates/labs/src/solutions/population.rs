@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-const SOLUTION_CODE: &str = include_str!("solutions/population.py");
+const SOLUTION_CODE: &str = include_str!("population.py");
 
 fn judge_results(answer: & String, to_test: & String) -> TestResult {
 	let lines = answer
