@@ -39,7 +39,7 @@ mod tests {
 	fn test_get_project_dir() {
 		assert!(PROJECT_DIR.exists());
 	}
-	
+
 	#[test]
 	fn test_get_data_dir() {
 		assert!(DATA_DIR.exists());

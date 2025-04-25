@@ -1,4 +1,3 @@
-
 nums = input().split(",")
 nums = [int(num) for num in nums]
 nums.sort()
