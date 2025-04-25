@@ -1,3 +1,4 @@
+use crate::state::{AppState, ViewMode};
 use common::defines::assignment::Assignment;
 use common::defines::class::Class;
 use common::defines::student::Student;
@@ -8,7 +9,7 @@ use cursive::traits::{Nameable, Resizable};
 use cursive::view::{Scrollable, ViewWrapper};
 use cursive::views::{Button, Dialog, LinearLayout, ListView, NamedView, Panel, ResizedView, ScrollView, SelectView, StackView, TextView};
 use cursive::{Cursive, View};
-use log::error;
+use log::{error, info};
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, Display, EnumString, AsRefStr, IntoStaticStr)]
@@ -39,7 +40,7 @@ fn get_assignment_view(assignments: &[Assignment]) -> ScrollView<SelectView<Assi
 	assignment_view.scrollable()
 }
 
-fn get_assignment_menu_view(assignments: &[Assignment]) -> NamedView<ScrollView<SelectView<Assignment>>> {
+pub(crate) fn get_assignment_menu_view(assignments: &[Assignment]) -> NamedView<ScrollView<SelectView<Assignment>>> {
 	let mut assignment_menu_view = get_assignment_view(assignments)
 		.with_name(Component::AssignmentMenuView.as_ref());
 
@@ -119,16 +120,16 @@ pub fn get_class_list_panel(classes: &[Class]) -> ClassSelectPanel {
 			})
 		)
 		.on_submit(|s, c| {
-			s.call_on_name(Component::ContentStack.as_ref(), |content_stack: &mut NamedView<StackView>| {
-				content_stack.with_view_mut(|content_stack| {
-					move_or_create_to_stack_front(
-						content_stack,
-						Component::ClassGeneralViewLayout.as_ref(),
-						get_class_general_view_layout(c),
-					);
-				});
-			}).unwrap_or_else(
-				|| error!("Failed to set title")
+			let state = s.user_data::<AppState>().unwrap_or_else(
+				|| panic!("Failed to get app state")
+			);
+			state.selected.class = Some(c.clone());
+			state.change_view(ViewMode::AssignmentList);
+			info!("View Mode Changed To: Assignment List");
+			let new_view = state.build_view_mode();
+			info!("Assignment List");
+			s.add_layer(
+				new_view
 			);
 		})
 	)
@@ -136,7 +137,7 @@ pub fn get_class_list_panel(classes: &[Class]) -> ClassSelectPanel {
 }
 
 
-pub fn get_special_list_panel() -> SpecialSelectPanel {
+pub fn get_class_special_list_panel() -> SpecialSelectPanel {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
