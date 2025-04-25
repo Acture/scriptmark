@@ -96,7 +96,7 @@ impl Class {
 		}).collect();
 		let mut students = Vec::new();
 
-		for result in rdr.records().skip(1) {
+		for result in rdr.records() {
 			let record = result?;
 			let name = record.get(student_name_index).unwrap().to_string();
 			if name == "测验学生" {

@@ -1,7 +1,10 @@
 use common::defines;
+use common::defines::assignment::Assignment;
 use common::defines::student::Student;
+use common::defines::submission::Submission;
 use common::traits::savenload::SaveNLoad;
 use log::{info, warn};
+use std::borrow::BorrowMut;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -48,7 +51,8 @@ pub fn unzip_file(zip_path: &Path, output_dir: &Path) -> Result<(), Box<dyn std:
 
 pub fn group_files_by_student(
 	dir: &Path,
-	students: &[Student],
+	assignment: &Assignment,
+	students: &mut [Student],
 ) -> Result<(), Box<dyn std::error::Error>> {
 	let mut moved = 0;
 	let mut skipped = 0;
@@ -87,7 +91,7 @@ pub fn group_files_by_student(
 		}
 		let student_id = parts[0];
 
-		let student = match students.iter().find(|s| s.sis_login_id == student_id) {
+		let mut student: &mut Student = match students.iter_mut().find(|s| s.sis_login_id == student_id) {
 			Some(s) => s,
 			None => {
 				warn!("Student ID {} not found in roster", student_id);
@@ -95,6 +99,7 @@ pub fn group_files_by_student(
 				continue;
 			}
 		};
+
 
 		let student_folder = dir.join(&student_id);
 		if !student_folder.exists() {
@@ -116,9 +121,27 @@ pub fn group_files_by_student(
 		);
 
 		fs::rename(&path, &target_path)?;
+		student.submissions.insert(
+			assignment.name.clone(),
+			Submission::builder()
+				.submission_path(Some(target_path.clone()))
+				.build(),
+		);
 		moved += 1;
 	}
 
 	info!("Grouped files complete: {} moved, {} skipped", moved, skipped);
 	Ok(())
+}
+
+pub fn replace_in_vec<T: PartialEq>(vec: &mut [T], item: T) -> Result<(), Box<dyn std::error::Error>> {
+	// 查找与 item 相等的元素的索引位置
+	if let Some(position) = vec.iter().position(|element| element == &item) {
+		// 在找到的位置替换元素
+		vec[position] = item;
+		Ok(())
+	} else {
+		// 未找到元素，不进行替换
+		Err("Item not found in vector".into())
+	}
 }
