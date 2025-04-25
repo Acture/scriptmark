@@ -22,7 +22,6 @@ use views::Component;
 
 
 fn main() {
-
 	let args = Args::parse();
 
 	let config = config::prepare_config(&args.config_path).unwrap_or_else(|e| {
