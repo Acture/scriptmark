@@ -1,4 +1,5 @@
-use crate::traits::savenload::SaveNLoad;
+use crate::logger::LogLevel;
+use common::traits::savenload::SaveNLoad;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
@@ -9,12 +10,18 @@ use typed_builder::TypedBuilder;
 
 #[derive(TypedBuilder, Debug, Serialize, Deserialize)]
 pub struct Config {
-	#[builder(default = PathBuf::from("data"))]
-	data_dir: PathBuf,
-	#[builder(default = PathBuf::from("data"))]
-	storage_dir: PathBuf,
+	#[builder(default = PathBuf::from("./data"))]
+	pub data_dir: PathBuf,
+	#[builder(default = PathBuf::from("."))]
+	pub storage_dir: PathBuf,
+	#[builder(default = PathBuf::from("."))]
+	pub log_dir: PathBuf,
+	#[builder(default = LogLevel::Info)]
+	pub log_level: LogLevel,
+	#[builder(default = false)]
+	pub log_to_console: bool,
 	#[builder(default = true)]
-	move_roster: bool,
+	pub move_roster: bool,
 }
 
 impl Config {

@@ -1,40 +1,27 @@
-use clap::Parser;
-use log::{error, info, warn};
-use std::env;
-use std::path::Path;
-
 mod tui;
 mod args;
+mod views;
+mod focus;
+mod utils;
+mod logger;
+mod config;
 
 use crate::args::Args;
-use common::config;
-use common::defines;
+use clap::Parser;
 use common::traits::savenload::SaveNLoad;
+use cursive::align::{HAlign, VAlign};
+use cursive::event::Key;
+use cursive::view::{Nameable, Resizable};
+use cursive::views::{Button, Dialog, DummyView, LinearLayout, NamedView, Panel, ResizedView, SelectView, StackView, TextView};
+use cursive::{Cursive, With};
+use log::{error, info, warn};
+use std::path::Path;
+use std::{env, iter};
+use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
+use views::Component;
 
-
-fn init_logger() {
-	env_logger::Builder::new()
-		.parse_filters(&env::var("RUST_LOG")
-			.unwrap_or_else(|_| "info".to_string())) // 默认 info
-		.init();
-}
-
-fn load_saving(storage_path: &Path) -> Result<Vec<defines::class::Class>, Box<dyn std::error::Error>> {
-	storage_path.read_dir()?.filter_map(
-		|entry| {
-			let path = entry.ok()?.path();
-			match path.extension()?.to_str()?.eq_ignore_ascii_case("json") {
-				true => {
-					Some(defines::class::Class::load(&path))
-				}
-				false => None,
-			}
-		}
-	).collect()
-}
 
 fn main() {
-	init_logger();
 
 	let args = Args::parse();
 
@@ -45,19 +32,97 @@ fn main() {
 		c.save(&args.config_path).expect("Failed to save config");
 		c
 	});
+	logger::init_logger(
+		config.log_level,
+		&config.log_dir,
+		config.log_to_console,
+	);
 
 	info!("数据目录：{}, 存储目录：{}", config.data_dir().to_string_lossy(), config.storage_dir().to_string_lossy());
 
-	let classes = load_saving(config.storage_dir()).unwrap_or_else(|e| {
+	let classes = utils::load_saving(config.storage_dir()).unwrap_or_else(|e| {
 		error!("{}", e);
 		vec![]
 	});
 
+
 	info!("{} classes loaded", classes.len());
 
-	for class in classes {
-		println!("{}", class);
-	}
+	let mut siv = cursive::default();
+
+	let main_content_view = StackView::new()
+		.with_name(Component::MainContentView.as_ref());
+
+
+	let main_content_panel = Panel::new(main_content_view)
+		.title("Content")
+		.full_width()
+		.full_height()
+		.with_name(Component::MainContentPanel.as_ref());
+
+	let top_list_panel = views::get_top_list_panel(&classes)
+		.title("Class List")
+		.full_width()
+		.full_height()
+		.with_name(Component::TopListPanel.as_ref());
+
+	let bottom_list_panel = views::get_bottom_list_panel()
+		.title("Bottom")
+		.full_width()
+		.full_height()
+		.with_name(Component::BottomListPanel.as_ref());
+
+	let quit_button = Button::new("Quit", |s: &mut Cursive| { s.quit(); })
+		.with_name(Component::QuitButton.as_ref());
+
+	let button_panel = Panel::new(quit_button)
+		.fixed_height(3)
+		.with_name(Component::ButtonPanel.as_ref());
+
+	let left_column_layout = LinearLayout::vertical()
+		.child(top_list_panel)
+		.child(DummyView.fixed_height(1))
+		.child(bottom_list_panel)
+		.child(DummyView.fixed_height(1))
+		.child(button_panel)
+		.child(DummyView.fixed_height(1))
+		.fixed_width(50)
+		.full_height()
+		.with_name(Component::LeftColumnLayout.as_ref());
+
+	let main_layout = LinearLayout::horizontal()
+		.child(left_column_layout)  // 左栏固定30列宽
+		.child(main_content_panel)
+		.with_name(Component::MainLayout.as_ref());
+
+	let focus_state = focus::FocusState {
+		focus_chain: vec![
+			Component::TopListView.as_ref(),
+			Component::BottomListView.as_ref(),
+			Component::QuitButton.as_ref()
+		],
+		current_index: 0,
+	};
+	siv.set_user_data(focus_state);
+
+
+	siv.add_global_callback(Key::Tab, |s: &mut Cursive| {
+		let focus_name = {
+			let state = s.user_data::<focus::FocusState>().unwrap();
+			state.focus_chain[state.current_index].to_string()
+		};
+
+		s.add_layer(TextView::new(format!("Focus: {}", focus_name)));
+
+		s.focus_name(&focus_name).ok();
+	});
+
+
+	siv.add_fullscreen_layer(main_layout);
+
+	// Starts the event loop.
+	siv.run();
+
 
 	// init_logger();
 	//
