@@ -10,6 +10,7 @@ use crate::args::Args;
 use clap::Parser;
 use common::traits::savenload::SaveNLoad;
 use cursive::align::{HAlign, VAlign};
+use cursive::event::Key;
 use cursive::view::{Nameable, Resizable};
 use cursive::views::{Button, Dialog, DummyView, LinearLayout, NamedView, Panel, ResizedView, SelectView, StackView, TextView};
 use cursive::{Cursive, With};
@@ -49,25 +50,31 @@ fn main() {
 	let mut siv = cursive::default();
 
 
-	let content_inner_layout = LinearLayout::vertical().with_name(
-		Component::ContentLayout.as_ref()
-	);
-
-
-	let content_outer_panel = Panel::new(content_inner_layout)
+	let main_content_panel = Panel::new(StackView::new()
+		.with_name(Component::ContentStack.as_ref()))
 		.title("Content")
-		.with_name(Component::ContentPanel.as_ref())
 		.full_width()
 		.full_height();
 
+	let mut top_stack = StackView::new().with_name(Component::TopStack.as_ref());
 
-	let top_list_panel = views::get_top_list_panel(&classes, "Class List")
+	let class_list_panel = views::get_class_list_panel(&classes)
 		.full_width()
 		.full_height();
 
-	let bottom_list_panel = views::get_bottom_list_panel("Special Action")
+	top_stack.get_mut().add_layer(class_list_panel);
+
+	let mut bottom_stack = StackView::new()
+		.with_name(Component::BottomStack.as_ref());
+
+	let special_list_panel = views::get_special_list_panel()
 		.full_width()
 		.full_height();
+
+	bottom_stack.get_mut().add_layer(special_list_panel);
+
+
+	let mut corner_stack = StackView::new().with_name(Component::CornerStack.as_ref());
 
 	let quit_button = Button::new("Quit", |s: &mut Cursive| { s.quit(); });
 
@@ -76,24 +83,22 @@ fn main() {
 	)
 		.fixed_height(3);
 
+	corner_stack.get_mut().add_layer(button_panel);
+
 	let left_column_layout = LinearLayout::vertical()
-		.child(top_list_panel)
-		.child(bottom_list_panel)
-		.child(button_panel)
-		.with_name(Component::LeftColumnLayout.as_ref())
+		.child(top_stack.full_height())
+		.child(bottom_stack.full_height())
+		.child(corner_stack)
 		.max_width(50)
 		.full_height();
 
 	let main_layout = LinearLayout::horizontal()
 		.child(left_column_layout)
-		.child(content_outer_panel)
-		.with_name(Component::MainLayout.as_ref());
+		.child(main_content_panel);
 
 
 	siv.add_fullscreen_layer(main_layout);
 
 	// Starts the event loop.
 	siv.run();
-
-
 }
