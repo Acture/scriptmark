@@ -12,6 +12,7 @@ use crate::state::{AppState, ViewMode};
 use clap::Parser;
 use common::traits::savenload::SaveNLoad;
 use cursive::align::{HAlign, VAlign};
+use cursive::event::Key;
 use cursive::view::{Nameable, Resizable};
 use cursive::views::{Button, Dialog, DummyView, LinearLayout, NamedView, Panel, ResizedView, SelectView, StackView, TextView};
 use cursive::{Cursive, CursiveExt, With};
@@ -46,11 +47,13 @@ fn main() {
 	siv.set_user_data(
 		state
 	);
+	siv.set_global_callback(Key::Esc, |s| {
+		s.pop_layer();
+	});
 	let view = siv.user_data::<AppState>().unwrap().build_view_mode();
 	siv.add_layer(view);
 
 	info!("{} classes loaded", siv.user_data::<AppState>().unwrap().classes.len());
 
 	siv.run();
-
 }
