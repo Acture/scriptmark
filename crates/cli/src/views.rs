@@ -2,38 +2,80 @@ use common::defines::assignment::Assignment;
 use common::defines::class::Class;
 use common::defines::student::Student;
 use cursive::align::HAlign;
+use cursive::direction::Direction;
+use cursive::event::{Event, Key};
 use cursive::traits::{Nameable, Resizable};
 use cursive::view::{Scrollable, ViewWrapper};
-use cursive::views::{Button, Dialog, LinearLayout, ListView, NamedView, Panel, ResizedView, SelectView, StackView, TextView};
-use cursive::Cursive;
+use cursive::views::{Button, Dialog, LinearLayout, ListView, NamedView, Panel, ResizedView, ScrollView, SelectView, StackView, TextView};
+use cursive::{Cursive, View};
 use log::error;
-use std::alloc::Layout;
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, Display, EnumString, AsRefStr, IntoStaticStr)]
 pub enum Component {
-	ContentLayout,
-	ContentPanel,
-	TopListPanel,
-	BottomListPanel,
-	ButtonPanel,
-	LeftColumnLayout,
-	MainLayout,
+	TopStack,
+	BottomStack,
+	CornerStack,
+	ContentStack,
+	ClassGeneralViewLayout,
+	AssignmentContentView,
+	AssignmentMenuView,
 }
 
+type ClassSelectPanel = Panel<SelectView<Class>>;
+type CursiveFn = dyn Fn(&mut Cursive);
+type BoxedCursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
+type SpecialSelectPanel = Panel<SelectView<BoxedCursiveFn>>;
+type ButtonSelectPanel = Panel<LinearLayout>;
 
-fn get_assignment_view(assignments: &[Assignment]) -> SelectView<Assignment> {
-	let mut assignment_select_view = SelectView::new();
+fn get_assignment_view(assignments: &[Assignment]) -> ScrollView<SelectView<Assignment>> {
+	let mut assignment_view = SelectView::new();
 	for a in assignments.iter() {
-		assignment_select_view.add_item(
+		assignment_view.add_item(
 			a.name.clone(),
 			a.clone(),
 		)
 	}
-	assignment_select_view.set_on_submit(|s, a| {
-		s.call_on_name(Component::TopListPanel.as_ref(), |outer: &mut NamedView<Panel<NamedView<LinearLayout>>>| {});
+	assignment_view.scrollable()
+}
+
+fn get_assignment_menu_view(assignments: &[Assignment]) -> NamedView<ScrollView<SelectView<Assignment>>> {
+	let mut assignment_menu_view = get_assignment_view(assignments)
+		.with_name(Component::AssignmentMenuView.as_ref());
+
+
+	assignment_menu_view
+}
+
+fn get_assignment_content_view(assignments: &[Assignment]) -> ScrollView<SelectView<Assignment>> {
+	let mut assignment_content_view = get_assignment_view(assignments);
+	let assignments_owned = assignments.to_vec(); // 将切片克隆到一个新的 Vec 中
+
+	assignment_content_view.get_inner_mut().set_on_submit(move |s, a| {
+		s.call_on_name(Component::ContentStack.as_ref(), |content_stack: &mut NamedView<StackView>| {
+			content_stack.with_view_mut(|content_stack| {
+				while !content_stack.is_empty() {
+					content_stack.pop_layer();
+				}
+			});
+		});
+		s.call_on_name(Component::TopStack.as_ref(), |top_stack: &mut NamedView<StackView>| {
+			top_stack.with_view_mut(|top_stack| {
+				let assignment_menu_view = get_assignment_menu_view(&assignments_owned);
+
+				move_or_create_to_stack_front(
+					top_stack,
+					Component::AssignmentMenuView.as_ref(),
+					assignment_menu_view,
+				);
+			});
+			top_stack.take_focus(Direction::none()).expect("TODO: panic message");
+		}).unwrap_or_else(|| {
+			error!("Failed to set title")
+		});
 	});
-	assignment_select_view
+
+	assignment_content_view
 }
 
 fn get_student_view(students: &[Student]) -> SelectView<Student> {
@@ -47,8 +89,27 @@ fn get_student_view(students: &[Student]) -> SelectView<Student> {
 	student_select_view
 }
 
-type TopListPanelViewType = NamedView<Panel<SelectView<Class>>>;
-pub fn get_top_list_panel(classes: &[Class], title: &str) -> TopListPanelViewType {
+pub fn get_class_general_view_layout(class: &Class) -> NamedView<LinearLayout> {
+	LinearLayout::vertical()
+		.child(
+			LinearLayout::horizontal()
+				.child(Panel::new(get_assignment_content_view(&class.assignments).scrollable()).title(format!("Assignments ({})", class.assignments.len())))
+				.child(Panel::new(get_student_view(&class.students).scrollable()).title(format!("Students ({})", class.students.len())))
+		)
+		.with_name(Component::ClassGeneralViewLayout.as_ref())
+}
+
+pub fn move_or_create_to_stack_front(stack: &mut StackView, name: &str, view: impl Resizable + ViewWrapper) {
+	if let Some(layer_position) = stack.find_layer_from_name(name) {
+		stack.move_to_front(layer_position);
+	} else {
+		stack.add_layer(
+			view
+		);
+	}
+}
+
+pub fn get_class_list_panel(classes: &[Class]) -> ClassSelectPanel {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
@@ -58,29 +119,24 @@ pub fn get_top_list_panel(classes: &[Class], title: &str) -> TopListPanelViewTyp
 			})
 		)
 		.on_submit(|s, c| {
-			s.call_on_name(Component::ContentPanel.as_ref(), |outer: &mut NamedView<Panel<NamedView<LinearLayout>>>| {
-				let mut panel = outer.get_mut();
-				let mut layout = panel.get_inner_mut().get_mut();
-				layout.clear();
-				layout.add_child(LinearLayout::vertical()
-					.child(
-						LinearLayout::horizontal()
-							.child(Panel::new(get_assignment_view(&c.assignments).scrollable()).title(format!("Assignments ({})", c.assignments.len())))
-							.child(Panel::new(get_student_view(&c.students).scrollable()).title(format!("Students ({})", c.students.len())))
-					));
+			s.call_on_name(Component::ContentStack.as_ref(), |content_stack: &mut NamedView<StackView>| {
+				content_stack.with_view_mut(|content_stack| {
+					move_or_create_to_stack_front(
+						content_stack,
+						Component::ClassGeneralViewLayout.as_ref(),
+						get_class_general_view_layout(c),
+					);
+				});
 			}).unwrap_or_else(
 				|| error!("Failed to set title")
 			);
 		})
 	)
-		.title(title)
-		.with_name(Component::TopListPanel.as_ref())
+		.title("Class List")
 }
 
-type CursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
-type BoxedCursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
-type BottomListPanelViewType = NamedView<Panel<SelectView<BoxedCursiveFn>>>;
-pub fn get_bottom_list_panel(title: &str) -> BottomListPanelViewType {
+
+pub fn get_special_list_panel() -> SpecialSelectPanel {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
@@ -95,12 +151,10 @@ pub fn get_bottom_list_panel(title: &str) -> BottomListPanelViewType {
 			) as BoxedCursiveFn,
 		)
 	)
-		.title(title)
-		.with_name(Component::BottomListPanel.as_ref())
+		.title("Special")
 }
 
-type ButtonPanelViewType = NamedView<Panel<LinearLayout>>;
-pub fn get_button_panel(buttons: Vec<Button>) -> ButtonPanelViewType {
+pub fn get_button_panel(buttons: Vec<Button>) -> ButtonSelectPanel {
 	let mut layout = LinearLayout::horizontal();
 	for b in buttons {
 		layout.add_child(b);
@@ -108,5 +162,4 @@ pub fn get_button_panel(buttons: Vec<Button>) -> ButtonPanelViewType {
 	Panel::new(
 		layout
 	)
-		.with_name(Component::ButtonPanel.as_ref())
 }
