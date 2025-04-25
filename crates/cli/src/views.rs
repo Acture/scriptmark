@@ -1,25 +1,54 @@
+use common::defines::assignment::Assignment;
 use common::defines::class::Class;
+use common::defines::student::Student;
 use cursive::align::HAlign;
-use cursive::traits::Nameable;
-use cursive::views::{Dialog, NamedView, Panel, SelectView, StackView, TextView};
+use cursive::traits::{Nameable, Resizable};
+use cursive::view::{Scrollable, ViewWrapper};
+use cursive::views::{Button, Dialog, LinearLayout, ListView, NamedView, Panel, ResizedView, SelectView, StackView, TextView};
 use cursive::Cursive;
+use log::error;
+use std::alloc::Layout;
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, Display, EnumString, AsRefStr, IntoStaticStr)]
 pub enum Component {
-	MainContentView,
-	MainContentPanel,
-	TopListView,
+	ContentLayout,
+	ContentPanel,
 	TopListPanel,
-	BottomListView,
 	BottomListPanel,
-	QuitButton,
 	ButtonPanel,
 	LeftColumnLayout,
 	MainLayout,
 }
 
-pub fn get_top_list_panel(classes: &[Class]) -> Panel<NamedView<SelectView<Class>>> {
+
+fn get_assignment_view(assignments: &[Assignment]) -> SelectView<Assignment> {
+	let mut assignment_select_view = SelectView::new();
+	for a in assignments.iter() {
+		assignment_select_view.add_item(
+			a.name.clone(),
+			a.clone(),
+		)
+	}
+	assignment_select_view.set_on_submit(|s, a| {
+		s.call_on_name(Component::TopListPanel.as_ref(), |outer: &mut NamedView<Panel<NamedView<LinearLayout>>>| {});
+	});
+	assignment_select_view
+}
+
+fn get_student_view(students: &[Student]) -> SelectView<Student> {
+	let mut student_select_view = SelectView::new();
+	for s in students.iter() {
+		student_select_view.add_item(
+			s.name.clone(),
+			s.clone(),
+		)
+	}
+	student_select_view
+}
+
+type TopListPanelViewType = NamedView<Panel<SelectView<Class>>>;
+pub fn get_top_list_panel(classes: &[Class], title: &str) -> TopListPanelViewType {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
@@ -28,26 +57,30 @@ pub fn get_top_list_panel(classes: &[Class]) -> Panel<NamedView<SelectView<Class
 				(format!("{} - {}", c.id, c.name), c.clone())
 			})
 		)
-		.on_select(
-			|s, c| {
-				let content = format!("Selected: {}", c.name);
-				s.call_on_name(Component::MainContentView.as_ref(), |mc: &mut TextView| {
-					mc.set_content(content);
-				}).unwrap();
-			}
-		)
 		.on_submit(|s, c| {
-			let main_content = s.call_on_name(Component::MainContentView.as_ref(), |mc: &mut StackView| {
-				mc.add_layer(TextView::new(format!("Submitted: {}", c.name)).h_align(HAlign::Center))
-			});
+			s.call_on_name(Component::ContentPanel.as_ref(), |outer: &mut NamedView<Panel<NamedView<LinearLayout>>>| {
+				let mut panel = outer.get_mut();
+				let mut layout = panel.get_inner_mut().get_mut();
+				layout.clear();
+				layout.add_child(LinearLayout::vertical()
+					.child(
+						LinearLayout::horizontal()
+							.child(Panel::new(get_assignment_view(&c.assignments).scrollable()).title(format!("Assignments ({})", c.assignments.len())))
+							.child(Panel::new(get_student_view(&c.students).scrollable()).title(format!("Students ({})", c.students.len())))
+					));
+			}).unwrap_or_else(
+				|| error!("Failed to set title")
+			);
 		})
-		.with_name(Component::TopListView.as_ref()))
+	)
+		.title(title)
+		.with_name(Component::TopListPanel.as_ref())
 }
 
 type CursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
 type BoxedCursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
-
-pub fn get_bottom_list_panel() -> Panel<NamedView<SelectView<BoxedCursiveFn>>> {
+type BottomListPanelViewType = NamedView<Panel<SelectView<BoxedCursiveFn>>>;
+pub fn get_bottom_list_panel(title: &str) -> BottomListPanelViewType {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
@@ -61,6 +94,19 @@ pub fn get_bottom_list_panel() -> Panel<NamedView<SelectView<BoxedCursiveFn>>> {
 				}
 			) as BoxedCursiveFn,
 		)
-		.with_name(Component::BottomListView.as_ref())
 	)
+		.title(title)
+		.with_name(Component::BottomListPanel.as_ref())
+}
+
+type ButtonPanelViewType = NamedView<Panel<LinearLayout>>;
+pub fn get_button_panel(buttons: Vec<Button>) -> ButtonPanelViewType {
+	let mut layout = LinearLayout::horizontal();
+	for b in buttons {
+		layout.add_child(b);
+	}
+	Panel::new(
+		layout
+	)
+		.with_name(Component::ButtonPanel.as_ref())
 }
