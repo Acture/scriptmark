@@ -11,7 +11,7 @@ use cursive::traits::{Nameable, Resizable};
 use cursive::view::{AnyView, IntoBoxedView, Scrollable, ViewWrapper};
 use cursive::views::{Button, Dialog, EditView, LinearLayout, ListView, NamedView, Panel, ResizedView, ScrollView, SelectView, StackView, TextArea, TextView};
 use cursive::{Cursive, View, With};
-use log::{error, info};
+use log::{debug, error, info};
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 
 #[derive(Debug, Clone, Copy, Display, EnumString, AsRefStr, IntoStaticStr)]
@@ -52,9 +52,7 @@ pub fn build_assignment_menu(assignments: &[Assignment]) -> AssignmentMenu {
 		build_assignment_view(assignments)
 			.on_submit(
 				|s, a| {
-					let state = s.user_data::<AppState>().unwrap_or_else(
-						|| panic!("Failed to get app state")
-					);
+					let state = s.user_data::<AppState>().expect("Failed to get app state");
 					state.selected.assignment = Some(a.clone());
 					state.change_view(ViewMode::AssignmentDetail);
 					info!("View Mode Changed To: Assignment Detail");
@@ -80,9 +78,7 @@ pub fn build_class_menu(classes: &[Class]) -> ClassMenu {
 			})
 		)
 		.on_submit(|s, c| {
-			let state = s.user_data::<AppState>().unwrap_or_else(
-				|| panic!("Failed to get app state")
-			);
+			let state = s.user_data::<AppState>().expect("Failed to get app state");
 			state.selected.class = Some(c.clone());
 			state.change_view(ViewMode::AssignmentList);
 			info!("View Mode Changed To: Assignment List");
@@ -155,6 +151,7 @@ pub fn build_student_menu(students: &[Student]) -> SelectView<Student> {
 	select
 }
 
+
 pub fn build_assignment_detail_view_mode(selected_class: &Class, selected_assignment: &Assignment) -> LinearLayout {
 	let assignment_detail = TextView::new(
 		format!("{} - {}", selected_class.id, selected_assignment)
@@ -175,7 +172,7 @@ pub fn build_assignment_detail_view_mode(selected_class: &Class, selected_assign
 		.full_height();
 
 
-	let special_list_panel = views::build_class_edit_menu()
+	let special_list_panel = views::build_assignment_detail_edit_menu()
 		.full_width()
 		.full_height();
 
@@ -211,7 +208,7 @@ pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewM
 		.full_height();
 
 
-	let special_list_panel = views::build_class_edit_menu()
+	let special_list_panel = views::build_assignment_detail_edit_menu()
 		.full_width()
 		.full_height();
 
@@ -236,6 +233,77 @@ pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewM
 		.child(main_content_panel)
 }
 
+pub fn build_assignment_detail_edit_menu() -> Panel<LinearLayout> {
+	let mut s_v = LinearLayout::vertical();
+	info!("build_assignment_edit_menu");
+
+	let edit_assignment_button = Button::new("Edit Assignment", |s: &mut Cursive| {
+		let selected_assignment = s.user_data::<AppState>().expect("Failed to load user data")
+			.selected.assignment.clone().expect("Failed to get selected assignment");
+		info!("Selected Assignment: {:?}", selected_assignment);
+		let dialog = Dialog::new()
+			.title("Edit Assignment")
+			.content(
+				LinearLayout::vertical()
+					.child(TextView::new("Assignment Name:"))
+					.child(EditView::new().content(
+						selected_assignment.name.clone()
+					).with_name("assignment_name"))
+					.child(TextView::new("Points Possible:"))
+					.child(TextArea::new().content(
+						selected_assignment.points_possible.to_string()
+					).with_name("points_possible"))
+			)
+			.button("确认", move |s| {
+				let assignment_name = s.call_on_name("assignment_name", |view: &mut EditView| {
+					view.get_content()
+				}).expect("Failed to get assignment name");
+
+				let points_possible = s.call_on_name("points_possible", |view: &mut TextArea| {
+					view.get_content().parse::<f64>().expect("Failed to parse points possible")
+				}).expect("Failed to get points possible");
+
+				s.pop_layer();
+				let state = s.user_data::<AppState>()
+					.expect("Failed to get app state");
+				let selected_class = state.selected.class.clone().expect("Failed to get selected class");
+				let mut class_to_modify = state.classes.pop_if(
+					|c| c.id == selected_class.id
+				).expect("Failed to get class to modify");
+				let mut assignment_to_modify = class_to_modify.assignments.pop_if(
+					|a| a.name == selected_assignment.name.clone()
+				).expect("Failed to get assignment to modify");
+				assignment_to_modify.name = assignment_name.parse().expect("Failed to parse assignment name");
+				assignment_to_modify.points_possible = points_possible;
+				class_to_modify.assignments.push(
+					assignment_to_modify
+				);
+				class_to_modify.save(&state.config.storage_dir).expect("Failed to save class to disk");
+
+				state.classes.push(
+					class_to_modify
+				);
+				let new_view = state.build_view_mode();
+
+				s.pop_layer();
+				s.add_layer(
+					new_view
+				);
+			})
+			.button("取消", |s| {
+				s.pop_layer(); // 取消直接关闭
+			});
+		info!("Edit Assignment");
+		s.add_layer(dialog);
+	});
+
+	s_v.add_child(
+		edit_assignment_button
+	);
+	Panel::new(s_v)
+		.title("Assignment Detail Edit Menu")
+}
+
 
 pub fn build_class_edit_menu() -> Panel<LinearLayout> {
 	let mut s_v = LinearLayout::vertical();
@@ -250,18 +318,14 @@ pub fn build_class_edit_menu() -> Panel<LinearLayout> {
 					.child(EditView::new().with_name("csv_path").fixed_width(30))
 			)
 			.button("确认", |s| {
-				// let class_name = s.call_on_name("class_name", |view: &mut EditView| {
-				// 	view.get_content()
-				// }).unwrap();
-
 				let csv_path = s.call_on_name("csv_path", |view: &mut EditView| {
 					view.get_content()
-				}).unwrap();
+				}).expect("Failed to get csv path");
 
 				s.pop_layer();
 				let state = s.user_data::<AppState>()
 					.expect("Failed to get app state");
-				let new_class = Class::parse_from_csv(csv_path.parse().unwrap(), state.config.storage_dir.clone(), None, None, true)
+				let new_class = Class::parse_from_csv(csv_path.parse().expect("Failed to get csv path"), state.config.storage_dir.clone(), None, None, true)
 					.expect("Failed to parse class from csv");
 				new_class.save(
 					&state.config.storage_dir
