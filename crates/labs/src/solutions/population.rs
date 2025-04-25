@@ -7,7 +7,7 @@ use std::path::Path;
 
 const SOLUTION_CODE: &str = include_str!("population.py");
 
-fn judge_results(answer: & String, to_test: & String) -> TestResult {
+fn judge_results(answer: &String, to_test: &String) -> TestResult {
 	let lines = answer
 		.split("\n")
 		.filter(|line| !line.trim().is_empty())
@@ -37,7 +37,7 @@ fn judge_results(answer: & String, to_test: & String) -> TestResult {
 			continue;
 		}
 
-		if b_nums.is_empty(){
+		if b_nums.is_empty() {
 			res.passed = false;
 			res.infos
 				.get_or_insert_with(HashMap::new)
