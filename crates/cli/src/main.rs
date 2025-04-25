@@ -15,7 +15,7 @@ use cursive::align::{HAlign, VAlign};
 use cursive::event::Key;
 use cursive::view::{Nameable, Resizable};
 use cursive::views::{Button, Dialog, DummyView, LinearLayout, NamedView, Panel, ResizedView, SelectView, StackView, TextView};
-use cursive::{Cursive, CursiveExt, With};
+use cursive::{theme, Cursive, CursiveExt, With};
 use log::{debug, error, info, warn};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -41,7 +41,10 @@ fn main() {
 
 	info!("数据目录：{}, 存储目录：{}", config.data_dir().to_string_lossy(), config.storage_dir().to_string_lossy());
 	let mut siv = Cursive::default();
+	siv.set_autorefresh(true);
+	siv.set_fps(60);
 	let state = AppState::builder()
+		.config(config.clone())
 		.classes(utils::load_saving(config.storage_dir()).unwrap())
 		.build();
 	siv.set_user_data(
