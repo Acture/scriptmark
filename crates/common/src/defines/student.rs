@@ -1,3 +1,4 @@
+use crate::defines::submission::Submission;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,7 +13,7 @@ pub struct Student {
 	pub sis_login_id: String,
 
 	#[builder(default)]
-	pub submissions: HashMap<String, f64>,
+	pub submissions: HashMap<String, Submission>,
 }
 
 impl Display for Student {
@@ -21,8 +22,8 @@ impl Display for Student {
 		let sorted_submissions: Vec<_> = self.submissions.iter().sorted_by_key(
 			|(assignment_key, _)| *assignment_key
 		).collect();
-		for (assignment_key, &score) in &sorted_submissions {
-			writeln!(f, "\t - {} ({})", assignment_key, score)?;
+		for (assignment_key, sub) in &sorted_submissions {
+			writeln!(f, "\t - {} ({})", assignment_key, sub.score.unwrap_or(0.0))?;
 		}
 		Ok(())
 	}

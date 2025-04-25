@@ -1,5 +1,6 @@
 use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
+use crate::defines::submission::Submission;
 use crate::traits::savenload::SaveNLoad;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -101,12 +102,15 @@ impl Class {
 			if name == "测验学生" {
 				continue;
 			}
-			let submissions: HashMap<String, f64> = score_range
+			let submissions: HashMap<String, Submission> = score_range
 				.clone()
 				.zip(assignments.iter())
 				.filter_map(|(i, assignment)| {
 					let score = record.get(i)?.parse::<f64>().ok()?;
-					Some((assignment.name.clone(), score))
+					let Submission = Submission::builder().score(
+						Some(score)
+					).build();
+					Some((assignment.name.clone(), Submission))
 				})
 				.collect();
 			let student = Student::builder()

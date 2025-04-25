@@ -43,9 +43,11 @@ fn main() {
 	let mut siv = Cursive::default();
 	siv.set_autorefresh(true);
 	siv.set_fps(60);
+	let classes = utils::load_saving(config.storage_dir()).expect("Failed to load classes");
+	info!("{} classes loaded", classes.len());
 	let state = AppState::builder()
 		.config(config.clone())
-		.classes(utils::load_saving(config.storage_dir()).unwrap())
+		.classes(classes)
 		.current_view_mode(
 			ViewMode::ClassList
 		)

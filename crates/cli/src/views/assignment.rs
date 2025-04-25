@@ -1,37 +1,15 @@
-use crate::state::{AppState, Selected, ViewMode};
-use crate::views;
+use crate::state::{AppState, ViewMode};
+use crate::views::{class, Component};
+use crate::{utils, views};
 use common::defines::assignment::Assignment;
 use common::defines::class::Class;
-use common::defines::student::Student;
 use common::traits::savenload::SaveNLoad;
-use cursive::align::HAlign;
-use cursive::direction::Direction;
-use cursive::event::{Event, Key};
-use cursive::traits::{Nameable, Resizable};
-use cursive::view::{AnyView, IntoBoxedView, Scrollable, ViewWrapper};
-use cursive::views::{Button, Dialog, EditView, LinearLayout, ListView, NamedView, Panel, ResizedView, ScrollView, SelectView, StackView, TextArea, TextView};
-use cursive::{Cursive, View, With};
-use log::{debug, error, info};
-use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
+use cursive::traits::{Nameable, Resizable, Scrollable};
+use cursive::views::{Button, Dialog, EditView, LinearLayout, NamedView, Panel, ScrollView, SelectView, TextArea, TextView};
+use cursive::Cursive;
+use log::info;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Copy, Display, EnumString, AsRefStr, IntoStaticStr)]
-pub enum Component {
-	TopStack,
-	BottomStack,
-	CornerStack,
-	ContentStack,
-	ClassGeneralViewLayout,
-	AssignmentContentView,
-	AssignmentMenuView,
-}
-
-type ClassMenu = Panel<SelectView<Class>>;
-type CursiveFn = dyn Fn(&mut Cursive);
-type BoxedCursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
-type ClassEditMenu = Panel<SelectView<EditView>>;
-type ButtonMenu = Panel<LinearLayout>;
-
-type ClassViewMode = LinearLayout;
 type AssignmentViewMode = LinearLayout;
 type AssignmentView = SelectView<Assignment>;
 type AssignmentMenu = Panel<NamedView<ScrollView<AssignmentView>>>;
@@ -68,95 +46,11 @@ pub fn build_assignment_menu(assignments: &[Assignment]) -> AssignmentMenu {
 		.title("Assignment Menu")
 }
 
-pub fn build_class_menu(classes: &[Class]) -> ClassMenu {
-	Panel::new(SelectView::new()
-		.h_align(HAlign::Center)
-		.autojump()
-		.with_all(
-			classes.iter().map(|c| {
-				(format!("{} - {}", c.id, c.name), c.clone())
-			})
-		)
-		.on_submit(|s, c| {
-			let state = s.user_data::<AppState>().expect("Failed to get app state");
-			state.selected.class = Some(c.clone());
-			state.change_view(ViewMode::AssignmentList);
-			info!("View Mode Changed To: Assignment List");
-			let new_view = state.build_view_mode();
-			info!("Assignment List");
-			s.add_layer(
-				new_view
-			);
-		})
-	)
-		.title("Class Menu")
-}
-
-pub fn build_class_view_mode(classes: &[Class]) -> ClassViewMode {
-	let main_content_panel = Panel::new(StackView::new()
-		.with_name(Component::ContentStack.as_ref()))
-		.title("Content")
-		.full_width()
-		.full_height();
-
-
-	let class_list_panel = views::build_class_menu(classes)
-		.full_width()
-		.full_height();
-
-
-	let special_list_panel = views::build_class_edit_menu()
-		.full_width()
-		.full_height();
-
-
-	let quit_button = Button::new("Quit", |s: &mut Cursive| { s.quit(); });
-
-	let button_panel = views::build_button_menu(
-		vec![quit_button]
-	)
-		.fixed_height(3);
-
-	let left_column_layout = LinearLayout::vertical()
-		.child(class_list_panel.full_height())
-		.child(special_list_panel.full_height())
-		.child(button_panel)
-		.max_width(50)
-		.full_height();
-
-	LinearLayout::horizontal()
-		.child(left_column_layout)
-		.child(main_content_panel)
-}
-
-
-pub fn build_student_menu(students: &[Student]) -> SelectView<Student> {
-	let mut select: SelectView<Student> = SelectView::new();
-	for student in students.iter() {
-		select.add_item(
-			student.name.clone(),
-			student.clone(),
-		)
-	}
-	select.set_on_submit(|s, student| {
-		let state = s.user_data::<AppState>().expect("Failed to get app state");
-		state.selected.student = Some(student.clone());
-		state.change_view(ViewMode::StudentDetail);
-		info!("View Mode Changed To: Student Detail");
-		let new_view = state.build_view_mode();
-		s.add_layer(
-			new_view
-		)
-	});
-	select
-}
-
-
 pub fn build_assignment_detail_view_mode(selected_class: &Class, selected_assignment: &Assignment) -> LinearLayout {
 	let assignment_detail = TextView::new(
 		format!("{} - {}", selected_class.id, selected_assignment)
 	);
-	let student_menu = build_student_menu(&selected_class.students);
+	let student_menu = views::build_student_menu(&selected_class.students);
 	let main_content_panel = Panel::new(
 		LinearLayout::vertical()
 			.child(assignment_detail)
@@ -167,12 +61,12 @@ pub fn build_assignment_detail_view_mode(selected_class: &Class, selected_assign
 		.full_height();
 
 
-	let assignment_menu_view = views::build_assignment_menu(&selected_class.assignments)
+	let assignment_menu_view = build_assignment_menu(&selected_class.assignments)
 		.full_width()
 		.full_height();
 
 
-	let special_list_panel = views::build_assignment_detail_edit_menu()
+	let special_list_panel = build_assignment_detail_edit_menu()
 		.full_width()
 		.full_height();
 
@@ -196,6 +90,7 @@ pub fn build_assignment_detail_view_mode(selected_class: &Class, selected_assign
 		.child(left_column_layout)
 		.child(main_content_panel)
 }
+
 pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewMode {
 	let main_content_panel = Panel::new(LinearLayout::horizontal())
 		.title("Content")
@@ -203,12 +98,12 @@ pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewM
 		.full_height();
 
 
-	let assignment_menu_view = views::build_assignment_menu(assignments)
+	let assignment_menu_view = build_assignment_menu(assignments)
 		.full_width()
 		.full_height();
 
 
-	let special_list_panel = views::build_assignment_detail_edit_menu()
+	let special_list_panel = build_assignment_detail_edit_menu()
 		.full_width()
 		.full_height();
 
@@ -296,71 +191,118 @@ pub fn build_assignment_detail_edit_menu() -> Panel<LinearLayout> {
 		info!("Edit Assignment");
 		s.add_layer(dialog);
 	});
-
 	s_v.add_child(
 		edit_assignment_button
 	);
+	let add_submission_button = Button::new("Add Submission", |s: &mut Cursive| {
+		let dialog = create_add_submission_dialog();
+		s.add_layer(dialog);
+	});
+
+
+	s_v.add_child(
+		add_submission_button
+	);
+
+	let group_submissions_button = Button::new("Group Submissions", |s: &mut Cursive| {
+		let selected_class = s.user_data::<AppState>().expect("Failed to load user data")
+			.selected.class.clone().expect("Failed to get selected class");
+		let selected_assignment = s.user_data::<AppState>().expect("Failed to load user data")
+			.selected.assignment.clone().expect("Failed to get selected assignment");
+		let save_dir = s.user_data::<AppState>().expect("Failed to load user data")
+			.config.data_dir.clone().join(selected_class.id).join(selected_assignment.name);
+		info!("Save dir: {:?}", save_dir);
+		utils::group_files_by_student(&save_dir, &selected_class.students);
+		info!("Grouped files by student");
+	});
+
+	s_v.add_child(
+		group_submissions_button
+	);
+
 	Panel::new(s_v)
 		.title("Assignment Detail Edit Menu")
 }
 
+fn validate_submission_path(path: &Path) -> Result<(), String> {
+	if !path.exists() {
+		return Err("Submission path does not exist".to_string());
+	}
 
-pub fn build_class_edit_menu() -> Panel<LinearLayout> {
-	let mut s_v = LinearLayout::vertical();
+	let extension = path.extension()
+		.ok_or("Submission file has no extension")?
+		.to_str()
+		.ok_or("Invalid file extension encoding")?;
 
+	if extension != "zip" {
+		return Err("Submission path must be a zip file".to_string());
+	}
 
-	let add_class_button = Button::new("Add Class", |s: &mut Cursive| {
-		let dialog = Dialog::new()
-			.title("Add New Class")
-			.content(
-				LinearLayout::vertical()
-					.child(TextView::new("CSV Path:"))
-					.child(EditView::new().with_name("csv_path").fixed_width(30))
-			)
-			.button("确认", |s| {
-				let csv_path = s.call_on_name("csv_path", |view: &mut EditView| {
-					view.get_content()
-				}).expect("Failed to get csv path");
-
-				s.pop_layer();
-				let state = s.user_data::<AppState>()
-					.expect("Failed to get app state");
-				let new_class = Class::parse_from_csv(csv_path.parse().expect("Failed to get csv path"), state.config.storage_dir.clone(), None, None, true)
-					.expect("Failed to parse class from csv");
-				new_class.save(
-					&state.config.storage_dir
-				).expect("Failed to save class to disk");
-				state.classes.push(
-					new_class
-				);
-				let new_view = state.build_view_mode();
-				s.pop_layer();
-				s.add_layer(
-					new_view
-				);
-			})
-			.button("取消", |s| {
-				s.pop_layer(); // 取消直接关闭
-			});
-
-		s.add_layer(dialog);
-	});
-
-	s_v.add_child(
-		add_class_button
-	);
-
-
-	Panel::new(s_v)
-		.title("Class Edit Menu")
+	Ok(())
 }
 
-pub fn build_button_menu(buttons: Vec<Button>) -> ButtonMenu {
-	let mut layout = LinearLayout::horizontal();
-	for b in buttons {
-		layout.add_child(b);
-	}
-	Panel::new(
-		layout
-	)
+fn handle_add_submission_confirmation(s: &mut Cursive) {
+	let submission_path = match s.call_on_name("submission_path", |view: &mut EditView| view.get_content()) {
+		Some(content) => {
+			match content.parse::<PathBuf>() {
+				Ok(path) => {
+					if let Err(msg) = validate_submission_path(&path) {
+						class::show_error_message(s, &msg);
+						return;
+					}
+					path
+				}
+				Err(err) => {
+					class::show_error_message(s, &format!("Failed to parse submission path: {}", err));
+					return;
+				}
+			}
+		}
+		None => {
+			class::show_error_message(s, "Failed to get submission path field");
+			return;
+		}
+	};
+
+	s.pop_layer();
+
+	let state = match s.user_data::<AppState>() {
+		Some(state) => state,
+		None => {
+			class::show_error_message(s, "Failed to access application state");
+			return;
+		}
+	};
+
+	let data_dir = state.config.data_dir.clone();
+	let selected_class = state.selected.class.clone().expect("Failed to get selected class");
+	let selected_assignment = state.selected.assignment.clone().expect("Failed to get selected assignment");
+	let save_dir = data_dir.join(selected_class.id).join(selected_assignment.name);
+	info!("Save dir: {:?}", save_dir);
+	utils::unzip_file(&submission_path, &save_dir).expect("Failed to unzip submission file");
+	info!("Unzipped submission file");
+	utils::group_files_by_student(&save_dir, &selected_class.students).expect("Failed to group files by student");
+	info!("Grouped files by student");
+}
+
+fn create_add_submission_dialog() -> Dialog {
+	Dialog::new()
+		.title("Add New Submission")
+		.content(
+			LinearLayout::vertical()
+				.child(TextView::new("Submission Path:"))
+				.child(EditView::new().with_name("submission_path").fixed_width(30))
+		)
+		.button(
+			"确认",
+			|s| {
+				handle_add_submission_confirmation(s);
+			},
+		)
+		.button(
+			"取消",
+			|s| {
+				s.pop_layer();
+			},
+		)
 }
