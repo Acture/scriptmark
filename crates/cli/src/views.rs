@@ -1,8 +1,9 @@
-use crate::state::{AppState, ViewMode};
+use crate::state::{AppState, Selected, ViewMode};
 use crate::views;
 use common::defines::assignment::Assignment;
 use common::defines::class::Class;
 use common::defines::student::Student;
+use common::traits::savenload::SaveNLoad;
 use cursive::align::HAlign;
 use cursive::direction::Direction;
 use cursive::event::{Event, Key};
@@ -32,8 +33,8 @@ type ButtonMenu = Panel<LinearLayout>;
 
 type ClassViewMode = LinearLayout;
 type AssignmentViewMode = LinearLayout;
-type AssignmentView = ScrollView<SelectView<Assignment>>;
-type AssignmentMenu = Panel<NamedView<AssignmentView>>;
+type AssignmentView = SelectView<Assignment>;
+type AssignmentMenu = Panel<NamedView<ScrollView<AssignmentView>>>;
 
 fn build_assignment_view(assignments: &[Assignment]) -> AssignmentView {
 	let mut assignment_view = SelectView::new();
@@ -43,12 +44,27 @@ fn build_assignment_view(assignments: &[Assignment]) -> AssignmentView {
 			a.clone(),
 		)
 	}
-	assignment_view.scrollable()
+	assignment_view
 }
 
 pub fn build_assignment_menu(assignments: &[Assignment]) -> AssignmentMenu {
 	Panel::new(
 		build_assignment_view(assignments)
+			.on_submit(
+				|s, a| {
+					let state = s.user_data::<AppState>().unwrap_or_else(
+						|| panic!("Failed to get app state")
+					);
+					state.selected.assignment = Some(a.clone());
+					state.change_view(ViewMode::AssignmentDetail);
+					info!("View Mode Changed To: Assignment Detail");
+					let new_view = state.build_view_mode();
+					s.add_layer(
+						new_view
+					)
+				}
+			)
+			.scrollable()
 			.with_name(Component::AssignmentMenuView.as_ref())
 	)
 		.title("Assignment Menu")
@@ -116,9 +132,75 @@ pub fn build_class_view_mode(classes: &[Class]) -> ClassViewMode {
 		.child(left_column_layout)
 		.child(main_content_panel)
 }
+
+
+pub fn build_student_menu(students: &[Student]) -> SelectView<Student> {
+	let mut select: SelectView<Student> = SelectView::new();
+	for student in students.iter() {
+		select.add_item(
+			student.name.clone(),
+			student.clone(),
+		)
+	}
+	select.set_on_submit(|s, student| {
+		let state = s.user_data::<AppState>().expect("Failed to get app state");
+		state.selected.student = Some(student.clone());
+		state.change_view(ViewMode::StudentDetail);
+		info!("View Mode Changed To: Student Detail");
+		let new_view = state.build_view_mode();
+		s.add_layer(
+			new_view
+		)
+	});
+	select
+}
+
+pub fn build_assignment_detail_view_mode(selected_class: &Class, selected_assignment: &Assignment) -> LinearLayout {
+	let assignment_detail = TextView::new(
+		format!("{} - {}", selected_class.id, selected_assignment)
+	);
+	let student_menu = build_student_menu(&selected_class.students);
+	let main_content_panel = Panel::new(
+		LinearLayout::vertical()
+			.child(assignment_detail)
+			.child(student_menu.scrollable())
+	)
+		.title("Content")
+		.full_width()
+		.full_height();
+
+
+	let assignment_menu_view = views::build_assignment_menu(&selected_class.assignments)
+		.full_width()
+		.full_height();
+
+
+	let special_list_panel = views::build_class_edit_menu()
+		.full_width()
+		.full_height();
+
+
+	let quit_button = Button::new("Quit", |s: &mut Cursive| { s.quit(); });
+	let back_button = Button::new("Back", |s: &mut Cursive| { s.pop_layer(); });
+
+	let button_panel = views::build_button_menu(
+		vec![back_button, quit_button]
+	)
+		.fixed_height(3);
+
+	let left_column_layout = LinearLayout::vertical()
+		.child(assignment_menu_view.full_height())
+		.child(special_list_panel.full_height())
+		.child(button_panel)
+		.max_width(50)
+		.full_height();
+
+	LinearLayout::horizontal()
+		.child(left_column_layout)
+		.child(main_content_panel)
+}
 pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewMode {
-	let main_content_panel = Panel::new(StackView::new()
-		.with_name(Component::ContentStack.as_ref()))
+	let main_content_panel = Panel::new(LinearLayout::horizontal())
 		.title("Content")
 		.full_width()
 		.full_height();
@@ -138,7 +220,7 @@ pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewM
 	let back_button = Button::new("Back", |s: &mut Cursive| { s.pop_layer(); });
 
 	let button_panel = views::build_button_menu(
-		vec![quit_button, back_button]
+		vec![back_button, quit_button]
 	)
 		.fixed_height(3);
 
@@ -177,13 +259,15 @@ pub fn build_class_edit_menu() -> Panel<LinearLayout> {
 				}).unwrap();
 
 				s.pop_layer();
-				let state = s.user_data::<AppState>().unwrap_or_else(
-					|| panic!("Failed to get app state")
-				);
+				let state = s.user_data::<AppState>()
+					.expect("Failed to get app state");
+				let new_class = Class::parse_from_csv(csv_path.parse().unwrap(), state.config.storage_dir.clone(), None, None, true)
+					.expect("Failed to parse class from csv");
+				new_class.save(
+					&state.config.storage_dir
+				).expect("Failed to save class to disk");
 				state.classes.push(
-					Class::parse_from_csv(csv_path.parse().unwrap(), state.config.storage_dir.clone(), None, None, true).unwrap_or_else(
-						|e| panic!("Failed to parse class from csv: {:?}", e)
-					)
+					new_class
 				);
 				let new_view = state.build_view_mode();
 				s.pop_layer();

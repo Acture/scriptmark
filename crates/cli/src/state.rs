@@ -28,8 +28,6 @@ pub struct AppState {
 	pub selected: Selected,
 	#[builder(default=ViewMode::ClassList)]
 	pub current_view_mode: ViewMode,
-	#[builder(default)]
-	pub current_view: Option<Box<dyn View>>,
 }
 
 
@@ -42,12 +40,14 @@ impl AppState {
 			ViewMode::ClassList => Box::new(views::build_class_view_mode(&self.classes)),
 			ViewMode::AssignmentList => {
 				let selected = self.selected.clone();
-				let selected_class = selected.class.unwrap_or_else(
-					|| {
-						panic!("No selected class");
-					}
-				);
+				let selected_class = selected.class.expect("No class selected");
 				Box::new(views::build_assignment_view_mode(&selected_class.assignments))
+			}
+			ViewMode::AssignmentDetail => {
+				let selected = self.selected.clone();
+				let selected_class = selected.class.expect("No class selected");
+				let selected_assignment = selected.assignment.expect("No assignment selected");
+				Box::new(views::build_assignment_detail_view_mode(&selected_class, &selected_assignment))
 			}
 			_ => {
 				error!("Not implemented view mode: {:?}", self.current_view_mode);

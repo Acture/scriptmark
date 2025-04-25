@@ -46,6 +46,9 @@ fn main() {
 	let state = AppState::builder()
 		.config(config.clone())
 		.classes(utils::load_saving(config.storage_dir()).unwrap())
+		.current_view_mode(
+			ViewMode::ClassList
+		)
 		.build();
 	siv.set_user_data(
 		state

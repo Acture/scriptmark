@@ -1,5 +1,6 @@
 use crate::defines::task::Task;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
 use std::hash::Hash;
 use typed_builder::TypedBuilder;
 
@@ -11,6 +12,12 @@ pub struct Assignment {
 	pub tasks: Vec<Task>,
 	#[builder(default = 100.0)]
 	pub points_possible: f64,
+}
+
+impl Display for Assignment {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{} - Points {} - Task Num {}", self.name, self.points_possible, self.tasks.len())
+	}
 }
 
 impl PartialEq for Assignment {
