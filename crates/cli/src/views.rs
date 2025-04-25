@@ -1,4 +1,5 @@
 use crate::state::{AppState, ViewMode};
+use crate::views;
 use common::defines::assignment::Assignment;
 use common::defines::class::Class;
 use common::defines::student::Student;
@@ -23,13 +24,18 @@ pub enum Component {
 	AssignmentMenuView,
 }
 
-type ClassSelectPanel = Panel<SelectView<Class>>;
+type ClassMenu = Panel<SelectView<Class>>;
 type CursiveFn = dyn Fn(&mut Cursive);
 type BoxedCursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
-type SpecialSelectPanel = Panel<SelectView<BoxedCursiveFn>>;
-type ButtonSelectPanel = Panel<LinearLayout>;
+type ClassEditMenu = Panel<SelectView<BoxedCursiveFn>>;
+type ButtonMenu = Panel<LinearLayout>;
 
-fn get_assignment_view(assignments: &[Assignment]) -> ScrollView<SelectView<Assignment>> {
+type ClassViewMode = LinearLayout;
+type AssignmentViewMode = LinearLayout;
+type AssignmentView = ScrollView<SelectView<Assignment>>;
+type AssignmentMenu = Panel<NamedView<AssignmentView>>;
+
+fn build_assignment_view(assignments: &[Assignment]) -> AssignmentView {
 	let mut assignment_view = SelectView::new();
 	for a in assignments.iter() {
 		assignment_view.add_item(
@@ -40,77 +46,15 @@ fn get_assignment_view(assignments: &[Assignment]) -> ScrollView<SelectView<Assi
 	assignment_view.scrollable()
 }
 
-pub(crate) fn get_assignment_menu_view(assignments: &[Assignment]) -> NamedView<ScrollView<SelectView<Assignment>>> {
-	let mut assignment_menu_view = get_assignment_view(assignments)
-		.with_name(Component::AssignmentMenuView.as_ref());
-
-
-	assignment_menu_view
+pub fn build_assignment_menu(assignments: &[Assignment]) -> AssignmentMenu {
+	Panel::new(
+		build_assignment_view(assignments)
+			.with_name(Component::AssignmentMenuView.as_ref())
+	)
+		.title("Assignment Menu")
 }
 
-fn get_assignment_content_view(assignments: &[Assignment]) -> ScrollView<SelectView<Assignment>> {
-	let mut assignment_content_view = get_assignment_view(assignments);
-	let assignments_owned = assignments.to_vec(); // 将切片克隆到一个新的 Vec 中
-
-	assignment_content_view.get_inner_mut().set_on_submit(move |s, a| {
-		s.call_on_name(Component::ContentStack.as_ref(), |content_stack: &mut NamedView<StackView>| {
-			content_stack.with_view_mut(|content_stack| {
-				while !content_stack.is_empty() {
-					content_stack.pop_layer();
-				}
-			});
-		});
-		s.call_on_name(Component::TopStack.as_ref(), |top_stack: &mut NamedView<StackView>| {
-			top_stack.with_view_mut(|top_stack| {
-				let assignment_menu_view = get_assignment_menu_view(&assignments_owned);
-
-				move_or_create_to_stack_front(
-					top_stack,
-					Component::AssignmentMenuView.as_ref(),
-					assignment_menu_view,
-				);
-			});
-			top_stack.take_focus(Direction::none()).expect("TODO: panic message");
-		}).unwrap_or_else(|| {
-			error!("Failed to set title")
-		});
-	});
-
-	assignment_content_view
-}
-
-fn get_student_view(students: &[Student]) -> SelectView<Student> {
-	let mut student_select_view = SelectView::new();
-	for s in students.iter() {
-		student_select_view.add_item(
-			s.name.clone(),
-			s.clone(),
-		)
-	}
-	student_select_view
-}
-
-pub fn get_class_general_view_layout(class: &Class) -> NamedView<LinearLayout> {
-	LinearLayout::vertical()
-		.child(
-			LinearLayout::horizontal()
-				.child(Panel::new(get_assignment_content_view(&class.assignments).scrollable()).title(format!("Assignments ({})", class.assignments.len())))
-				.child(Panel::new(get_student_view(&class.students).scrollable()).title(format!("Students ({})", class.students.len())))
-		)
-		.with_name(Component::ClassGeneralViewLayout.as_ref())
-}
-
-pub fn move_or_create_to_stack_front(stack: &mut StackView, name: &str, view: impl Resizable + ViewWrapper) {
-	if let Some(layer_position) = stack.find_layer_from_name(name) {
-		stack.move_to_front(layer_position);
-	} else {
-		stack.add_layer(
-			view
-		);
-	}
-}
-
-pub fn get_class_list_panel(classes: &[Class]) -> ClassSelectPanel {
+pub fn build_class_menu(classes: &[Class]) -> ClassMenu {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
@@ -133,11 +77,85 @@ pub fn get_class_list_panel(classes: &[Class]) -> ClassSelectPanel {
 			);
 		})
 	)
-		.title("Class List")
+		.title("Class Menu")
+}
+
+pub fn build_class_view_mode(classes: &[Class]) -> ClassViewMode {
+	let main_content_panel = Panel::new(StackView::new()
+		.with_name(Component::ContentStack.as_ref()))
+		.title("Content")
+		.full_width()
+		.full_height();
+
+
+	let class_list_panel = views::build_class_menu(classes)
+		.full_width()
+		.full_height();
+
+
+	let special_list_panel = views::build_class_edit_menu()
+		.full_width()
+		.full_height();
+
+
+	let quit_button = Button::new("Quit", |s: &mut Cursive| { s.quit(); });
+
+	let button_panel = views::build_button_menu(
+		vec![quit_button]
+	)
+		.fixed_height(3);
+
+	let left_column_layout = LinearLayout::vertical()
+		.child(class_list_panel.full_height())
+		.child(special_list_panel.full_height())
+		.child(button_panel)
+		.max_width(50)
+		.full_height();
+
+	LinearLayout::horizontal()
+		.child(left_column_layout)
+		.child(main_content_panel)
+}
+pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewMode {
+	let main_content_panel = Panel::new(StackView::new()
+		.with_name(Component::ContentStack.as_ref()))
+		.title("Content")
+		.full_width()
+		.full_height();
+
+
+	let assignment_menu_view = views::build_assignment_menu(assignments)
+		.full_width()
+		.full_height();
+
+
+	let special_list_panel = views::build_class_edit_menu()
+		.full_width()
+		.full_height();
+
+
+	let quit_button = Button::new("Quit", |s: &mut Cursive| { s.quit(); });
+	let back_button = Button::new("Back", |s: &mut Cursive| { s.pop_layer(); });
+
+	let button_panel = views::build_button_menu(
+		vec![quit_button, back_button]
+	)
+		.fixed_height(3);
+
+	let left_column_layout = LinearLayout::vertical()
+		.child(assignment_menu_view.full_height())
+		.child(special_list_panel.full_height())
+		.child(button_panel)
+		.max_width(50)
+		.full_height();
+
+	LinearLayout::horizontal()
+		.child(left_column_layout)
+		.child(main_content_panel)
 }
 
 
-pub fn get_class_special_list_panel() -> SpecialSelectPanel {
+pub fn build_class_edit_menu() -> ClassEditMenu {
 	Panel::new(SelectView::new()
 		.h_align(HAlign::Center)
 		.autojump()
@@ -145,6 +163,12 @@ pub fn get_class_special_list_panel() -> SpecialSelectPanel {
 			"Add Class",
 			Box::new(
 				|s: &mut Cursive| {
+					let state = s.user_data::<AppState>().unwrap_or_else(
+						|| panic!("Failed to get app state")
+					);
+					// state.classes.push(
+					// 	Class::
+					// );
 					s.add_layer(
 						Dialog::info("Add Class")
 					);
@@ -152,10 +176,10 @@ pub fn get_class_special_list_panel() -> SpecialSelectPanel {
 			) as BoxedCursiveFn,
 		)
 	)
-		.title("Special")
+		.title("Class Edit Menu")
 }
 
-pub fn get_button_panel(buttons: Vec<Button>) -> ButtonSelectPanel {
+pub fn build_button_menu(buttons: Vec<Button>) -> ButtonMenu {
 	let mut layout = LinearLayout::horizontal();
 	for b in buttons {
 		layout.add_child(b);
