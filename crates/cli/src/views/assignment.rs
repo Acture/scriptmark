@@ -129,99 +129,126 @@ pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewM
 }
 
 pub fn build_assignment_detail_edit_menu() -> Panel<LinearLayout> {
-	let mut s_v = LinearLayout::vertical();
+	let mut layout = LinearLayout::vertical();
 	info!("build_assignment_edit_menu");
 
+	// 添加编辑任务按钮
 	let edit_assignment_button = Button::new("Edit Assignment", |s: &mut Cursive| {
 		let selected_assignment = s.user_data::<AppState>().expect("Failed to load user data")
 			.selected.assignment.clone().expect("Failed to get selected assignment");
 		info!("Selected Assignment: {:?}", selected_assignment);
-		let dialog = Dialog::new()
-			.title("Edit Assignment")
-			.content(
-				LinearLayout::vertical()
-					.child(TextView::new("Assignment Name:"))
-					.child(EditView::new().content(
-						selected_assignment.name.clone()
-					).with_name("assignment_name"))
-					.child(TextView::new("Points Possible:"))
-					.child(TextArea::new().content(
-						selected_assignment.points_possible.to_string()
-					).with_name("points_possible"))
-			)
-			.button("确认", move |s| {
-				let assignment_name = s.call_on_name("assignment_name", |view: &mut EditView| {
-					view.get_content()
-				}).expect("Failed to get assignment name");
-
-				let points_possible = s.call_on_name("points_possible", |view: &mut TextArea| {
-					view.get_content().parse::<f64>().expect("Failed to parse points possible")
-				}).expect("Failed to get points possible");
-
-				s.pop_layer();
-				let state = s.user_data::<AppState>()
-					.expect("Failed to get app state");
-				let selected_class = state.selected.class.clone().expect("Failed to get selected class");
-				let mut class_to_modify = state.classes.pop_if(
-					|c| c.id == selected_class.id
-				).expect("Failed to get class to modify");
-				let mut assignment_to_modify = class_to_modify.assignments.pop_if(
-					|a| a.name == selected_assignment.name.clone()
-				).expect("Failed to get assignment to modify");
-				assignment_to_modify.name = assignment_name.parse().expect("Failed to parse assignment name");
-				assignment_to_modify.points_possible = points_possible;
-				class_to_modify.assignments.push(
-					assignment_to_modify
-				);
-				class_to_modify.save(&state.config.storage_dir).expect("Failed to save class to disk");
-
-				state.classes.push(
-					class_to_modify
-				);
-				let new_view = state.build_view_mode();
-
-				s.pop_layer();
-				s.add_layer(
-					new_view
-				);
-			})
-			.button("取消", |s| {
-				s.pop_layer(); // 取消直接关闭
-			});
-		info!("Edit Assignment");
-		s.add_layer(dialog);
+		s.add_layer(create_edit_assignment_dialog(&selected_assignment));
 	});
-	s_v.add_child(
-		edit_assignment_button
-	);
+	layout.add_child(edit_assignment_button);
+
+	// 添加提交按钮
 	let add_submission_button = Button::new("Add Submission", |s: &mut Cursive| {
-		let dialog = create_add_submission_dialog();
-		s.add_layer(dialog);
+		s.add_layer(create_add_submission_dialog());
 	});
+	layout.add_child(add_submission_button);
 
-
-	s_v.add_child(
-		add_submission_button
-	);
-
+	// 添加分组提交按钮
 	let group_submissions_button = Button::new("Group Submissions", |s: &mut Cursive| {
-		let selected_class = s.user_data::<AppState>().expect("Failed to load user data")
-			.selected.class.clone().expect("Failed to get selected class");
-		let selected_assignment = s.user_data::<AppState>().expect("Failed to load user data")
-			.selected.assignment.clone().expect("Failed to get selected assignment");
-		let save_dir = s.user_data::<AppState>().expect("Failed to load user data")
-			.config.data_dir.clone().join(selected_class.id).join(selected_assignment.name);
-		info!("Save dir: {:?}", save_dir);
-		utils::group_files_by_student(&save_dir, &selected_class.students);
-		info!("Grouped files by student");
+		handle_group_submissions(s);
 	});
+	layout.add_child(group_submissions_button);
 
-	s_v.add_child(
-		group_submissions_button
-	);
+	Panel::new(layout).title("Assignment Detail Edit Menu")
+}
 
-	Panel::new(s_v)
-		.title("Assignment Detail Edit Menu")
+fn create_edit_assignment_dialog(assignment: &Assignment) -> Dialog {
+	Dialog::new()
+		.title("Edit Assignment")
+		.content(
+			LinearLayout::vertical()
+				.child(TextView::new("Assignment Name:"))
+				.child(EditView::new()
+					.content(&assignment.name)
+					.with_name("assignment_name"))
+				.child(TextView::new("Points Possible:"))
+				.child(TextArea::new()
+					.content(assignment.points_possible.to_string())
+					.with_name("points_possible"))
+		)
+		.button("确认", move |s| handle_edit_assignment_confirmation(s))
+		.button("取消", |s| { s.pop_layer(); })
+}
+
+fn handle_edit_assignment_confirmation(s: &mut Cursive) {
+	// 获取表单数据
+	let assignment_name = s.call_on_name("assignment_name", |view: &mut EditView| {
+		view.get_content()
+	}).expect("Failed to get assignment name");
+
+	let points_possible = s.call_on_name("points_possible", |view: &mut TextArea| {
+		view.get_content().parse::<f64>().expect("Failed to parse points possible")
+	}).expect("Failed to get points possible");
+
+	s.pop_layer();
+
+	// 更新数据
+	let state = s.user_data::<AppState>()
+		.expect("Failed to get app state");
+	let selected_class = state.selected.class.clone().expect("Failed to get selected class");
+	let selected_assignment = state.selected.assignment.clone()
+		.expect("Failed to get selected assignment");
+
+	let mut class_to_modify = state.classes.pop_if(
+		|c| c.id == selected_class.id
+	).expect("Failed to find class to modify");
+
+	let mut assignment_to_modify = class_to_modify.assignments.pop_if(
+        |a| a.name == selected_assignment.name  // 修复了Clippy警告
+	).expect("Failed to find assignment to modify");
+
+	// 更新任务属性
+	assignment_to_modify.name = assignment_name.parse().expect("Failed to parse assignment name");
+	assignment_to_modify.points_possible = points_possible;
+
+	// 保存更改
+	class_to_modify.assignments.push(assignment_to_modify);
+	class_to_modify.save(&state.config.storage_dir)
+		.expect("Failed to save class to disk");
+	state.classes.push(class_to_modify);
+
+	// 刷新视图
+	let new_view = state.build_view_mode();
+
+	s.pop_layer();
+	s.add_layer(new_view);
+}
+
+fn handle_group_submissions(s: &mut Cursive) {
+	let state = s.user_data::<AppState>()
+		.expect("Failed to load user data");
+
+	let selected_class = state.selected.class.clone()
+		.expect("Failed to get selected class");
+	let selected_assignment = state.selected.assignment.clone()
+		.expect("Failed to get selected assignment");
+
+	let save_dir = state.config.data_dir.clone()
+		.join(&selected_class.id)
+		.join(&selected_assignment.name);
+
+	info!("Save dir: {:?}", save_dir);
+
+	let mut updated_class = selected_class.clone();
+	utils::group_files_by_student(
+		&save_dir,
+		&selected_assignment,
+		&mut updated_class.students,
+	).expect("Failed to group files by student");
+
+	info!("Grouped files by student");
+
+	// 修复了Clippy警告 - 移除了不必要的mut
+	let classes = &mut s.user_data::<AppState>()
+		.expect("Failed to load user data")
+		.classes;
+
+	utils::replace_in_vec(classes, updated_class)
+		.expect("Failed to update class in app state");
 }
 
 fn validate_submission_path(path: &Path) -> Result<(), String> {
@@ -275,13 +302,13 @@ fn handle_add_submission_confirmation(s: &mut Cursive) {
 	};
 
 	let data_dir = state.config.data_dir.clone();
-	let selected_class = state.selected.class.clone().expect("Failed to get selected class");
+	let mut selected_class = state.selected.class.clone().expect("Failed to get selected class");
 	let selected_assignment = state.selected.assignment.clone().expect("Failed to get selected assignment");
-	let save_dir = data_dir.join(selected_class.id).join(selected_assignment.name);
+	let save_dir = data_dir.join(selected_class.id).join(&selected_assignment.name);
 	info!("Save dir: {:?}", save_dir);
 	utils::unzip_file(&submission_path, &save_dir).expect("Failed to unzip submission file");
 	info!("Unzipped submission file");
-	utils::group_files_by_student(&save_dir, &selected_class.students).expect("Failed to group files by student");
+	utils::group_files_by_student(&save_dir, &selected_assignment, &mut selected_class.students).expect("Failed to group files by student");
 	info!("Grouped files by student");
 }
 
