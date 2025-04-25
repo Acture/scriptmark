@@ -16,7 +16,7 @@ pub struct Config {
 	pub storage_dir: PathBuf,
 	#[builder(default = PathBuf::from("."))]
 	pub log_dir: PathBuf,
-	#[builder(default = LogLevel::Info)]
+	#[builder(default = LogLevel::Debug)]
 	pub log_level: LogLevel,
 	#[builder(default = false)]
 	pub log_to_console: bool,
