@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::views;
 use crate::views::Component;
 use common::defines::assignment::Assignment;
@@ -21,6 +22,7 @@ pub struct Selected {
 
 #[derive(TypedBuilder)]
 pub struct AppState {
+	pub config: Config,
 	pub classes: Vec<Class>,
 	#[builder(default)]
 	pub selected: Selected,

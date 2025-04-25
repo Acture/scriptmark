@@ -7,9 +7,9 @@ use cursive::align::HAlign;
 use cursive::direction::Direction;
 use cursive::event::{Event, Key};
 use cursive::traits::{Nameable, Resizable};
-use cursive::view::{Scrollable, ViewWrapper};
-use cursive::views::{Button, Dialog, LinearLayout, ListView, NamedView, Panel, ResizedView, ScrollView, SelectView, StackView, TextView};
-use cursive::{Cursive, View};
+use cursive::view::{AnyView, IntoBoxedView, Scrollable, ViewWrapper};
+use cursive::views::{Button, Dialog, EditView, LinearLayout, ListView, NamedView, Panel, ResizedView, ScrollView, SelectView, StackView, TextArea, TextView};
+use cursive::{Cursive, View, With};
 use log::{error, info};
 use strum::{AsRefStr, Display, EnumString, IntoStaticStr};
 
@@ -27,7 +27,7 @@ pub enum Component {
 type ClassMenu = Panel<SelectView<Class>>;
 type CursiveFn = dyn Fn(&mut Cursive);
 type BoxedCursiveFn = Box<dyn Fn(&mut Cursive) + Send + Sync>;
-type ClassEditMenu = Panel<SelectView<BoxedCursiveFn>>;
+type ClassEditMenu = Panel<SelectView<EditView>>;
 type ButtonMenu = Panel<LinearLayout>;
 
 type ClassViewMode = LinearLayout;
@@ -155,27 +155,55 @@ pub fn build_assignment_view_mode(assignments: &[Assignment]) -> AssignmentViewM
 }
 
 
-pub fn build_class_edit_menu() -> ClassEditMenu {
-	Panel::new(SelectView::new()
-		.h_align(HAlign::Center)
-		.autojump()
-		.item(
-			"Add Class",
-			Box::new(
-				|s: &mut Cursive| {
-					let state = s.user_data::<AppState>().unwrap_or_else(
-						|| panic!("Failed to get app state")
-					);
-					// state.classes.push(
-					// 	Class::
-					// );
-					s.add_layer(
-						Dialog::info("Add Class")
-					);
-				}
-			) as BoxedCursiveFn,
-		)
-	)
+pub fn build_class_edit_menu() -> Panel<LinearLayout> {
+	let mut s_v = LinearLayout::vertical();
+
+
+	let add_class_button = Button::new("Add Class", |s: &mut Cursive| {
+		let dialog = Dialog::new()
+			.title("Add New Class")
+			.content(
+				LinearLayout::vertical()
+					.child(TextView::new("CSV Path:"))
+					.child(EditView::new().with_name("csv_path").fixed_width(30))
+			)
+			.button("确认", |s| {
+				// let class_name = s.call_on_name("class_name", |view: &mut EditView| {
+				// 	view.get_content()
+				// }).unwrap();
+
+				let csv_path = s.call_on_name("csv_path", |view: &mut EditView| {
+					view.get_content()
+				}).unwrap();
+
+				s.pop_layer();
+				let state = s.user_data::<AppState>().unwrap_or_else(
+					|| panic!("Failed to get app state")
+				);
+				state.classes.push(
+					Class::parse_from_csv(csv_path.parse().unwrap(), state.config.storage_dir.clone(), None, None, true).unwrap_or_else(
+						|e| panic!("Failed to parse class from csv: {:?}", e)
+					)
+				);
+				let new_view = state.build_view_mode();
+				s.pop_layer();
+				s.add_layer(
+					new_view
+				);
+			})
+			.button("取消", |s| {
+				s.pop_layer(); // 取消直接关闭
+			});
+
+		s.add_layer(dialog);
+	});
+
+	s_v.add_child(
+		add_class_button
+	);
+
+
+	Panel::new(s_v)
 		.title("Class Edit Menu")
 }
 

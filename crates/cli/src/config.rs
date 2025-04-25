@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use toml::de::Error;
 use typed_builder::TypedBuilder;
 
-#[derive(TypedBuilder, Debug, Serialize, Deserialize)]
+#[derive(TypedBuilder, Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
 	#[builder(default = PathBuf::from("./data"))]
 	pub data_dir: PathBuf,
