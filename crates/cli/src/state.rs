@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::views;
-use crate::views::Component;
+use crate::views::{assignment, class, Component};
 use common::defines::assignment::Assignment;
 use common::defines::class::Class;
 use common::defines::student::Student;
@@ -37,17 +37,17 @@ impl AppState {
 	}
 	pub fn build_view_mode(&self) -> Box<dyn View> {
 		match self.current_view_mode {
-			ViewMode::ClassList => Box::new(views::build_class_view_mode(&self.classes)),
+			ViewMode::ClassList => Box::new(class::build_class_view_mode(&self.classes)),
 			ViewMode::AssignmentList => {
 				let selected = self.selected.clone();
 				let selected_class = selected.class.expect("No class selected");
-				Box::new(views::build_assignment_view_mode(&selected_class.assignments))
+				Box::new(assignment::build_assignment_view_mode(&selected_class.assignments))
 			}
 			ViewMode::AssignmentDetail => {
 				let selected = self.selected.clone();
 				let selected_class = selected.class.expect("No class selected");
 				let selected_assignment = selected.assignment.expect("No assignment selected");
-				Box::new(views::build_assignment_detail_view_mode(&selected_class, &selected_assignment))
+				Box::new(assignment::build_assignment_detail_view_mode(&selected_class, &selected_assignment))
 			}
 			_ => {
 				error!("Not implemented view mode: {:?}", self.current_view_mode);
