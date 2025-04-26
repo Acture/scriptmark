@@ -1,8 +1,8 @@
 [workspace]
 members = [
-	"crates/labs", "crates/code_runner",
+	"crates/code_runner",
 	"crates/common", "crates/dev", "crates/cli"
-]
+	, "crates/labs"]
 default-members = ["crates/cli"] # 默认主项目
 
 resolver = "2"
