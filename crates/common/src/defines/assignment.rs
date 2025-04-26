@@ -30,10 +30,7 @@ impl Assignment {
 		SerializableAssignment {
 			name: self.name.clone(),
 			points_possible: self.points_possible,
-			belong_to_class_name: match self.belong_to_class.upgrade() {
-				Some(class) => Some(class.borrow().name.clone()),
-				None => None,
-			},
+			belong_to_class_name: self.belong_to_class.upgrade().map(|class| class.borrow().name.clone()),
 
 		}
 	}
