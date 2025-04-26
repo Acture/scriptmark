@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::fmt::Debug;
+use std::path::Path;
 use typed_builder::TypedBuilder;
 
 #[derive(TypedBuilder, Debug, Clone)]
@@ -16,8 +17,8 @@ pub struct TestSuite<I, O> {
 	#[builder(setter(into))]
 	pub answers: Vec<O>,
 
-	pub run_fn: fn(I) -> Result<O, String>,
-	pub check_fn: fn(I, O) -> Result<TestResult, String>,
+	pub answer_fn: fn(&I) -> Result<O, String>,
+	pub check_fn: fn(&O, &O) -> Result<TestResult, String>,
 }
 
 fn panic_run_fn<I, O>(_: I) -> O {
@@ -30,8 +31,8 @@ fn panic_check_fn<I, O>(_: I, _: O) -> TestResult {
 
 impl<I, O> DynTestSuite for TestSuite<I, O>
 where
-	I: Serialize + for<'de> Deserialize<'de> + Clone + 'static + Debug,
-	O: Serialize + for<'de> Deserialize<'de> + Clone + 'static + Debug,
+	I: Serialize + for<'de> Deserialize<'de> + Clone + Debug + Send + Sync + 'static,
+	O: Serialize + for<'de> Deserialize<'de> + Clone + Debug + Send + Sync + 'static,
 {
 	fn get_name(&self) -> &str {
 		&self.name
@@ -43,24 +44,27 @@ where
 			.collect()
 	}
 
-	fn get_answer(&self, inputs: &[Value]) -> Vec<Value> {
-		inputs
+	fn get_answer(&self) -> Vec<Value> {
+		self.answers
 			.iter()
-			.map(|i| serde_json::to_value(
-				(self.run_fn)(serde_json::from_value(i.clone()).expect("Deserialization failed"))).expect("Serialization failed"))
+			.map(|a| serde_json::to_value(a).expect("Serialization failed"))
 			.collect()
 	}
 
 
-	fn run(&self, inputs: &[Value]) -> Vec<Result<Value, String>> {
+	fn run_answer_fn(&self, inputs: &[Value]) -> Vec<Result<Value, String>> {
 		inputs
 			.iter()
 			.map(|i| {
-				let r = (self.run_fn)(serde_json::from_value(i.clone()).expect("Deserialization failed"));
+				let r = (self.answer_fn)(&serde_json::from_value(i.clone()).expect("Deserialization failed"));
 				Ok(serde_json::to_value(r).expect("Serialization failed"))
 			}
 			)
 			.collect::<Vec<_>>()
+	}
+
+	fn run_file(&self, path: &Path, inputs: &[Value]) -> Vec<Result<Value, String>> {
+		todo!()
 	}
 
 	fn judge(&self, expected_values: &[Value], actual: &[Value]) -> Vec<Result<TestResult, String>> {
@@ -70,8 +74,8 @@ where
 			.map(|(i, e_v)| {
 				let a_v = actual.get(i).expect("Index out of bounds");
 				(self.check_fn)(
-					serde_json::from_value(e_v.clone()).expect("Deserialization failed"),
-					serde_json::from_value(a_v.clone()).expect("Deserialization failed"),
+					&serde_json::from_value(e_v.clone()).expect("Deserialization failed"),
+					&serde_json::from_value(a_v.clone()).expect("Deserialization failed"),
 				)
 					.map_err(|e| e.to_string())
 			})
