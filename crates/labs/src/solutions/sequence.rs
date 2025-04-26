@@ -63,14 +63,14 @@ fn runner_fn(path: &Path) -> OutputType {
 	}
 }
 
-fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
+fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<common::defines::testsuite::TestResult> {
 	_result
 		.iter()
 		.zip_longest(_answer.iter())
 		.map(|pair| {
 			match pair {
 				EitherOrBoth::Both(result, answer) => {
-					let mut test_result = common::defines::test_suite::TestResult::builder()
+					let mut test_result = common::defines::testsuite::TestResult::builder()
 						.passed(true)
 						.build();
 
@@ -124,14 +124,14 @@ fn judge_fn(_result: &OutputType, _answer: &OutputType) -> Vec<common::defines::
 
 					test_result
 				}
-				EitherOrBoth::Left(result) => common::defines::test_suite::TestResult::builder()
+				EitherOrBoth::Left(result) => common::defines::testsuite::TestResult::builder()
 					.passed(false)
 					.infos(Some(HashMap::from([(
 						String::from("Extra Result"),
 						format!("Result: <{:?}>", result),
 					)])))
 					.build(),
-				EitherOrBoth::Right(answer) => common::defines::test_suite::TestResult::builder()
+				EitherOrBoth::Right(answer) => common::defines::testsuite::TestResult::builder()
 					.passed(false)
 					.infos(Some(HashMap::from([(
 						String::from("Extra Answer"),

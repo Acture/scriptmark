@@ -40,12 +40,12 @@ fn runner_fn(path: &std::path::Path) -> OutputType {
 		.collect()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::testsuite::TestResult> {
 	result
 		.iter()
 		.zip(expected.iter())
 		.map(|(result, expected)| {
-			let mut res = common::defines::test_suite::TestResult::builder().build();
+			let mut res = common::defines::testsuite::TestResult::builder().build();
 			let extracted_res_nums = common::utils::extract_numbers::<i64>(result);
 			let extracted_expected_nums = common::utils::extract_numbers::<i64>(expected);
 			let res_num_o = extracted_res_nums.last();

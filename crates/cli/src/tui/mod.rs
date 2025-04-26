@@ -1,6 +1,6 @@
 use common::defines::class;
 use common::defines::student::Student;
-use common::defines::test_suite::{AdditionalStatus, TestResult};
+use common::defines::testsuite::{AdditionalStatus, TestResult};
 use dialoguer::{FuzzySelect, Select};
 use itertools::Itertools;
 use log::info;
@@ -132,7 +132,7 @@ pub fn select_test_result<'a>(
 					.map(|r| {
 						r.additional_status
 							.as_ref()
-							.unwrap_or(&common::defines::test_suite::AdditionalStatus::None)
+							.unwrap_or(&common::defines::testsuite::AdditionalStatus::None)
 					})
 					.fold(AdditionalStatus::Full, |acc, status| {
 						if *status == AdditionalStatus::Partial || acc == AdditionalStatus::Partial

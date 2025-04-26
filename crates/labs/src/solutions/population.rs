@@ -1,5 +1,5 @@
 use common::define_test_suite;
-use common::defines::test_suite::TestResult;
+use common::defines::testsuite::TestResult;
 use std::clone::Clone;
 use std::collections::HashMap;
 use std::fs;

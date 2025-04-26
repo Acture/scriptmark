@@ -1,49 +1,74 @@
 use crate::defines::submission::Submission;
+use derivative::Derivative;
+use displaydoc::Display;
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::cell::RefCell;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
+use std::rc::{Rc, Weak};
+
+use crate::defines::class::Class;
 use typed_builder::TypedBuilder;
 
-#[derive(Debug, TypedBuilder, Clone, Serialize, Deserialize)]
+#[derive(TypedBuilder, Derivative, Serialize, Deserialize, Display)]
+#[derivative(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub struct Student {
 	pub name: String,
 	pub id: String,
 	pub sis_login_id: String,
 
+	#[serde(skip)]
 	#[builder(default)]
-	pub submissions: HashMap<String, Submission>,
+	#[derivative(PartialEq = "ignore", Hash = "ignore")]
+	pub submissions: Vec<Rc<RefCell<Submission>>>,
+	#[serde(skip)]
+	#[builder(default)]
+	#[derivative(PartialEq = "ignore", Hash = "ignore")]
+	pub class: Weak<RefCell<Class>>,
 }
 
-impl Display for Student {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		writeln!(f, "{} ({}): ", self.name, self.sis_login_id)?;
-		let sorted_submissions: Vec<_> = self.submissions.iter().sorted_by_key(
-			|(assignment_key, _)| *assignment_key
-		).collect();
-		for (assignment_key, sub) in &sorted_submissions {
-			writeln!(f, "\t - {} ({})", assignment_key, sub.score.unwrap_or(0.0))?;
+impl Student {
+	pub fn to_serializable(&self) -> SerializableStudent {
+		SerializableStudent {
+			name: self.name.clone(),
+			id: self.id.clone(),
+			sis_login_id: self.sis_login_id.clone(),
+			belong_to_class_id: match self.class.upgrade() {
+				Some(class) => Some(class.borrow().id.clone()),
+				None => None,
+			},
 		}
-		Ok(())
+	}
+
+	pub fn from_serializable(serializable: SerializableStudent, classes: &[Rc<RefCell<Class>>]) -> Self {
+		let belong_to_class = match serializable.belong_to_class_id {
+			None => None,
+			Some(id) => classes.iter().find(|class| class.borrow().id.clone() == id),
+		};
+		Self {
+			name: serializable.name,
+			id: serializable.id,
+			sis_login_id: serializable.sis_login_id,
+			submissions: vec![],
+			class: match belong_to_class {
+				Some(class) => Rc::downgrade(class),
+				None => Weak::new(),
+			},
+		}
 	}
 }
 
-impl PartialEq for Student {
-	fn eq(&self, other: &Self) -> bool {
-		self.id == other.id
-	}
+#[derive(TypedBuilder, Derivative, Serialize, Deserialize, Display)]
+#[derivative(Debug, Clone, PartialEq, Eq, Default, Hash)]
+pub struct SerializableStudent {
+	pub name: String,
+	pub id: String,
+	pub sis_login_id: String,
+
+	pub belong_to_class_id: Option<String>,
 }
 
-impl Eq for Student {}
-
-impl Hash for Student {
-	fn hash<H: Hasher>(&self, state: &mut H) {
-		self.id.hash(state);
-	}
-}
-
-impl Student {}
 
 #[cfg(test)]
 mod tests {}
