@@ -31,10 +31,7 @@ impl Student {
 			name: self.name.clone(),
 			id: self.id.clone(),
 			sis_login_id: self.sis_login_id.clone(),
-			belong_to_class_id: match self.belong_to_class.upgrade() {
-				Some(class) => Some(class.borrow().id.clone()),
-				None => None,
-			},
+			belong_to_class_id: self.belong_to_class.upgrade().map(|class| class.borrow().id.clone()),
 		}
 	}
 

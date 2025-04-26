@@ -48,18 +48,9 @@ impl Submission {
 			submission_path: self.submission_path.clone(),
 			cached_hash: self.cached_hash,
 			test_result: self.test_result.clone(),
-			belong_to_student_sis_id: match self.belong_to_task.upgrade() {
-				Some(task) => Some(task.borrow().name.clone()),
-				None => None
-			},
-			belong_to_task_name: match self.belong_to_student.upgrade() {
-				Some(student) => Some(student.borrow().sis_login_id.clone()),
-				None => None
-			},
-			belong_to_assignment_name: match self.belong_to_assignment.upgrade() {
-				Some(assignment) => Some(assignment.borrow().name.clone()),
-				None => None
-			}
+			belong_to_student_sis_id: self.belong_to_task.upgrade().map(|task| task.borrow().name.clone()),
+			belong_to_task_name: self.belong_to_student.upgrade().map(|student| student.borrow().sis_login_id.clone()),
+			belong_to_assignment_name: self.belong_to_assignment.upgrade().map(|assignment| assignment.borrow().name.clone())
 		}
 	}
 
