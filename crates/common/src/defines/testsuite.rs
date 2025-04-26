@@ -18,6 +18,7 @@ pub struct TestSuite<I, O> {
 	pub answers: Vec<O>,
 
 	pub answer_fn: fn(&I) -> Result<O, String>,
+	pub answer_file_fn: fn(&Path, &I) -> Result<O, String>,
 	pub check_fn: fn(&O, &O) -> Result<TestResult, String>,
 }
 
@@ -64,7 +65,14 @@ where
 	}
 
 	fn run_file(&self, path: &Path, inputs: &[Value]) -> Vec<Result<Value, String>> {
-		todo!()
+		inputs
+			.iter()
+			.map(|i| {
+				let r = (self.answer_file_fn)(path, &serde_json::from_value(i.clone()).expect("Deserialization failed"));
+				Ok(serde_json::to_value(r).expect("Serialization failed"))
+			}
+			)
+			.collect::<Vec<_>>()
 	}
 
 	fn judge(&self, expected_values: &[Value], actual: &[Value]) -> Vec<Result<TestResult, String>> {

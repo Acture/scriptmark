@@ -4,8 +4,10 @@ use common::traits::testsuite::DynTestSuite;
 use regex::Regex;
 use std::clone::Clone;
 use std::convert::Into;
+use std::fs;
 use std::iter::Iterator;
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::LazyLock;
 
 // 有效的电子邮件地址
@@ -43,9 +45,14 @@ pub static VALID_EMAIL_TESTSUITE: LazyLock<TestSuite<InputType, OutputType>> = L
 		answers: TEST_EMAILS.iter().map(|(_, answer)| *answer).collect(),
 		check_fn,
 		answer_fn: is_valid_email,
+		answer_file_fn
 	}
 });
 
+fn answer_file_fn(path: &Path, input: &InputType) -> Result<OutputType, String> {
+	let python_code = fs::read_to_string(path).map_err(|e| format!("read file error: {}", e))?;
+	let res = code_runner::python::run_code(python_code, Some(input.to_string()), ["re"])
+}
 
 fn check_fn(expected: &OutputType, actual: &OutputType) -> Result<TestResult, String> {
 	Ok(TestResult::builder()
