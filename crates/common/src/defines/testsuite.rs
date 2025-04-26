@@ -1,9 +1,7 @@
 use crate::defines::testresult::TestResult;
 use crate::traits::testsuite::DynTestSuite;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::error::Error;
 use std::fmt::Debug;
 use std::path::Path;
 use typed_builder::TypedBuilder;

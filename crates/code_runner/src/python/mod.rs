@@ -1,16 +1,17 @@
+use derivative::Derivative;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use pyo3::Python;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::any::Any;
 use std::error::Error;
 use std::ffi::CString;
 use std::fmt::Debug;
 use std::path::Path;
 use typed_builder::TypedBuilder;
 
-const PYTHON_TRACE_CODE_TEMPLATE: &'static str = include_str!("python_trace_code.py");
+const PYTHON_TRACE_CODE_TEMPLATE: &str = include_str!("python_trace_code.py");
 
 macro_rules! create_python_trace {
 	($code:expr, $filename:expr) => {{
@@ -27,12 +28,20 @@ macro_rules! create_python_trace {
 	}};
 }
 
+#[derive(TypedBuilder, Derivative, Serialize, Deserialize)]
+#[derivative(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct PythonTraceRecord {
+	pub trace_sequence: i64,
+	pub line_number: i64,
+	pub event: String,
+	pub name: String,
+	pub value: Option<Value>,
+}
 
 
-type RawTraceRecordType<'py> = (i64, Option<i64>, String, Bound<'py, PyAny>);
+type RawTraceRecordType<'py> = (i64, i64, String, String, Bound<'py, PyAny>);
 
-type TraceRecordType = (i64, Option<i64>, String, Result<Value, Box<dyn Error>>);
-type RunCodeResultType<O> = Result<(O, Option<Result<Vec<TraceRecordType>, Box<dyn Error>>>), Box<dyn Error>>;
+type RunCodeResultType<O> = Result<(O, Option<Result<Vec<PythonTraceRecord>, Box<dyn Error>>>), Box<dyn Error>>;
 
 fn pyany_to_value(obj: &Bound<PyAny>) -> Result<Value, Box<dyn Error>> {
 	Ok(
@@ -121,7 +130,7 @@ where
 				.call0()?
 				.extract::<O>()?;
 
-			let trace_output: Option<Result<Vec<TraceRecordType>, Box<dyn Error>>> = match enable_trace {
+			let trace_output: Option<Result<Vec<PythonTraceRecord>, Box<dyn Error>>> = match enable_trace {
 				true => {
 					let raw_trace_vec = globals.get_item("trace_output")?
 						.ok_or("trace_output not found")?
@@ -130,13 +139,14 @@ where
 					Some(
 						Ok(
 							raw_trace_vec.iter().map(
-								|(line_number, line_num, name, value)| {
-									(
-										line_number.clone(),
-										line_num.clone(),
-										name.clone(),
-										pyany_to_value(&value),
-									)
+								|(line_number, line_num, event, name, value)| {
+									PythonTraceRecord {
+										trace_sequence: *line_number,
+										line_number: *line_num,
+										event: event.clone(),
+										name: name.clone(),
+										value: pyany_to_value(value).ok(),
+									}
 								}
 							).collect()
 						)
@@ -170,7 +180,6 @@ where
 #[cfg(test)]
 mod tests {
 	use super::*;
-use std::collections::HashMap;
 
 	#[test]
 	fn test_create_python_trace() {
@@ -207,31 +216,15 @@ b.extend(list(range(200, 301, 2)))
 		let (output, trace) = run_code::<String>(code.to_string(), None::<_>, &[], true)?;
 		assert_eq!(output, "");
 
-		let traces = trace.ok_or("trace not found")??;
+		let mut traces = trace.ok_or("trace not found")??;
 
 		assert_eq!(traces.len(), 7);
 
-
-		let mut grouped: HashMap<i64, Vec<_>> = HashMap::new();
-
-		for (trace_sequence, line_num, name, value) in &traces {
-			grouped.entry(*trace_sequence)
-				.or_insert_with(Vec::new)
-				.push((line_num, name, value));
-		}
-
-		// grouped 是 HashMap<i64, Vec<_>>
-		let mut entries: Vec<_> = grouped.into_iter().collect();
-
 		// 按 trace_sequence 排序
-		entries.sort_by_key(|(trace_sequence, _)| *trace_sequence);
+		traces.sort_by_key(|trace| trace.trace_sequence);
 
-		for (trace_sequence, records) in entries {
-			let line_num = records.first().map(|r| r.0).ok_or("no records found")?;
-			println!("trace_sequence: {} - line_num: {:?}", trace_sequence, line_num);
-			for (line_num, name, value) in records {
-				println!("\t{:?} - {:?}", name, value);
-			}
+		for trace in traces {
+			println!("{:?}", trace)
 		}
 
 		Ok(())

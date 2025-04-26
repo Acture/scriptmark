@@ -41,12 +41,12 @@ def trace_func(frame, event, arg):
 	global trace_sequence, trace_output
 	try:
 		if frame.f_code.co_filename == "$filename":
-			lineno = frame.f_lineno
-			filtered_vars = [(trace_sequence, lineno, k, safe_copy(v)) for k, v in frame.f_locals.items() if not k.startswith('_') and k not in exclude_names and is_basic_type_or_container(v)]
+			filtered_vars = [	(trace_sequence, frame.f_lineno, event, k, safe_copy(v)) for k, v in frame.f_locals.items() if
+								not k.startswith('_') and k not in exclude_names and is_basic_type_or_container(v)]
 			trace_output.extend(filtered_vars)
 			trace_sequence += 1
 	except Exception as e:
-		trace_output.append((trace_sequence, None, "Trace error", str(e)))
+		trace_output.append((trace_sequence, frame.f_lineno, event, "Trace error", str(e)))
 		trace_sequence += 1
 
 	return trace_func
