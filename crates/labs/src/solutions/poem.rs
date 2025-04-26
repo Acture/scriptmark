@@ -1,5 +1,5 @@
 use common::define_test_suite;
-use common::defines::test_suite::TestResult;
+use common::defines::testsuite::TestResult;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -18,7 +18,7 @@ fn get_answers() -> OutputType {
 	(1..20).map(|_| vec!["".to_string()]).collect()
 }
 
-fn judge_fn(result: &OutputType, _expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, _expected: &OutputType) -> Vec<common::defines::testsuite::TestResult> {
 	let mut rec_set = HashSet::new();
 	result
 		.iter()

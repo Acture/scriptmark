@@ -3,6 +3,7 @@ use crate::views::{class, Component};
 use crate::{utils, views};
 use common::defines::assignment::Assignment;
 use common::defines::class::Class;
+use common::defines::task::Task;
 use common::traits::savenload::SaveNLoad;
 use cursive::traits::{Nameable, Resizable, Scrollable};
 use cursive::views::{Button, Dialog, EditView, LinearLayout, NamedView, Panel, ScrollView, SelectView, TextArea, TextView};
@@ -324,6 +325,80 @@ fn create_add_submission_dialog() -> Dialog {
 			"确认",
 			|s| {
 				handle_add_submission_confirmation(s);
+			},
+		)
+		.button(
+			"取消",
+			|s| {
+				s.pop_layer();
+			},
+		)
+}
+
+fn handle_add_task_confirmation(s: &mut Cursive) {
+	let task_name = match s.call_on_name("task_name", |view: &mut EditView| view.get_content()) {
+		Some(content) => match content.parse::<String>() {
+			Ok(name) => name,
+			Err(_) => {
+				class::show_error_message(s, "Failed to parse task name");
+				return;
+			}
+		},
+		None => {
+			class::show_error_message(s, "Failed to get task name field");
+			return;
+		}
+	};
+	let task_score = match s.call_on_name("task_score", |view: &mut EditView| view.get_content()) {
+		Some(content) => match content.parse::<f64>() {
+			Ok(score) => score,
+			Err(_) => {
+				class::show_error_message(s, "Failed to parse task score");
+				return;
+			}
+		},
+		None => {
+			class::show_error_message(s, "Failed to get task name field");
+			return;
+		}
+	};
+	s.pop_layer();
+	let state = match s.user_data::<AppState>() {
+		Some(state) => state,
+		None => {
+			class::show_error_message(s, "Failed to access application state");
+			return;
+		}
+	};
+	let selected_class = state.selected.class.clone().expect("Failed to get selected class");
+	let selected_assignment = state.selected.assignment.clone().expect("Failed to get selected assignment");
+	let mut class_to_modify = state.classes.pop_if(
+		|c| c.id == selected_class.id
+	).expect("Failed to find class to modify");
+	let mut assignment_to_modify = class_to_modify.assignments.pop_if(
+		|a| a.name == selected_assignment.name
+	).expect("Failed to find assignment to modify");
+	assignment_to_modify.tasks.push(
+		Task::builder().name(task_name).score(task_score).build();
+	);
+	class_to_modify.assignments.push(assignment_to_modify);
+	class_to_modify.save(&state.config.storage_dir)
+		.expect("Failed to save class to disk");
+}
+fn create_add_task_dialog() -> Dialog {
+	Dialog::new()
+		.title("Add New Submission")
+		.content(
+			LinearLayout::vertical()
+				.child(TextView::new("Task Name:"))
+				.child(EditView::new().with_name("task_name").fixed_width(30))
+				.child(TextView::new("Task Score:"))
+				.child(EditView::new().with_name("task_score").fixed_width(30))
+		)
+		.button(
+			"确认",
+			|s| {
+				handle_add_task_confirmation(s);
 			},
 		)
 		.button(

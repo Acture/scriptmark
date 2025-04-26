@@ -77,12 +77,12 @@ fn runner_fn(path: &Path) -> OutputType {
 		.collect::<Vec<_>>()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::testsuite::TestResult> {
 	result
 		.iter()
 		.zip_longest(expected.iter())
 		.map(|pair| {
-			let mut res = common::defines::test_suite::TestResult::builder().build();
+			let mut res = common::defines::testsuite::TestResult::builder().build();
 			match pair {
 				EitherOrBoth::Both(result, expected) => {
 					expected.iter().zip(result.iter()).enumerate().for_each(

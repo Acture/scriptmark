@@ -8,22 +8,23 @@ use cursive::view::{Nameable, Resizable};
 use cursive::views::{Button, LinearLayout, Panel, StackView};
 use cursive::{view, Cursive, CursiveRunnable, View};
 use log::error;
+use std::rc::Rc;
 use typed_builder::TypedBuilder;
 
 #[derive(TypedBuilder, Default, Debug, Clone)]
 pub struct Selected {
 	#[builder(default)]
-	pub class: Option<Class>,
+	pub class: Rc<Option<Class>>,
 	#[builder(default)]
-	pub student: Option<Student>,
+	pub student: Rc<Option<Student>>,
 	#[builder(default)]
-	pub assignment: Option<Assignment>,
+	pub assignment: Rc<Option<Assignment>>,
 }
 
 #[derive(TypedBuilder)]
 pub struct AppState {
 	pub config: Config,
-	pub classes: Vec<Class>,
+	pub classes: Vec<Rc<Class>>,
 	#[builder(default)]
 	pub selected: Selected,
 	#[builder(default=ViewMode::ClassList)]

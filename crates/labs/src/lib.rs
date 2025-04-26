@@ -1,4 +1,4 @@
-use common::defines::test_suite::TestSuiteObject;
+use common::defines::testsuite::TestSuiteObject;
 use lazy_static::lazy_static;
 use std::collections::HashMap;
 use strum::IntoEnumIterator;

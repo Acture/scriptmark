@@ -1,5 +1,5 @@
 use common::define_test_suite;
-use common::defines::test_suite::TestResult;
+use common::defines::testsuite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -72,7 +72,7 @@ fn runner_fn(path: &Path) -> OutputType {
 		.collect::<Vec<_>>()
 }
 
-fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::test_suite::TestResult> {
+fn judge_fn(result: &OutputType, expected: &OutputType) -> Vec<common::defines::testsuite::TestResult> {
 	result
 		.iter()
 		.zip(expected.iter())

@@ -1,5 +1,5 @@
 use common::define_test_suite;
-use common::defines::test_suite::TestResult;
+use common::defines::testsuite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -65,7 +65,7 @@ fn reverse_string(s: &str) -> String {
 	s.chars().rev().collect::<String>()
 }
 
-fn judge_fn(_results: &OUTPUT_TYPE, _answers: &OUTPUT_TYPE) -> Vec<common::defines::test_suite::TestResult> {
+fn judge_fn(_results: &OUTPUT_TYPE, _answers: &OUTPUT_TYPE) -> Vec<common::defines::testsuite::TestResult> {
 	_results
 		.iter()
 		.zip(_answers.iter())

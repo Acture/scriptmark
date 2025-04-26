@@ -1,5 +1,5 @@
 use common::define_test_suite;
-use common::defines::test_suite::TestResult;
+use common::defines::testsuite::TestResult;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -120,7 +120,7 @@ fn judge(s: &str, t: &str) -> TestResult {
 			let s_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
 				Some(value) => value,
 				None => {
-					res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Partial);
+					res.additional_status = Some(common::defines::testsuite::AdditionalStatus::Partial);
 					res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!(
 						"Failed to extract number from line {}: {:?}",
 						i, s
@@ -131,7 +131,7 @@ fn judge(s: &str, t: &str) -> TestResult {
 			let t_count = match common::utils::extract_numbers::<f64>(t_line).pop() {
 				Some(value) => value,
 				None => {
-					res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Partial);
+					res.additional_status = Some(common::defines::testsuite::AdditionalStatus::Partial);
 					res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!(
 						"Failed to extract number from line {}: {:?}",
 						i, t
@@ -140,10 +140,10 @@ fn judge(s: &str, t: &str) -> TestResult {
 				}
 			};
 			if s_count != t_count {
-				res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Partial);
+				res.additional_status = Some(common::defines::testsuite::AdditionalStatus::Partial);
 				res.additional_infos.get_or_insert_with(HashMap::new).entry("Count".to_string()).or_insert(format!("Expected: <{}>, Got: <{}>", t_count, s_count));
 			} else {
-				res.additional_status = Some(common::defines::test_suite::AdditionalStatus::Full);
+				res.additional_status = Some(common::defines::testsuite::AdditionalStatus::Full);
 			}
 		}
 		_ => {
