@@ -7,5 +7,5 @@ use typed_builder::TypedBuilder;
 #[derivative(Debug, Clone, PartialEq, Eq, Default, Hash)]
 pub struct TestResult {
 	pub passed: bool,
-	pub message: Vec<String>,
+	pub messages: Vec<String>,
 }
