@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 regex = "1.11.1"
 common.workspace = true
+code_runner.workspace = true
