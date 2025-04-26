@@ -1,11 +1,8 @@
 use crate::defines::submission::Submission;
 use derivative::Derivative;
 use displaydoc::Display;
-use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::fmt::Display;
-use std::hash::{Hash, Hasher};
 use std::rc::{Rc, Weak};
 
 use crate::defines::class::Class;
@@ -25,7 +22,7 @@ pub struct Student {
 	#[serde(skip)]
 	#[builder(default)]
 	#[derivative(PartialEq = "ignore", Hash = "ignore")]
-	pub class: Weak<RefCell<Class>>,
+	pub belong_to_class: Weak<RefCell<Class>>,
 }
 
 impl Student {
@@ -34,7 +31,7 @@ impl Student {
 			name: self.name.clone(),
 			id: self.id.clone(),
 			sis_login_id: self.sis_login_id.clone(),
-			belong_to_class_id: match self.class.upgrade() {
+			belong_to_class_id: match self.belong_to_class.upgrade() {
 				Some(class) => Some(class.borrow().id.clone()),
 				None => None,
 			},
@@ -51,7 +48,7 @@ impl Student {
 			id: serializable.id,
 			sis_login_id: serializable.sis_login_id,
 			submissions: vec![],
-			class: match belong_to_class {
+			belong_to_class: match belong_to_class {
 				Some(class) => Rc::downgrade(class),
 				None => Weak::new(),
 			},

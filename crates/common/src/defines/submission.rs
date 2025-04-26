@@ -1,5 +1,7 @@
+use crate::defines::assignment::Assignment;
 use crate::defines::student::Student;
 use crate::defines::task::Task;
+use crate::defines::testresult::TestResult;
 use derivative::Derivative;
 use displaydoc::Display;
 use serde::{Deserialize, Serialize};
@@ -20,15 +22,23 @@ pub struct Submission {
 	#[builder(default, setter(strip_option, into))]
 	#[derivative(Hash = "ignore")]
 	pub cached_hash: Option<u64>,
+	#[builder(default, setter(into))]
+	pub test_result: Vec<TestResult>,
 
 	#[serde(skip)]
 	#[builder(default, setter(into))]
 	#[derivative(PartialEq = "ignore", Hash = "ignore")]
-	pub student: Weak<RefCell<Student>>,
+	pub belong_to_student: Weak<RefCell<Student>>,
+
 	#[serde(skip)]
 	#[builder(default, setter(into))]
 	#[derivative(PartialEq = "ignore", Hash = "ignore")]
-	pub task: Weak<RefCell<Task>>,
+	pub belong_to_task: Weak<RefCell<Task>>,
+
+	#[serde(skip)]
+	#[builder(default, setter(into))]
+	#[derivative(PartialEq = "ignore", Hash = "ignore")]
+	pub belong_to_assignment: Weak<RefCell<Assignment>>,
 }
 
 impl Submission {
@@ -37,14 +47,19 @@ impl Submission {
 			score: self.score,
 			submission_path: self.submission_path.clone(),
 			cached_hash: self.cached_hash,
-			belong_to_student_sis_id: match self.task.upgrade() {
+			test_result: self.test_result.clone(),
+			belong_to_student_sis_id: match self.belong_to_task.upgrade() {
 				Some(task) => Some(task.borrow().name.clone()),
 				None => None
 			},
-			belong_to_task_name: match self.student.upgrade() {
+			belong_to_task_name: match self.belong_to_student.upgrade() {
 				Some(student) => Some(student.borrow().sis_login_id.clone()),
 				None => None
 			},
+			belong_to_assignment_name: match self.belong_to_assignment.upgrade() {
+				Some(assignment) => Some(assignment.borrow().name.clone()),
+				None => None
+			}
 		}
 	}
 
@@ -57,14 +72,19 @@ impl Submission {
 			score: serializable.score,
 			submission_path: serializable.submission_path,
 			cached_hash: serializable.cached_hash,
-			student: match belong_student {
+			test_result: serializable.test_result,
+			belong_to_student: match belong_student {
 				Some(student) => Rc::downgrade(student),
 				None => Weak::new(),
 			},
-			task: match belong_task {
+			belong_to_task: match belong_task {
 				Some(task) => Rc::downgrade(task),
 				None => Weak::new(),
 			},
+			belong_to_assignment: match belong_task {
+				Some(task) => task.borrow().belong_to_assignment.clone(),
+				None => Weak::new(),
+			}
 		}
 	}
 }
@@ -80,11 +100,15 @@ pub struct SerializableSubmission {
 	#[builder(default, setter(strip_option, into))]
 	#[derivative(Hash = "ignore")]
 	pub cached_hash: Option<u64>,
+	#[builder(default, setter(into))]
+	pub test_result: Vec<TestResult>,
 
 	#[builder(default, setter(strip_option, into))]
 	pub belong_to_student_sis_id: Option<String>,
 	#[builder(default, setter(strip_option, into))]
 	pub belong_to_task_name: Option<String>,
+	#[builder(default, setter(strip_option, into))]
+	pub belong_to_assignment_name: Option<String>,
 }
 
 impl Submission {

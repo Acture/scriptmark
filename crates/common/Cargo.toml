@@ -18,3 +18,4 @@ derivative = "2.2.0"
 displaydoc = "0.2.5"
 uuid = { version = "1.16.0", features = ["v4"] }
 dyn-clone = "1.0.19"
+log = "0.4.27"

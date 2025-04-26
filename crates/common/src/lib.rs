@@ -12,7 +12,7 @@ pub mod traits;
 pub mod utils;
 mod types;
 mod macros;
-
+mod dump;
 
 pub fn parse_csv_name(path: &Path) -> Result<(String, String, String), Box<dyn std::error::Error>> {
 	let file_stem = path.file_stem()
@@ -31,10 +31,15 @@ pub fn parse_csv_name(path: &Path) -> Result<(String, String, String), Box<dyn s
 	Ok((time, class_id, class_name))
 }
 
-pub fn parse_from_csv(csv_path: &Path) -> Result<Class, Box<dyn std::error::Error>> {
+pub fn parse_from_csv(csv_path: &Path) -> Result<Rc<RefCell<Class>>, Box<dyn std::error::Error>> {
 	let (_, class_id, class_name) = parse_csv_name(csv_path)?;
 
-	let file = File::open(&csv_path)?;
+	let class = rc_ref!(Class::builder()
+		.id(class_id)
+		.name(class_name)
+		.build());
+
+	let file = File::open(csv_path)?;
 	let mut rdr = csv::Reader::from_reader(file);
 	let headers = rdr.headers()?.clone();
 	let get_index = |h: &str| headers.iter().position(|x| x == h).ok_or(format!("Missing '{}' header", h));
@@ -46,7 +51,7 @@ pub fn parse_from_csv(csv_path: &Path) -> Result<Class, Box<dyn std::error::Erro
 		let points = get_index("作业 Current Points")?;
 		(s, i, l, (section + 1)..points)
 	};
-	let points_possible_record = rdr.records().nth(0).ok_or("Missing points possible row")?.unwrap();
+	let points_possible_record = rdr.records().next().ok_or("Missing points possible row")?.unwrap();
 	if !points_possible_record.get(0).unwrap().contains("Points Possible") {
 		return Err("Expected first row to be 'Points Possible' row".into());
 	}
@@ -56,6 +61,7 @@ pub fn parse_from_csv(csv_path: &Path) -> Result<Class, Box<dyn std::error::Erro
 		Rc::new(RefCell::new(Assignment::builder()
 			.name(name)
 			.points_possible(score)
+			.belong_to_class(Rc::downgrade(&class))
 			.build()
 		))
 	}).collect();
@@ -71,15 +77,20 @@ pub fn parse_from_csv(csv_path: &Path) -> Result<Class, Box<dyn std::error::Erro
 			.id(record.get(student_id_index).unwrap().to_string())
 			.name(record.get(student_name_index).unwrap().to_string())
 			.sis_login_id(record.get(student_sis_login_id).unwrap().to_string())
+			.belong_to_class(Rc::downgrade(&class))
 			.build());
-		let weak_student = Rc::downgrade(&student);
 		let submissions: Vec<Rc<RefCell<Submission>>> = score_range
 			.clone()
 			.zip(assignments.iter())
 			.filter_map(|(i, assignment)| {
 				let score = record.get(i)?.parse::<f64>().ok()?;
 				Some(
-					rc_ref!(Submission::builder().student(weak_student.clone()).score(score).build())
+					rc_ref!(
+						Submission::builder()
+						.belong_to_student(Rc::downgrade(&student))
+						.belong_to_assignment(Rc::downgrade(assignment))
+						.score(score).build()
+					)
 				)
 			})
 			.collect();
@@ -90,28 +101,20 @@ pub fn parse_from_csv(csv_path: &Path) -> Result<Class, Box<dyn std::error::Erro
 		);
 	};
 
+	class.borrow_mut().students = students;
+	class.borrow_mut().assignments = assignments;
+
 
 	Ok(
-		Class::builder()
-			.id(class_id)
-			.name(class_name)
-			.students(students)
-			.assignments(assignments)
-			.build()
+		class
 	)
 }
 
 
-pub fn save(classes: &[Class]) {
-	for class in classes {
-		let serializable = class.to_serializable();
-		let json = serde_json::to_string_pretty(&serializable).unwrap();
-		println!("{}", json);
-	}
-}
-
+#[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::dump::{load_dump, save_dump};
 	use dev::env::DATA_DIR;
 	use std::fs;
 	use std::path::PathBuf;
@@ -130,7 +133,7 @@ mod tests {
 			.collect())
 	}
 
-	fn parsed_classes() -> types::ResultWithStdErr<Vec<Class>> {
+	fn parsed_classes() -> types::ResultWithStdErr<Vec<Rc<RefCell<Class>>>> {
 		Ok(csv_paths()?
 			.iter()
 			.filter_map(|p| parse_from_csv(p).ok())
@@ -140,8 +143,8 @@ mod tests {
 	#[test]
 	fn test_parse_from_csv() -> types::ResultWithStdErr<()> {
 		for class in parsed_classes()? {
-			assert!(!class.students.is_empty(), "Parsed class has no students");
-			assert!(!class.assignments.is_empty(), "Parsed class has no assignments");
+			assert!(!class.borrow().students.is_empty(), "Parsed class has no students");
+			assert!(!class.borrow().assignments.is_empty(), "Parsed class has no assignments");
 		}
 
 		Ok(())
@@ -149,8 +152,26 @@ mod tests {
 
 	#[test]
 	fn test_save() -> types::ResultWithStdErr<()> {
-		let classes = parsed_classes()?;
-		save(&classes);
+		let classes: Vec<_> = parsed_classes()?;
+
+		let save_path = DATA_DIR.join("test_save.json");
+
+		save_dump(&classes, &save_path).expect("TODO: panic message");
+
+		println!("Saved to: {:?}", save_path.to_str().unwrap_or("invalid path"));
+
+		assert!(save_path.exists());
+
+		Ok(())
+	}
+
+	#[test]
+	fn test_load() -> types::ResultWithStdErr<()> {
+		let parsed_classes: Vec<_> = parsed_classes()?;
+		let save_path = DATA_DIR.join("test_save.json");
+		let loaded_classed = load_dump(&save_path)?;
+
+		assert_eq!(parsed_classes, loaded_classed);
 
 		Ok(())
 	}

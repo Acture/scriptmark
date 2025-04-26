@@ -4,8 +4,6 @@ use derivative::Derivative;
 use displaydoc::Display;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::fmt::Display;
-use std::hash::Hash;
 use std::rc::{Rc, Weak};
 use typed_builder::TypedBuilder;
 
@@ -26,7 +24,7 @@ pub struct Task {
 	#[serde(skip)]
 	#[builder(default, setter(into))]
 	#[derivative(PartialEq = "ignore", Hash = "ignore")]
-	pub assignment: Weak<RefCell<Assignment>>,
+	pub belong_to_assignment: Weak<RefCell<Assignment>>,
 }
 
 impl Task {
@@ -35,7 +33,7 @@ impl Task {
 			name: self.name.clone(),
 			testsuite_name: self.testsuite_name.clone(),
 			score: self.score,
-			belongs_to_assignment_name: match self.assignment.upgrade() {
+			belongs_to_assignment_name: match self.belong_to_assignment.upgrade() {
 				Some(assignment) => {
 					assignment.borrow().name.clone()
 				}
@@ -44,7 +42,7 @@ impl Task {
 		}
 	}
 
-	pub fn from_serializable(serializable: &SerializableTask, assignments: &[Rc<RefCell<Assignment>>]) -> Self {
+	pub fn from_serializable(serializable: SerializableTask, assignments: &[Rc<RefCell<Assignment>>]) -> Self {
 		let belong_to_assignment = assignments.iter()
 			.find(|assignment| assignment.borrow().name == serializable.belongs_to_assignment_name);
 		Task {
@@ -52,7 +50,7 @@ impl Task {
 			testsuite_name: serializable.testsuite_name.clone(),
 			score: serializable.score,
 			submissions: vec![],
-			assignment: match belong_to_assignment {
+			belong_to_assignment: match belong_to_assignment {
 				Some(assignment) => Rc::downgrade(assignment),
 				None => Weak::new(),
 			},
