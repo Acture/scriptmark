@@ -101,6 +101,7 @@ where
 
 			let sys = py.import("sys")?;
 			let io = py.import("io")?;
+			let contextlib = py.import("contextlib")?;
 
 			let original_stdin = sys.getattr("stdin")?;
 
@@ -117,13 +118,22 @@ where
 			let original_stdout = sys.getattr("stdout")?;
 
 			let captured_output = io.call_method0("StringIO")?;
-			sys.setattr("stdout", &captured_output)?;
+			let redirect_stdout = contextlib.getattr("redirect_stdout")?.call1((&captured_output,))?;
+			let redirect_stderr = contextlib
+				.getattr("redirect_stderr")?
+				.call1((&captured_output,))?;
+			redirect_stdout.call_method0("__enter__")?;
+			redirect_stderr.call_method0("__enter__")?;
+			// sys.setattr("stdout", &captured_output)?;
 
 			if enable_trace {
 				sys.call_method1("settrace", (py.None(),))?;
 			}
 
 			py.run(&wrapped_code, Some(&globals), Some(&globals))?;
+
+			redirect_stdout.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+			redirect_stderr.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
 
 			let captured_output = captured_output
 				.getattr("getvalue")?
