@@ -75,7 +75,7 @@ fn pyany_to_value(obj: &Bound<PyAny>) -> Result<Value, Box<dyn Error>> {
 		}
 	)
 }
-fn run_code<O>(
+pub fn run_code<O>(
 	code: String,
 	std_in: Option<String>,
 	libs_to_import: &[String],

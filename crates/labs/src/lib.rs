@@ -15,7 +15,12 @@ mod tests {
 			|dts| dts.get_name() == "valid_email"
 		).expect("Test suite not found");
 
-		test_suite.run_file()
+		let test_path = dev::env::DATA_DIR.clone()
+			.join("COMP110042.09/作业8 (104838)/23307110287/23307110287_232949_5641683_Lab8_1.py");
+
+		let res = test_suite.pipelined(&test_path);
+
+		print!("{:?}", res);
 
 		Ok(())
 	}

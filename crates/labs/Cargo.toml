@@ -7,3 +7,4 @@ edition = "2024"
 regex = "1.11.1"
 common.workspace = true
 code_runner.workspace = true
+dev.workspace = true

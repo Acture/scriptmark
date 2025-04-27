@@ -13,19 +13,26 @@ pub struct TestSuite<I, O> {
 	#[builder(setter(into))]
 	pub inputs: Vec<I>,
 	#[builder(setter(into))]
-	pub answers: Vec<O>,
+	pub answers: Vec<Result<O, String>>,
 
+	#[builder(default = unimplemented_answer_fn)]
 	pub answer_fn: fn(&I) -> Result<O, String>,
-	pub answer_file_fn: fn(&Path, &I) -> Result<O, String>,
-	pub check_fn: fn(&O, &O) -> Result<TestResult, String>,
+	#[builder(default = unimplemented_run_file_fn)]
+	pub run_file_fn: fn(&Path, &I) -> Result<O, String>,
+	#[builder(default = unimplemented_check_fn::<I, O>)]
+	pub check_fn: fn(&Result<O, String>, &Result<O, String>) -> Result<TestResult, String>,
 }
 
-fn panic_run_fn<I, O>(_: I) -> O {
-	panic!("run_fn is not set")
+fn unimplemented_answer_fn<I, O>(_: &I) -> Result<O, String> {
+	unimplemented!("answer_fn is not set")
 }
 
-fn panic_check_fn<I, O>(_: I, _: O) -> TestResult {
-	panic!("check_fn is not set")
+fn unimplemented_run_file_fn<I, O>(_: &Path, _: &I) -> Result<O, String> {
+	unimplemented!("run_file_fn is not set")
+}
+
+fn unimplemented_check_fn<I, O>(_: &Result<O, String>, _: &Result<O, String>) -> Result<TestResult, String> {
+	unimplemented!("check_fn is not set")
 }
 
 impl<I, O> DynTestSuite for TestSuite<I, O>
@@ -43,10 +50,10 @@ where
 			.collect()
 	}
 
-	fn get_answer(&self) -> Vec<Value> {
+	fn get_answer(&self) -> Vec<Result<Value, String>> {
 		self.answers
 			.iter()
-			.map(|a| serde_json::to_value(a).expect("Serialization failed"))
+			.map(|a| serde_json::to_value(a).map_err(|e| e.to_string()))
 			.collect()
 	}
 
@@ -54,31 +61,34 @@ where
 	fn run_answer_fn(&self, inputs: &[Value]) -> Vec<Result<Value, String>> {
 		inputs
 			.iter()
-			.map(|i| {
-				let r = (self.answer_fn)(&serde_json::from_value(i.clone()).expect("Deserialization failed"));
-				Ok(serde_json::to_value(r).expect("Serialization failed"))
-			}
+			.map(|i|
+				{
+					let v = serde_json::from_value(i.clone()).expect("Deserialization failed");
+					let raw_r = (self.answer_fn)(&v);
+					Ok(serde_json::to_value(raw_r).expect("Serialization failed"))
+				}
 			)
-			.collect::<Vec<_>>()
+			.collect()
 	}
 
 	fn run_file(&self, path: &Path, inputs: &[Value]) -> Vec<Result<Value, String>> {
 		inputs
 			.iter()
 			.map(|i| {
-				let r = (self.answer_file_fn)(path, &serde_json::from_value(i.clone()).expect("Deserialization failed"));
-				Ok(serde_json::to_value(r).expect("Serialization failed"))
-			}
-			)
+				let v = serde_json::from_value(i.clone()).expect("Deserialization failed");
+				let raw_r = (self.run_file_fn)(path, &v);
+				Ok(serde_json::to_value(raw_r).expect("Serialization failed"))
+			})
 			.collect::<Vec<_>>()
 	}
 
-	fn judge(&self, expected_values: &[Value], actual: &[Value]) -> Vec<Result<TestResult, String>> {
+	fn judge(&self, expected_values: &[Result<Value, String>], actual: &[Result<Value, String>]) -> Vec<Result<TestResult, String>> {
 		expected_values
 			.iter()
 			.enumerate()
 			.map(|(i, e_v)| {
-				let a_v = actual.get(i).expect("Index out of bounds");
+				let e_v = e_v.clone().expect("Deserialization failed");
+				let a_v = actual.get(i).expect("Index out of bounds").clone().expect("Deserialization failed");
 				(self.check_fn)(
 					&serde_json::from_value(e_v.clone()).expect("Deserialization failed"),
 					&serde_json::from_value(a_v.clone()).expect("Deserialization failed"),
@@ -86,6 +96,13 @@ where
 					.map_err(|e| e.to_string())
 			})
 			.collect()
+	}
+
+	fn pipelined(&self, path: &Path) -> Vec<Result<TestResult, String>> {
+		let inputs = self.get_inputs();
+		let expected_values = self.get_answer();
+		let actual = self.run_file(path, &inputs);
+		self.judge(&expected_values, &actual)
 	}
 }
 
