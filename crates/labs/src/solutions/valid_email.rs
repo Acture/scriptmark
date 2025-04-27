@@ -45,7 +45,9 @@ pub static VALID_EMAIL_TESTSUITE: LazyLock<TestSuite<InputType, OutputType>> = L
 });
 
 fn answer_file_fn(path: &Path, input: &InputType) -> Result<OutputType, String> {
-	match code_runner::python::run_from_file::<String>(&path, Some(input.to_string()), &["re".to_string()])
+	let mut input_with_t = input.clone();
+	input_with_t.push('\n');
+	match code_runner::python::run_from_file::<String>(&path, Some(input_with_t), &["re".to_string()])
 	{
 		Ok((output, _trace)) => Ok(output),
 		Err(e) => Err(e.to_string()),
@@ -54,7 +56,7 @@ fn answer_file_fn(path: &Path, input: &InputType) -> Result<OutputType, String> 
 
 fn check_fn(expected: &Result<OutputType, String>, actual: &Result<OutputType, String>) -> Result<TestResult, String> {
 	let bool_expected = expected.as_ref()?.parse::<bool>().map_err(|e| e.to_string())?;
-	let actual = actual.as_ref()?;
+	let actual = actual.as_ref()?.trim();
 
 	Ok(TestResult::builder()
 		.passed(
