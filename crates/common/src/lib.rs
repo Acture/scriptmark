@@ -10,9 +10,9 @@ use std::rc::Rc;
 pub mod defines;
 pub mod traits;
 pub mod utils;
-mod types;
-mod macros;
-mod dump;
+pub mod types;
+pub mod macros;
+pub mod dump;
 
 pub fn parse_csv_name(path: &Path) -> Result<(String, String, String), Box<dyn std::error::Error>> {
 	let file_stem = path.file_stem()
@@ -20,10 +20,14 @@ pub fn parse_csv_name(path: &Path) -> Result<(String, String, String), Box<dyn s
 		.to_str()
 		.ok_or("File stem is not valid UTF-8")?;
 
-	let parts: Vec<&str> = file_stem.splitn(4, |c| ['-', '_'].contains(&c)).collect();
+	let parts: Vec<&str> = file_stem.splitn(3, '_').collect();
 
-	let (time, _, class_id, class_name) = match parts.as_slice() {
-		[time, _grade, class_id, class_name] => (time.to_string(), _grade.to_string(), class_id.to_string(), class_name.to_string()),
+	let (time, class_id, class_name) = match parts.as_slice() {
+		[time, _id_part, class_name] => (
+			time.to_string(),
+			_id_part.to_string().rsplitn(2, '-').next().expect("Invalid id part").to_string(),
+			class_name.to_string()
+		),
 		_ => return Err("Invalid filename format".into()),
 	};
 
@@ -114,10 +118,10 @@ pub fn parse_from_csv(csv_path: &Path) -> Result<Rc<RefCell<Class>>, Box<dyn std
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::dump::{load_dump, save_dump};
-	use dev::env::DATA_DIR;
-	use std::fs;
-	use std::path::PathBuf;
+use crate::dump::{load_dump, save_dump};
+use dev::env::DATA_DIR;
+use std::fs;
+use std::path::PathBuf;
 
 	fn csv_paths() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 		Ok(fs::read_dir(DATA_DIR.to_path_buf())?
@@ -133,6 +137,7 @@ mod tests {
 			.collect())
 	}
 
+
 	fn parsed_classes() -> types::ResultWithStdErr<Vec<Rc<RefCell<Class>>>> {
 		Ok(csv_paths()?
 			.iter()
@@ -141,8 +146,21 @@ mod tests {
 	}
 
 	#[test]
+	fn test_parse_csv_name() -> types::ResultWithStdErr<()> {
+		let names: Vec<_> = csv_paths()?
+			.iter()
+			.filter_map(|p| parse_csv_name(p).ok())
+			.collect();
+		for name in names {
+			println!("{:?}", name)
+		}
+		Ok(())
+	}
+
+	#[test]
 	fn test_parse_from_csv() -> types::ResultWithStdErr<()> {
 		for class in parsed_classes()? {
+			println!("{}", class.borrow().name);
 			assert!(!class.borrow().students.is_empty(), "Parsed class has no students");
 			assert!(!class.borrow().assignments.is_empty(), "Parsed class has no assignments");
 		}

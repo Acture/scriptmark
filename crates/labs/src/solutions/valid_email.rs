@@ -61,8 +61,8 @@ fn check_fn(expected: &Result<OutputType, String>, actual: &Result<OutputType, S
 	Ok(TestResult::builder()
 		.passed(
 			match bool_expected {
-				true => actual.ends_with("True"),
-				false => actual.ends_with("False"),
+				true => actual.ends_with("True") || actual.ends_with("true"),
+				false => actual.ends_with("False") || actual.ends_with("false"),
 			}
 		)
 		.messages(Vec::from([format!("expected: {:?}, actual: {:?}", expected, actual)]))
