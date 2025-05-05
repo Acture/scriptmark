@@ -370,8 +370,8 @@ fn handle_add_task_confirmation(s: &mut Cursive) {
 			return;
 		}
 	};
-	let selected_class = state.selected.class.clone().expect("Failed to get selected class");
-	let selected_assignment = state.selected.assignment.clone().expect("Failed to get selected assignment");
+	let selected_class = state.selected.class.borrow();
+	let selected_assignment = state.selected.assignment.borrow();
 	let mut class_to_modify = state.classes.pop_if(
 		|c| c.id == selected_class.id
 	).expect("Failed to find class to modify");

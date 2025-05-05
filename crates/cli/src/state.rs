@@ -8,17 +8,18 @@ use cursive::view::{Nameable, Resizable};
 use cursive::views::{Button, LinearLayout, Panel, StackView};
 use cursive::{view, Cursive, CursiveRunnable, View};
 use log::error;
+use std::cell::RefCell;
 use std::rc::Rc;
 use typed_builder::TypedBuilder;
 
 #[derive(TypedBuilder, Default, Debug, Clone)]
 pub struct Selected {
 	#[builder(default)]
-	pub class: Rc<Option<Class>>,
+	pub class: Rc<RefCell<Option<Class>>>,
 	#[builder(default)]
-	pub student: Rc<Option<Student>>,
+	pub student: Rc<RefCell<Option<Student>>>,
 	#[builder(default)]
-	pub assignment: Rc<Option<Assignment>>,
+	pub assignment: Rc<RefCell<Option<Assignment>>>,
 }
 
 #[derive(TypedBuilder)]

@@ -34,8 +34,19 @@ pub fn group_files_by_sis_id(path: &Path, extension: Option<String>) -> Result<(
 		}
 		let file_path = entry.path();
 
+
 		if let Some(ext) = extension.clone() {
-			let file_ext = file_path.extension().ok_or("Failed to get file extension")?.to_str().ok_or("Invalid file extension")?;
+			match file_path.extension() {
+				Some(file_ext) => {
+					if *file_ext != *ext {
+						continue;
+					}
+				}
+				None => {
+					continue;
+				}
+			}
+			let file_ext = file_path.extension().ok_or(format!("Failed to get file extension: {}", file_path.to_string_lossy()))?.to_str().ok_or("Invalid file extension")?;
 			if file_ext != ext {
 				continue;
 			}
@@ -52,7 +63,7 @@ pub fn group_files_by_sis_id(path: &Path, extension: Option<String>) -> Result<(
 		if !student_folder.exists() {
 			std::fs::create_dir_all(&student_folder)?;
 		}
-		std::fs::copy(&file, student_folder.join(filename))?;
+		std::fs::rename(&file, student_folder.join(filename))?;
 	}
 
 	Ok(())
@@ -99,11 +110,14 @@ pub fn run_test_suite(assignment_root: &Path, name: &str, pattern: &Regex) -> Ve
 		})
 		.collect::<Vec<_>>();
 
+	println!("Found {} files", test_files.len());
+
 	test_files.iter()
 		.map(|(sis_id, test_file)| {
 			let submission = rc_ref!(Submission::builder()
 				.submission_path(test_file)
 				.build());
+			println!("Running test suite {} on file {}", name, test_file.to_string_lossy());
 			(sis_id.into(), test_suite.pipelined(test_file), submission)
 		})
 		.collect()
@@ -141,50 +155,41 @@ mod tests {
 
 	#[test]
 	fn test_group() -> Result<(), Box<dyn Error>> {
-		let data_dir = dev::env::DATA_DIR.clone().join("COMP110042.09/作业8 (104838)");
-		group_files_by_sis_id(&data_dir, Some("py".to_string()))?;
+		let data_dir = dev::env::DATA_DIR.clone().join("COMP110042.09/作业9");
+		group_files_by_sis_id(&data_dir, None)?;
 		Ok(())
 	}
 
+
 	#[test]
 	fn test_run_test_suite() -> Result<(), Box<dyn Error>> {
-		let data_dir = dev::env::DATA_DIR.clone().join("COMP110042.09/作业8 (104838)");
-		let res_8_1 = run_test_suite(&data_dir, "valid_email", &reg_of_possible_names("8", Some("1")));
-		let res_8_2 = run_test_suite(&data_dir, "strip_html_tags", &reg_of_possible_names("8", Some("2")));
+		let class_id = "COMP110042.09";
+		let assignment_id = "作业9";
+		let data_dir = dev::env::DATA_DIR.clone().join(class_id).join(assignment_id);
+		println!("{:?}", data_dir);
+		let res = run_test_suite(&data_dir, "lower_case_to_upper_case", &reg_of_possible_names("9", None));
 		let data_dir = dev::env::DATA_DIR.clone().join("test_save.json");
 		let classes = common::dump::load_dump(&data_dir).expect("Failed to load");
-		let comp_class = classes.iter().find(|c| { c.borrow().id == "COMP110042.09" }).expect("Failed to find class");
+		let comp_class = classes.iter().find(|c| { c.borrow().id == class_id }).expect("Failed to find class");
 
 		let mut res = comp_class.borrow().students.iter().map(|s| {
 			let sis_login_id = s.borrow().sis_login_id.clone(); // 提前取出
 
-			let (res_8_1, res_8_1_sub) = {
-				let found = res_8_1.iter().find(|(id, _, _)| id == &sis_login_id);
+			let (res, res_sub) = {
+				let found = res.iter().find(|(id, _, _)| id == &sis_login_id);
 				(found.map(|(_, r, _)| r.to_owned()), found.map(|(_, _, s)| s))
 			};
-			let (res_8_2, res_8_2_sub) = {
-				let found = res_8_2.iter().find(|(id, _, _)| id == &sis_login_id);
-				(found.map(|(_, r, _)| r.to_owned()), found.map(|(_, _, s)| s))
-			};
-			(s.clone(), res_8_1, res_8_1_sub, res_8_2, res_8_2_sub)
+
+			(s.clone(), res, res_sub)
 		}).collect::<Vec<_>>();
 
-		res.sort_by_key(|(s, _, _, _, _)| {
+		res.sort_by_key(|(s, _, _)| {
 			s.borrow().sis_login_id.clone()
 		});
-		let res: Vec<_> = res.into_iter().map(|(student, tr_8_1, tr_8_1_sub, tr_8_2, tr_8_2_sub)| {
-			let tr_8_1 = tr_8_1.clone().unwrap_or_default();
-			let tr_8_2 = tr_8_2.clone().unwrap_or_default();
-			let test_count_8_1 = tr_8_1.len();
-			let tr_8_1_failed: Vec<_> = tr_8_1
-				.into_iter()
-				.filter(
-					|tr|
-						tr.is_err() || tr.as_ref().is_ok_and(|tr| !tr.passed)
-				)
-				.collect();
-			let test_count_8_2 = tr_8_2.len();
-			let tr_8_2_failed: Vec<_> = tr_8_2
+		let res: Vec<_> = res.into_iter().map(|(student, tr, tr_sub)| {
+			let tr = tr.clone().unwrap_or_default();
+			let test_count = tr.len();
+			let tr_failed: Vec<_> = tr
 				.into_iter()
 				.filter(
 					|tr|
@@ -194,91 +199,62 @@ mod tests {
 
 
 			const TEST_SUITE_SCORE: usize = 20;
-			let score_8_1 = if test_count_8_1 > 0 {
-				TEST_SUITE_SCORE * (test_count_8_1 - tr_8_1_failed.len()) / test_count_8_1
+			let score = if test_count > 0 {
+				TEST_SUITE_SCORE * (test_count - tr_failed.len()) / test_count
 			} else {
 				0 // 如果没有测试，得分为0
 			};
 
-			let score_8_2 = if test_count_8_2 > 0 {
-				TEST_SUITE_SCORE * (test_count_8_2 - tr_8_2_failed.len()) / test_count_8_2
-			} else {
-				0 // 如果没有测试，得分为0
-			};
 
-			let mut hash_8_1 = None;
+			let mut hash_value = None;
 
-			if let Some(sub) = tr_8_1_sub {
+			if let Some(sub) = tr_sub {
 				let mut mut_sub = sub.borrow_mut();
-				mut_sub.score = Some(score_8_1 as f64);
+				mut_sub.score = Some(score as f64);
 				mut_sub.update_hash().expect("Failed to update hash");
-				hash_8_1 = mut_sub.cached_hash;
-				student.borrow_mut().submissions.push(sub.clone());
-			}
-			let mut hash_8_2 = None;
-			if let Some(sub) = tr_8_2_sub {
-				let mut mut_sub = sub.borrow_mut();
-				mut_sub.score = Some(score_8_2 as f64);
-				mut_sub.update_hash().expect("Failed to update hash");
-				hash_8_2 = mut_sub.cached_hash;
+				hash_value = mut_sub.cached_hash;
 				student.borrow_mut().submissions.push(sub.clone());
 			}
 
 
-			(student, tr_8_1_failed, tr_8_2_failed, score_8_1, score_8_2, hash_8_1, hash_8_2)
+			(student, tr_failed, score, hash_value)
 		}
 		).collect();
 
-		let grouped_8_1: HashMap<_, Vec<_>> = res
+		let grouped: HashMap<_, Vec<_>> = res
 			.iter()
-			.filter_map(|(s, _, _, _, _, hash_8_1, _)| hash_8_1.map(|h| (s.clone(), h)))
+			.filter_map(|(s, _, _, hash_value)| hash_value.map(|h| (s.clone(), h)))
 			.fold(HashMap::new(), |mut acc, (s, hash)| {
 				acc.entry(hash).or_default().push(s);
 				acc
 			});
-		let grouped_8_2: HashMap<_, Vec<_>> = res
-			.iter()
-			.filter_map(|(s, _, _, _, _, _, hash_8_2)| hash_8_2.map(|h| (s.clone(), h)))
-			.fold(HashMap::new(), |mut acc, (s, hash)| {
-				acc.entry(hash).or_default().push(s);
-				acc
-			});
-
 
 		for r in res.iter() {
-			print_result(&r.0, &r.1, &r.2, r.3, r.4, r.5, r.6, &grouped_8_1, &grouped_8_2);
+			print_result(&r.0, &r.1, r.2, r.3, &grouped);
 		}
 		Ok(())
 	}
 
 	fn print_result(student: &Rc<RefCell<Student>>,
-					tr_8_1_failed: &Vec<Result<TestResult, String>>, tr_8_2_failed: &Vec<Result<TestResult, String>>,
-					score_8_1: usize, score_8_2: usize,
-					hash_8_1: Option<u64>, hash_8_2: Option<u64>,
-					grouped_hash_8_1: &HashMap<u64, Vec<Rc<RefCell<Student>>>>, grouped_hash_8_2: &HashMap<u64, Vec<Rc<RefCell<Student>>>>,
+					tr_failed: &Vec<Result<TestResult, String>>,
+					score_value: usize,
+					hash_value: Option<u64>,
+					grouped_hash: &HashMap<u64, Vec<Rc<RefCell<Student>>>>,
 	) {
-		let score = score_8_1 + score_8_2;
+		let score = score_value;
 
-		let _8_1_collided = if let Some(hash) = hash_8_1 {
-			grouped_hash_8_1.get(&hash).map_or(vec![], |s| s.iter().map(|s| s.borrow().name.clone()).collect())
+		let _hash_collided = if let Some(hash) = hash_value {
+			grouped_hash.get(&hash).map_or(vec![], |s| s.iter().map(|s| s.borrow().name.clone()).collect())
 		} else { vec![] };
-		let _8_2_collided = if let Some(hash) = hash_8_2 {
-			grouped_hash_8_2.get(&hash).map_or(vec![], |s| s.iter().map(|s| s.borrow().name.clone()).collect())
-		} else { vec![] };
-
-		let has_collided = _8_1_collided.len() > 1 || _8_2_collided.len() > 1;
+		let has_collided = _hash_collided.len() > 1;
 
 		println!(	"{} - {} - {} - {:?} / 40 - {:?} / 100",
 					&student.borrow().name, &student.borrow().sis_login_id, has_collided, score, score + 60);
-		println!("\t8.1 - {:?} - {} / {}", _8_1_collided, score_8_1, 20);
-		for test_result in tr_8_1_failed {
+		println!("\t8.1 - {:?} - {} / {}", _hash_collided, score_value, 20);
+		for test_result in tr_failed {
 			println!("\t\t{:?}", test_result);
 		}
-		println!("\t8.2 - {:?} - {} / {}", _8_2_collided, score_8_2, 20);
 
-		for test_result in tr_8_2_failed {
-			println!("\t\t{:?}", test_result);
-		}
 		println!();
 	}
 }

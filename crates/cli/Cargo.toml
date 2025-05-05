@@ -19,3 +19,4 @@ toml = "0.8.20"
 typed-builder = "0.21.0"
 zip = "2.6.1"
 derivative = "2.2.0"
+dev.workspace = true
