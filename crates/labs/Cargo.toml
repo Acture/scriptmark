@@ -9,3 +9,4 @@ common.workspace = true
 code_runner.workspace = true
 dev.workspace = true
 scraper = "0.23.1"
+tempfile = "3.19.1"

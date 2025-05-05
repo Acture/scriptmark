@@ -145,3 +145,10 @@ pub fn replace_in_vec<T: PartialEq>(vec: &mut [T], item: T) -> Result<(), Box<dy
 		Err("Item not found in vector".into())
 	}
 }
+
+#[cfg(test)]
+mod tests {
+
+	#[test]
+	fn test_group_files
+}

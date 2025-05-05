@@ -2,13 +2,16 @@ use derivative::Derivative;
 use pyo3::prelude::PyAnyMethods;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use pyo3::Python;
+use pyo3::{ffi, Python};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::error::Error;
 use std::ffi::CString;
 use std::fmt::Debug;
 use std::path::Path;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 use typed_builder::TypedBuilder;
 
 const PYTHON_TRACE_CODE_TEMPLATE: &str = include_str!("python_trace_code.py");
@@ -41,7 +44,7 @@ pub struct PythonTraceRecord {
 
 type RawTraceRecordType<'py> = (i64, i64, String, String, Bound<'py, PyAny>);
 
-type RunCodeResultType<O> = Result<(O, Option<Result<Vec<PythonTraceRecord>, Box<dyn Error>>>), Box<dyn Error>>;
+type RunCodeResultType<O> = Result<(O, Option<Result<Vec<PythonTraceRecord>, Box<dyn Error + Send + Sync>>>), Box<dyn Error + Send + Sync>>;
 
 fn pyany_to_value(obj: &Bound<PyAny>) -> Result<Value, Box<dyn Error>> {
 	Ok(
@@ -75,14 +78,17 @@ fn pyany_to_value(obj: &Bound<PyAny>) -> Result<Value, Box<dyn Error>> {
 		}
 	)
 }
+
+
 pub fn run_code<O>(
 	code: String,
 	std_in: Option<String>,
 	libs_to_import: &[String],
 	enable_trace: bool,
+	timeout_secs: Option<usize>,
 ) -> RunCodeResultType<O>
 where
-	O: for<'a> FromPyObject<'a> + Clone,
+	O: for<'a> FromPyObject<'a> + Clone + Send + Sync + 'static,
 {
 	let wrapped_code = CString::new(
 		match enable_trace {
@@ -93,8 +99,37 @@ where
 
 	let flush_code = CString::new("import sys; sys.stdout.flush(); sys.stderr.flush()")?;
 
+	match timeout_secs {
+		None => run_code_internal(&std_in, libs_to_import, enable_trace, &wrapped_code, &flush_code),
+		Some(timeout_secs) => {
+			let (tx, rx) = mpsc::channel();
+			let libs_to_import_owned: Vec<String> = libs_to_import.to_vec();
+			thread::spawn(move || {
+				let res = run_code_internal(&std_in, &libs_to_import_owned, enable_trace, &wrapped_code, &flush_code).map_err(|e| e.to_string());
+				let _ = tx.send(res);
+			});
+			match rx.recv_timeout(Duration::from_secs(timeout_secs as u64)) {
+				Ok(res) => Ok(res?),
+				Err(mpsc::RecvTimeoutError::Timeout) => {
+					// 发出 KeyboardInterrupt
+					Python::with_gil(|_| unsafe {
+						ffi::PyErr_SetInterrupt();
+					});
+					Err("Execution timed out".to_string().into())
+				}
+				Err(e) => Err(format!("Channel error: {}", e).into()),
+			}
+		}
+	}
+}
+
+fn run_code_internal<O>(std_in: &Option<String>, libs_to_import: &[String], enable_trace: bool, wrapped_code: &CString, flush_code: &CString)
+						-> RunCodeResultType<O>
+where
+	O: for<'a> FromPyObject<'a> + Clone + Send + Sync + 'static,
+{
 	Python::with_gil(
-		|py| {
+		|py: Python<'_>| -> RunCodeResultType<O> {
 			let globals = PyDict::new(py);
 			globals.set_item("__name__", "__main__")?;
 			py.run(&flush_code, None, Some(&globals))?;
@@ -140,7 +175,7 @@ where
 				.call0()?
 				.extract::<O>()?;
 
-			let trace_output: Option<Result<Vec<PythonTraceRecord>, Box<dyn Error>>> = match enable_trace {
+			let trace_output: Option<Result<Vec<PythonTraceRecord>, Box<dyn Error + Send + Sync>>> = match enable_trace {
 				true => {
 					let raw_trace_vec = globals.get_item("trace_output")?
 						.ok_or("trace_output not found")?
@@ -169,21 +204,23 @@ where
 			sys.setattr("stdout", original_stdout)?;
 
 			Ok((captured_output, trace_output))
-		}
-	)
+			}
+		)
 }
 
 pub fn run_from_file<O>(
 	code_path: &Path,
 	std_in: Option<String>,
 	libs_to_import: &[String],
+	enable_trace: bool,
+	timeout_secs: Option<usize>,
 ) -> RunCodeResultType<O>
 where
-	O: for<'a> FromPyObject<'a> + Clone,
+	O: for<'a> FromPyObject<'a> + Clone + Send + Sync + 'static,
 {
 	let code = std::fs::read_to_string(code_path)?;
 
-	run_code::<O>(code, std_in, libs_to_import, false)
+	run_code::<O>(code, std_in, libs_to_import, enable_trace, timeout_secs)
 }
 
 
@@ -209,7 +246,12 @@ import sys
 t = input()
 print(t)
 "#;
-		let (output, _) = run_code::<String>(code.to_string(), Some("test".to_string()), &[], false)?;
+		let (output, _) = run_code::<String>(code.to_string(), Some("test".to_string()), &[], false, None).map_err(|e| e.to_string())?;
+		println!(
+			"output: {:?}, trace: {:?}",
+			output,
+			""
+		);
 		assert_eq!(output, "test\n");
 
 		Ok(())
@@ -223,10 +265,11 @@ b = a[21::2]
 b.append(123)
 b.extend(list(range(200, 301, 2)))
 "#;
-		let (output, trace) = run_code::<String>(code.to_string(), None::<_>, &[], true)?;
+		let (output, trace) = run_code::<String>(code.to_string(), None::<_>, &[], true, None).map_err(|e| e.to_string())?;
 		assert_eq!(output, "");
 
-		let mut traces = trace.ok_or("trace not found")??;
+		let mut traces = trace.ok_or("trace not found")?.map_err(|e| e.to_string())?;
+		traces.sort_by_key(|trace| trace.trace_sequence);
 
 		assert_eq!(traces.len(), 7);
 
@@ -238,6 +281,23 @@ b.extend(list(range(200, 301, 2)))
 		}
 
 		Ok(())
+	}
+
+	#[test]
+	fn test_run_python_code_with_timeout() -> Result<(), Box<dyn Error>> {
+		let code = r#"
+count = 0
+while True:
+	count += 1
+	print(count)
+
+"#
+			;
+		let res = run_code::<String>(code.to_string(), None::<_>, &[], false, Some(1));
+		println!("{:?}", res);
+		Ok(())
+
+
 	}
 }
 
