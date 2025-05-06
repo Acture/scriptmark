@@ -2,6 +2,7 @@ use common::defines::submission::Submission;
 use common::defines::testresult::TestResult;
 use common::rc_ref;
 use common::traits::testsuite::DynTestSuite;
+use log::debug;
 use regex::Regex;
 use std::cell::RefCell;
 use std::fs;
@@ -101,10 +102,10 @@ pub fn run_test_suite(assignment_root: &Path, name: &str, pattern: &Regex) -> Ve
 				.to_str().expect("Failed to convert file stem to str")
 				.to_string();
 			if pattern.is_match(file_name) {
-				println!("Found file {}", file_name);
+				debug!("Found file {}", file_name);
 				Some((sis_id, submission_path))
 			} else {
-				println!("Ignoring file {}", file_name);
+				debug!("Ignoring file {}", file_name);
 				None
 			}
 		})
@@ -117,7 +118,6 @@ pub fn run_test_suite(assignment_root: &Path, name: &str, pattern: &Regex) -> Ve
 			let submission = rc_ref!(Submission::builder()
 				.submission_path(test_file)
 				.build());
-			println!("Running test suite {} on file {}", name, test_file.to_string_lossy());
 			(sis_id.into(), test_suite.pipelined(test_file), submission)
 		})
 		.collect()
@@ -159,6 +159,7 @@ mod tests {
 		group_files_by_sis_id(&data_dir, None)?;
 		Ok(())
 	}
+	const TEST_SUITE_SCORE: usize = 40;
 
 
 	#[test]
@@ -198,7 +199,6 @@ mod tests {
 				.collect();
 
 
-			const TEST_SUITE_SCORE: usize = 20;
 			let score = if test_count > 0 {
 				TEST_SUITE_SCORE * (test_count - tr_failed.len()) / test_count
 			} else {
@@ -229,6 +229,7 @@ mod tests {
 				acc
 			});
 
+
 		for r in res.iter() {
 			print_result(&r.0, &r.1, r.2, r.3, &grouped);
 		}
@@ -246,11 +247,14 @@ mod tests {
 		let _hash_collided = if let Some(hash) = hash_value {
 			grouped_hash.get(&hash).map_or(vec![], |s| s.iter().map(|s| s.borrow().name.clone()).collect())
 		} else { vec![] };
-		let has_collided = _hash_collided.len() > 1;
+		let has_collided = match _hash_collided.len() > 1 {
+			true => format!("{}: {:?}", "Hash Collided", _hash_collided),
+			false => format!("{}: {:?}", "Not Collided", _hash_collided),
+		};
 
-		println!(	"{} - {} - {} - {:?} / 40 - {:?} / 100",
-					&student.borrow().name, &student.borrow().sis_login_id, has_collided, score, score + 60);
-		println!("\t8.1 - {:?} - {} / {}", _hash_collided, score_value, 20);
+		println!(	"{} - {} - {} - {:?} / {} - {:?} / 100",
+					&student.borrow().name, &student.borrow().sis_login_id, has_collided, score, TEST_SUITE_SCORE, score + (100 - TEST_SUITE_SCORE));
+		println!("\t{} - {:?} - {} / {}", "9", _hash_collided, score_value, 40);
 		for test_result in tr_failed {
 			println!("\t\t{:?}", test_result);
 		}
