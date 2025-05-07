@@ -132,7 +132,7 @@ where
 		|py: Python<'_>| -> RunCodeResultType<O> {
 			let globals = PyDict::new(py);
 			globals.set_item("__name__", "__main__")?;
-			py.run(&flush_code, None, Some(&globals))?;
+			py.run(flush_code, None, Some(&globals))?;
 
 			let sys = py.import("sys")?;
 			let io = py.import("io")?;
