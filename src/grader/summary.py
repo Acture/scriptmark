@@ -1,12 +1,13 @@
 import csv
 import json
+import math
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from enum import Enum
+from enum import Enum, StrEnum, auto
 from logging import error, info
 from pathlib import Path
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import rich
 import typer
@@ -22,10 +23,16 @@ class FailureDetail(BaseModel):
 	details: str
 
 
-class TestStatus(Enum):
+class TestStatus(StrEnum):
 	PASSED = "✔ PASSED"
 	FAILED = "❌ FAILED"
 	MISSING = "❓ MISSING"  # <-- 新增状态
+
+
+class CurveMethod(Enum):
+	NONE = auto()
+	LINEAR = auto()
+	SQRT = auto()
 
 
 class PerTestResult(BaseModel):
@@ -67,6 +74,7 @@ class SummaryReport(BaseModel):
 	student_name: Optional[str] = None
 	# This is the core data: a list of results for each test.
 	per_test_results: List[PerTestResult]
+	final_grade: Optional[float] = None
 
 	# --- Let this model compute its own overall summary ---
 	@computed_field
@@ -118,7 +126,8 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 			if not match:
 				continue
 
-			student_id = match.group(1)
+			content_in_brackets = match.group(1)
+			student_id = content_in_brackets.split('-')[0]
 			test_name = name_attr.split('[')[0]
 
 			# 2. Populate the raw data structure.
@@ -166,7 +175,7 @@ def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
 		with open(archive_path, 'w', encoding='utf-8') as f:
 			# We dump the already-serialized string data.
 			json.dump(json_data, f, indent=2)
-		info(f"📈 Results archived to JSON: [cyan]{archive_path}[/cyan]")
+		rich.print(f"📈 Results archived to JSON: [cyan]{archive_path}[/cyan]")
 
 	elif archive_path.suffix == "csv":
 		# For CSV, we create a more detailed, granular report.
@@ -191,7 +200,7 @@ def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
 						f"{test_result.pass_rate:.2f}",
 						failure_msgs
 					])
-		info(f"📊 Granular results archived to CSV: [cyan]{archive_path}[/cyan]")
+		rich.print(f"📊 Granular results archived to CSV: [cyan]{archive_path}[/cyan]")
 
 
 def load_roster(roster_path: Path) -> Dict[str, str]:
@@ -222,6 +231,45 @@ def load_roster(roster_path: Path) -> Dict[str, str]:
 		return {}
 
 
+def apply_curve(
+	results: Dict[str, SummaryReport],
+	method: CurveMethod = CurveMethod.LINEAR,
+	curve_range: Tuple[int, int] = (60, 100),
+) -> Dict[str, SummaryReport]:
+	"""
+	遍历所有学生的报告，并根据指定的方法计算和填充 final_grade。
+	"""
+	rich.print(f"Applying curve method: [bold yellow]{method}[/bold yellow]")
+
+	lower_bound, upper_bound = curve_range
+
+	for report in results.values():
+		# 原始通过率，范围是 [0, 100]
+		original_rate = report.pass_rate
+
+		curved_score = original_rate  # 默认等于原始分
+
+		if method == CurveMethod.LINEAR:
+			# 线性缩放: y = (x/100) * (max - min) + min
+			curved_score = (original_rate / 100.0) * (upper_bound - lower_bound) + lower_bound
+
+		elif method == CurveMethod.SQRT:
+			# 开方曲线: y = sqrt(x) * 10
+			if original_rate >= 0:
+				# 计算乘数和基准分
+				multiplier = (upper_bound - lower_bound) / 10.0
+				base_score = lower_bound
+
+				# 应用公式
+				curved_score = multiplier * math.sqrt(original_rate) + base_score
+			else:
+				curved_score = lower_bound
+
+		# 确保分数不会超过最大值或低于最小值
+		report.final_grade = max(lower_bound, min(upper_bound, curved_score))
+	return results
+
+
 def generate_summary(
 	paths: List[Path] = typer.Argument(
 		..., help="One or more summary_report.xml files or directories containing them.", exists=True
@@ -230,6 +278,12 @@ def generate_summary(
 		None, "--roster", "-r",
 		help="Path to a CSV roster file (student_id,student_name) to look up names.",
 		exists=True, dir_okay=False, readable=True
+	),
+	curve_method: CurveMethod = typer.Option(
+		CurveMethod.LINEAR, "--curve", "-c", help="选择要应用的曲线调整方法。", case_sensitive=False
+	),
+	curve_range: Tuple[int, int] = typer.Option(
+		(60, 100), "--range", help="Curve adjustment range, in the form 'min-max'."
 	),
 	archive_dir: Path = typer.Option(
 		None, "--archive", "-a", help="Archive the combined results to the specified dir."
@@ -259,15 +313,6 @@ def generate_summary(
 		info(f"Parsing report: [dim]{xml_file}[/dim]")
 		result = parse_unified_xml(xml_file)
 
-		summary_table = Table(title="🏆 Pytest Grading Summary 🏆")
-		summary_table.add_column("Student Name", style="white")  # New Column
-		summary_table.add_column("Student ID", justify="right", style="cyan", no_wrap=True)
-		summary_table.add_column("Status", style="magenta")
-		summary_table.add_column("Passed", justify="right")
-		summary_table.add_column("Failed", justify="right")
-		summary_table.add_column("Total", justify="right")
-		summary_table.add_column("Pass Rate", justify="right")
-
 		missing_ids = set(roster_map.keys()) - set(result.keys())
 
 		example_report: SummaryReport = result.values().__iter__().__next__() if result else None
@@ -289,6 +334,22 @@ def generate_summary(
 					per_test_results=test_results
 				)
 
+		if curve_method != CurveMethod.NONE:
+			result = apply_curve(result, curve_method, curve_range)
+		else:
+			for report in result.values():
+				report.final_grade = report.pass_rate
+
+		summary_table = Table(title="🏆 Pytest Grading Summary 🏆")
+		summary_table.add_column("Student Name", style="white")  # New Column
+		summary_table.add_column("Student ID", justify="right", style="cyan", no_wrap=True)
+		summary_table.add_column("Status", style="magenta")
+		summary_table.add_column("Passed", justify="right")
+		summary_table.add_column("Failed", justify="right")
+		summary_table.add_column("Total", justify="right")
+		summary_table.add_column("Pass Rate", justify="right")
+		summary_table.add_column("Final Grade", justify="right")  # New Column
+
 		for student_id, report in sorted(result.items()):
 			status_color = "green" if report.status == TestStatus.PASSED else "red"
 			report.student_name = roster_map.get(student_id, "N/A")
@@ -300,7 +361,8 @@ def generate_summary(
 				str(report.passed_count),  # Use the computed field
 				str(report.failed_count),  # Use the computed field
 				str(report.total_tests),  # Use the computed field
-				f"{report.pass_rate:.2f}%"  # Use the computed field
+				f"{report.pass_rate:.2f}%",  # Use the computed field
+				f"{report.final_grade:.2f}%"  # New Final Grade Column
 			)
 
 		rich.print(summary_table)
