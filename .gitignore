@@ -168,3 +168,4 @@ submissions
 config.toml
 /*.json
 /*.zip
+templates
