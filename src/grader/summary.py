@@ -2,11 +2,9 @@ import csv
 import json
 import xml.etree.ElementTree as ET
 from collections import defaultdict
-from dataclasses import field
-from enum import Enum, StrEnum
-from logging import error, info, warn
+from enum import Enum
+from logging import error, info
 from pathlib import Path
-import argparse
 import re
 from typing import Dict, List, Optional
 
@@ -20,21 +18,21 @@ from rich.syntax import Syntax
 
 
 class FailureDetail(BaseModel):
-	test_name: str
 	message: str
 	details: str
 
 
-class TestStatus(StrEnum):
-	PASSED = "PASSED"
-	FAILED = "FAILED"
+class TestStatus(Enum):
+	PASSED = "✔ PASSED"
+	FAILED = "❌ FAILED"
+	MISSING = "❓ MISSING"  # <-- 新增状态
 
 
 class PerTestResult(BaseModel):
 	"""Represents a student's result on a single test function."""
 	test_name: str
 	# We only need to store the total runs and the failure details.
-	total_runs: int
+	total_test: int
 	failures_details: List[FailureDetail] = []
 
 	# Let the model compute derived values automatically!
@@ -46,19 +44,21 @@ class PerTestResult(BaseModel):
 	@computed_field
 	@property
 	def passed_count(self) -> int:
-		return self.total_runs - self.failures_count
+		return self.total_test - self.failures_count
 
 	@computed_field
 	@property
 	def status(self) -> TestStatus:
+		if self.total_test == 0:
+			return TestStatus.MISSING  # 如果没有测试运行，则为 MISSING
 		return TestStatus.FAILED if self.failures_count > 0 else TestStatus.PASSED
 
 	@computed_field
 	@property
 	def pass_rate(self) -> float:
-		if self.total_runs == 0:
+		if self.total_test == 0:
 			return 0.0
-		return (self.passed_count / self.total_runs) * 100
+		return (self.passed_count / self.total_test) * 100
 
 
 class SummaryReport(BaseModel):
@@ -72,7 +72,7 @@ class SummaryReport(BaseModel):
 	@computed_field
 	@property
 	def total_tests(self) -> int:
-		return sum(test.total_runs for test in self.per_test_results)
+		return sum(test.total_test for test in self.per_test_results)
 
 	@computed_field
 	@property
@@ -115,7 +115,8 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 		for testcase in root.findall('.//testcase'):
 			name_attr = testcase.attrib.get('name', '')
 			match = re.search(r'\[(.*?)\]', name_attr)
-			if not match: continue
+			if not match:
+				continue
 
 			student_id = match.group(1)
 			test_name = name_attr.split('[')[0]
@@ -129,7 +130,6 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 				important_lines = [line for line in traceback.split('\n') if line.strip().startswith('E ')]
 				details = "\n".join(important_lines) if important_lines else traceback
 				student_data[student_id][test_name]["failures_details"].append(FailureDetail(
-					test_name=test_name,
 					message=failure_node.attrib.get('message', 'No message'),
 					details=details,
 				))
@@ -142,7 +142,7 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 				# Create the inner PerTestResult object.
 				per_test_results_list.append(PerTestResult(
 					test_name=test_name,
-					total_runs=data["total_runs"],
+					total_test=data["total_runs"],
 					failures_details=data["failures_details"]
 				))
 
@@ -154,7 +154,7 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 		return final_reports
 
 	except ET.ParseError as e:
-		error(f"Error: Could not parse XML file '{file_path}'. Reason: {e}", err=True)
+		error(f"Error: Could not parse XML file '{file_path}'. Reason: {e}")
 		return {}
 
 
@@ -187,7 +187,7 @@ def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
 						test_result.status.value,
 						test_result.passed_count,
 						test_result.failures_count,
-						test_result.total_runs,
+						test_result.total_test,
 						f"{test_result.pass_rate:.2f}",
 						failure_msgs
 					])
@@ -268,6 +268,27 @@ def generate_summary(
 		summary_table.add_column("Total", justify="right")
 		summary_table.add_column("Pass Rate", justify="right")
 
+		missing_ids = set(roster_map.keys()) - set(result.keys())
+
+		example_report: SummaryReport = result.values().__iter__().__next__() if result else None
+
+		if missing_ids:
+			for sid in missing_ids:
+				test_results = [
+					PerTestResult(test_name=example.test_name, total_test=example.total_test, failures_details=[
+						FailureDetail(
+							message="No test results found in the report.",
+							details="No test results found in the report."
+						)
+					])
+					for example in example_report.per_test_results
+				]
+				result[sid] = SummaryReport(
+					student_id=sid,
+					student_name=roster_map[sid],
+					per_test_results=test_results
+				)
+
 		for student_id, report in sorted(result.items()):
 			status_color = "green" if report.status == TestStatus.PASSED else "red"
 			report.student_name = roster_map.get(student_id, "N/A")
@@ -281,6 +302,7 @@ def generate_summary(
 				str(report.total_tests),  # Use the computed field
 				f"{report.pass_rate:.2f}%"  # Use the computed field
 			)
+
 		rich.print(summary_table)
 
 		# --- Display Failure Panels ---

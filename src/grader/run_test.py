@@ -5,7 +5,6 @@ from typing import List
 import pytest
 import typer
 
-from grader.args import parse_args
 from grader.utils import group_files_by_sid
 
 
