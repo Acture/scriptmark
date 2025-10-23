@@ -5,7 +5,7 @@ from typing import List
 import pytest
 import typer
 
-from grader.utils import group_files_by_sid
+from scriptmark.utils import group_files_by_sid
 
 
 class GraderDataPlugin:

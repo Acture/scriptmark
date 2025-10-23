@@ -26,10 +26,10 @@
 
 ```bash
 # 使用 uv (推荐)
-uv pip install [您在PyPI上的包名]
+uv add scriptmark
 
 # 或使用 pip
-pip install [您在PyPI上的包名]
+pip install scriptmark
 
 grader --help
 
