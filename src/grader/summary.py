@@ -373,7 +373,6 @@ def generate_summary(
 				f"{report.final_grade:.2f}%"  # New Final Grade Column
 			)
 
-		rich.print(summary_table)
 
 		# --- Display Failure Panels ---
 		failed_students = {sid: r for sid, r in result.items() if r.status == TestStatus.FAILED}
@@ -405,6 +404,7 @@ def generate_summary(
 				)
 
 				rich.print(panel)
+		rich.print(summary_table)
 		if archive_dir:
 			archive_path = archive_dir / f"archive_{xml_file.stem}.{archive_format}"
 			archive_result(archive_path, result)
