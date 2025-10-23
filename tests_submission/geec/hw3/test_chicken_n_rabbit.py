@@ -1,10 +1,10 @@
 # tests/test_chicken_rabbit.py
 
 import pytest
-from typing import List, Tuple
 
 
 # --- 辅助函数，用于安全地加载模块和函数 ---
+
 
 def get_student_module(student_submission):
 	"""
@@ -26,6 +26,7 @@ def get_function(module, func_name):
 
 # --- 1. 测试核心逻辑函数：solve_chicken_rabbit ---
 
+
 # 使用 pytest.mark.parametrize 为 solve_chicken_rabbit 提供多种测试场景
 @pytest.mark.parametrize(
 	"total_heads, total_feet, expected_solution",
@@ -44,14 +45,16 @@ def get_function(module, func_name):
 		(20, 30, []),
 		# 测试用例 7: 多个解？(在此问题中不可能，但可用于验证逻辑)
 		# (此用例省略，因为鸡兔同笼问题对于给定的头和脚只有唯一解或无解)
-	]
+	],
 )
-def test_solve_chicken_rabbit(student_submission, total_heads, total_feet, expected_solution):
+def test_solve_chicken_rabbit(
+	student_submission, total_heads, total_feet, expected_solution
+):
 	"""
 	对 solve_chicken_rabbit 函数进行参数化测试，覆盖多种情况。
 	"""
 	module = get_student_module(student_submission)
-	solve_func = get_function(module, 'solve_chicken_rabbit')
+	solve_func = get_function(module, "solve_chicken_rabbit")
 
 	# 调用学生实现的函数
 	actual_solution = solve_func(total_heads, total_feet)
@@ -61,11 +64,13 @@ def test_solve_chicken_rabbit(student_submission, total_heads, total_feet, expec
 
 	# 断言：检查结果是否与预期解完全一致
 	# 使用 set 比较可以忽略解决方案的顺序（尽管此问题中只有一个解）
-	assert set(actual_solution) == set(expected_solution), \
-		f"对于 heads={total_heads}, feet={total_feet}，计算结果不正确。"
+	assert set(actual_solution) == set(
+		expected_solution
+	), f"对于 heads={total_heads}, feet={total_feet}，计算结果不正确。"
 
 
 # --- 2. 测试用户交互函数：get_user_input ---
+
 
 def test_get_user_input_valid_input(student_submission, monkeypatch):
 	"""
@@ -73,11 +78,11 @@ def test_get_user_input_valid_input(student_submission, monkeypatch):
 	我们使用 monkeypatch 来模拟用户的键盘输入。
 	"""
 	module = get_student_module(student_submission)
-	input_func = get_function(module, 'get_user_input')
+	input_func = get_function(module, "get_user_input")
 
 	# 模拟用户先后输入 "35" 和 "94"
 	user_inputs = "35\n94\n"
-	monkeypatch.setattr('sys.stdin', iter(user_inputs.splitlines()))
+	monkeypatch.setattr("sys.stdin", iter(user_inputs.splitlines()))
 
 	# 调用学生的函数，并捕获其返回值
 	# 注意：这个测试依赖于学生在 get_user_input 函数中正确地 return 了获取到的值
@@ -94,11 +99,11 @@ def test_get_user_input_prints_solution(student_submission, monkeypatch, capsys)
 	(高级) 测试 get_user_input 是否在获取输入后，调用了核心函数并打印了正确结果。
 	"""
 	module = get_student_module(student_submission)
-	input_func = get_function(module, 'get_user_input')
+	input_func = get_function(module, "get_user_input")
 
 	# 模拟用户输入
 	user_inputs = "35\n94\n"
-	monkeypatch.setattr('sys.stdin', iter(user_inputs.splitlines()))
+	monkeypatch.setattr("sys.stdin", iter(user_inputs.splitlines()))
 
 	# 运行函数
 	input_func()

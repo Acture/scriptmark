@@ -11,26 +11,23 @@ def pytest_generate_tests(metafunc):
 	"""
 	动态生成测试。现在从 pytest 的 config 对象中直接读取数据。
 	"""
-	if 'student_submission' in metafunc.fixturenames:
-
+	if "student_submission" in metafunc.fixturenames:
 		# --- 核心改动在这里 ---
 		# `metafunc.config` 就是上面 `pytest_configure` 操作过的 config 对象
 		if not hasattr(metafunc.config, "student_data_map"):
-			pytest.fail("Grader data was not passed to pytest correctly. Check the plugin.")
+			pytest.fail(
+				"Grader data was not passed to pytest correctly. Check the plugin."
+			)
 
 		student_files_map = metafunc.config.student_data_map
 
 		# 后续的参数化逻辑完全不变
 		params = [
-			{"sid": sid, "files": files}
-			for sid, files in student_files_map.items()
+			{"sid": sid, "files": files} for sid, files in student_files_map.items()
 		]
 
 		metafunc.parametrize(
-			"student_submission",
-			params,
-			indirect=True,
-			ids=student_files_map.keys()
+			"student_submission", params, indirect=True, ids=student_files_map.keys()
 		)
 
 
@@ -56,7 +53,9 @@ class Submission:
 
 		# --- Crucial Error Handling ---
 		if not found_files:
-			pytest.fail(f"For student '{self.sid}', no file ending with '{ends_with}' was found.")
+			pytest.fail(
+				f"For student '{self.sid}', no file ending with '{ends_with}' was found."
+			)
 
 		if len(found_files) > 1:
 			pytest.fail(
@@ -95,10 +94,10 @@ def student_submission(request):
 	for each student, which the tests can then use to request modules.
 	"""
 	student_data = request.param
-	return Submission(sid=student_data['sid'], file_paths=student_data['files'])
+	return Submission(sid=student_data["sid"], file_paths=student_data["files"])
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def get_module(student_submission: Submission) -> Callable:
 	"""
 	"模块工厂夹具" (Module Factory Fixture)
@@ -121,7 +120,7 @@ def get_module(student_submission: Submission) -> Callable:
 	return _getter
 
 
-@pytest.fixture(scope='function')
+@pytest.fixture(scope="function")
 def get_function(get_module: Callable) -> Callable:
 	"""
 	"函数工厂夹具" (Function Factory Fixture)
@@ -138,8 +137,8 @@ def get_function(get_module: Callable) -> Callable:
 		这是实际返回给测试用例的辅助函数。
 
 		Args:
-			func_name: 要查找的函数名 (例如 "calculate_sum")
-			file_ends_with: 要加载的文件后缀 (例如 "Lab3_task1.py")
+		        func_name: 要查找的函数名 (例如 "calculate_sum")
+		        file_ends_with: 要加载的文件后缀 (例如 "Lab3_task1.py")
 		"""
 
 		# 步骤 1: 使用 get_module 工厂获取正确的模块
@@ -148,14 +147,16 @@ def get_function(get_module: Callable) -> Callable:
 
 		# 步骤 2: 从加载的模块中安全地获取函数
 		if not hasattr(module, func_name):
-			pytest.skip(f"Function '{func_name}' not found in module '{file_ends_with}'.")
+			pytest.skip(
+				f"Function '{func_name}' not found in module '{file_ends_with}'."
+			)
 
 		func = getattr(module, func_name)
 
 		if not callable(func):
 			pytest.fail(
 				f"Found '{func_name}' in '{file_ends_with}', but it is not a function.",
-				pytrace=False
+				pytrace=False,
 			)
 
 		return func

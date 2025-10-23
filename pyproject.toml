@@ -50,3 +50,12 @@ installer = "uv"
 deps = ".[dev]"
 # 运行 pytest 测试套件
 commands = "python -c \"import scriptmark\""
+
+[tool.ruff]
+indent-width = 4
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "tab"
+skip-magic-trailing-comma = false
+line-ending = "auto"

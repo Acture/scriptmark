@@ -56,10 +56,14 @@ class TestTranslationLogic:
 			result_12 = self.translate_func("12")
 
 			# 核心断言
-			assert result_12 == result_1 + result_2, "翻译逻辑错误： T('12') 的结果不等于 T('1') + T('2')"
+			assert (
+				result_12 == result_1 + result_2
+			), "翻译逻辑错误： T('12') 的结果不等于 T('1') + T('2')"
 
 		except Exception as e:
-			pytest.fail(f"测试拼接逻辑时发生意外错误（是否遗漏了 '1' 或 '2' 的映射？）： {e}")
+			pytest.fail(
+				f"测试拼接逻辑时发生意外错误（是否遗漏了 '1' 或 '2' 的映射？）： {e}"
+			)
 
 	def test_repetition_logic(self):
 		"""
@@ -69,7 +73,9 @@ class TestTranslationLogic:
 			result_3 = self.translate_func("3")
 			result_33 = self.translate_func("33")
 
-			assert result_33 == result_3 + result_3, "翻译逻辑错误： T('33') 的结果不等于 T('3') + T('3')"
+			assert (
+				result_33 == result_3 + result_3
+			), "翻译逻辑错误： T('33') 的结果不等于 T('3') + T('3')"
 
 		except Exception as e:
 			pytest.fail(f"测试重复逻辑时发生意外错误（是否遗漏了 '3' 的映射？）： {e}")
@@ -117,4 +123,6 @@ class TestTranslationLogic:
 			assert result_8 != result_9, "任务要求：请为 '8' 和 '9' 设置 *不同* 的词组"
 
 		except Exception as e:
-			pytest.fail(f"测试唯一性时发生意外错误（是否遗漏了 '5', '6', '8' 或 '9' 的映射？）： {e}")
+			pytest.fail(
+				f"测试唯一性时发生意外错误（是否遗漏了 '5', '6', '8' 或 '9' 的映射？）： {e}"
+			)

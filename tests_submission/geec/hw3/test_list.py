@@ -25,10 +25,11 @@ def get_function(module, func_name):
 
 # --- Tests for each function ---
 
+
 def test_sort_a_returns_reversed_list(student_submission):
 	"""Tests the sort_a() function by first loading the student's module."""
 	module = get_student_module(student_submission)
-	sort_a_func = get_function(module, 'sort_a')
+	sort_a_func = get_function(module, "sort_a")
 
 	assert sort_a_func is not None, "Function 'sort_a' not found in the submission."
 
@@ -42,11 +43,39 @@ def test_sort_a_returns_reversed_list(student_submission):
 def test_get_prime_number_from_a(student_submission):
 	"""Tests the get_prime_number_from_a() function."""
 	module = get_student_module(student_submission)
-	get_primes_func = get_function(module, 'get_prime_number_from_a')
+	get_primes_func = get_function(module, "get_prime_number_from_a")
 
-	assert get_primes_func is not None, "Function 'get_prime_number_from_a' not found in the submission."
+	assert (
+		get_primes_func is not None
+	), "Function 'get_prime_number_from_a' not found in the submission."
 
-	known_primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
+	known_primes = [
+		2,
+		3,
+		5,
+		7,
+		11,
+		13,
+		17,
+		19,
+		23,
+		29,
+		31,
+		37,
+		41,
+		43,
+		47,
+		53,
+		59,
+		61,
+		67,
+		71,
+		73,
+		79,
+		83,
+		89,
+		97,
+	]
 	result = get_primes_func()
 
 	assert isinstance(result, list), "Return value must be a list."
@@ -56,41 +85,55 @@ def test_get_prime_number_from_a(student_submission):
 def test_get_number_divisible_by_2or3(student_submission):
 	"""Tests the get_number_divisible_by_2or3() function."""
 	module = get_student_module(student_submission)
-	get_divisible_func = get_function(module, 'get_number_divisible_by_2or3')
+	get_divisible_func = get_function(module, "get_number_divisible_by_2or3")
 
-	assert get_divisible_func is not None, "Function 'get_number_divisible_by_2or3' not found in the submission."
+	assert (
+		get_divisible_func is not None
+	), "Function 'get_number_divisible_by_2or3' not found in the submission."
 
 	expected_result = [n for n in range(100) if n % 2 == 0 or n % 3 == 0]
 	result = get_divisible_func()
 
 	assert isinstance(result, list), "Return value must be a list."
-	assert sorted(result) == sorted(expected_result), "The list of numbers divisible by 2 or 3 is incorrect."
+	assert sorted(result) == sorted(
+		expected_result
+	), "The list of numbers divisible by 2 or 3 is incorrect."
 
 
 def test_get_narcissus_number_using_list(student_submission):
 	"""Tests the list-based narcissus number function."""
 	module = get_student_module(student_submission)
-	get_narcissus_list_func = get_function(module, 'get_narcissus_number_using_list')
+	get_narcissus_list_func = get_function(module, "get_narcissus_number_using_list")
 
-	assert get_narcissus_list_func is not None, "Function 'get_narcissus_number_using_list' not found in the submission."
+	assert (
+		get_narcissus_list_func is not None
+	), "Function 'get_narcissus_number_using_list' not found in the submission."
 
 	known_narcissus_numbers = [153, 370, 371, 407]
 	result = get_narcissus_list_func()
 
 	assert isinstance(result, list), "Return value must be a list."
-	assert sorted(result) == known_narcissus_numbers, "The list of narcissistic numbers is incorrect."
+	assert (
+		sorted(result) == known_narcissus_numbers
+	), "The list of narcissistic numbers is incorrect."
 
 
 def test_get_narcissus_number_using_generator(student_submission):
 	"""Tests the generator-based narcissus number function."""
 	module = get_student_module(student_submission)
-	get_narcissus_gen_func = get_function(module, 'get_narcissus_number_using_generator')
+	get_narcissus_gen_func = get_function(
+		module, "get_narcissus_number_using_generator"
+	)
 
-	assert get_narcissus_gen_func is not None, "Function 'get_narcissus_number_using_generator' not found in the submission."
+	assert (
+		get_narcissus_gen_func is not None
+	), "Function 'get_narcissus_number_using_generator' not found in the submission."
 
 	known_narcissus_numbers = [153, 370, 371, 407]
 	result_gen = get_narcissus_gen_func()
 
 	assert isinstance(result_gen, Generator), "Return value must be a generator."
 	result_list = list(result_gen)
-	assert sorted(result_list) == known_narcissus_numbers, "The narcissistic numbers from the generator are incorrect."
+	assert (
+		sorted(result_list) == known_narcissus_numbers
+	), "The narcissistic numbers from the generator are incorrect."
