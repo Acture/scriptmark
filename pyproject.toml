@@ -1,20 +1,53 @@
 [project]
-name = "grader"
+name = "ScriptMark"
 version = "0.1.0"
-description = "Add your description here"
-requires-python = ">=3.14"
+description = "一个可扩展的、用于自动评分学生编程作业的CLI工具。目前仅实现了基于pytest的"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.10"
 dependencies = [
-	"pydantic>=2.12.2",
+	"pydantic>=2.12.3",
 	"pytest>=8.4.2",
 	"pytest-timeout>=2.4.0",
 	"rich>=14.2.0",
-	"typer>=0.19.2",
-	"uv-build>=0.9.3",
+	"typer>=0.20.0",
+]
+license = { text = "GPL-3.0-or-later" }
+keywords = ["grader", "pytest", "education", "autograding"]
+classifiers = [
+	"Development Status :: 3 - Alpha",
+	"Intended Audience :: Developers",
+	"Intended Audience :: Education",
+	"Operating System :: OS Independent",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.14",
+]
+authors = [
+	{ name = "Acture", email = "acturea@gmail.com" }
 ]
 
 [build-system]
-requires = ["uv_build"]
+requires = ["uv_build>=0.9.5"]
 build-backend = "uv_build"
 
+[dependency-groups]
+dev = [
+	"tox>=4.31.0",
+	"twine>=6.2.0",
+	"uv-build>=0.9.5",
+]
+
 [project.scripts]
-grader = "grader.main:app"
+scriptmark = "scriptmark.main:app"
+
+
+[tool.tox]
+# 声明您希望测试的 Python 版本环境
+envlist = ["py310", "py311", "py312", "py313", "py314"]
+installer = "uv"
+
+[tool.tox.testenv]
+# 对于每个环境，安装此包及其 [test] 依赖项
+# ('.[test]' 会读取 [project.optional-dependencies].test)
+deps = ".[dev]"
+# 运行 pytest 测试套件
+commands = "grader run submissions/geec/hw3 -t tests_submission/geec/hw3"
