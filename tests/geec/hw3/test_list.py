@@ -13,14 +13,14 @@ def get_student_module(student_submission):
 	we assume the student submits exactly one '.py' file. The get_module method
 	will correctly fail if zero or more than one .py file is found.
 	"""
-	return student_submission.get_module(ends_with="Lab3_1.py")
+	return student_submission.get_module(ends_with="Lab3_1.py") or None
 
 
 def get_function(module, func_name):
 	"""Safety checks if a function exists before testing it."""
 	if not hasattr(module, func_name):
 		pytest.skip(f"Function '{func_name}' not found in the submission.")
-	return getattr(module, func_name)
+	return getattr(module, func_name) or None
 
 
 # --- Tests for each function ---
@@ -29,6 +29,8 @@ def test_sort_a_returns_reversed_list(student_submission):
 	"""Tests the sort_a() function by first loading the student's module."""
 	module = get_student_module(student_submission)
 	sort_a_func = get_function(module, 'sort_a')
+
+	assert sort_a_func is not None, "Function 'sort_a' not found in the submission."
 
 	result = sort_a_func()
 
@@ -42,6 +44,8 @@ def test_get_prime_number_from_a(student_submission):
 	module = get_student_module(student_submission)
 	get_primes_func = get_function(module, 'get_prime_number_from_a')
 
+	assert get_primes_func is not None, "Function 'get_prime_number_from_a' not found in the submission."
+
 	known_primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97]
 	result = get_primes_func()
 
@@ -53,6 +57,8 @@ def test_get_number_divisible_by_2or3(student_submission):
 	"""Tests the get_number_divisible_by_2or3() function."""
 	module = get_student_module(student_submission)
 	get_divisible_func = get_function(module, 'get_number_divisible_by_2or3')
+
+	assert get_divisible_func is not None, "Function 'get_number_divisible_by_2or3' not found in the submission."
 
 	expected_result = [n for n in range(100) if n % 2 == 0 or n % 3 == 0]
 	result = get_divisible_func()
@@ -66,6 +72,8 @@ def test_get_narcissus_number_using_list(student_submission):
 	module = get_student_module(student_submission)
 	get_narcissus_list_func = get_function(module, 'get_narcissus_number_using_list')
 
+	assert get_narcissus_list_func is not None, "Function 'get_narcissus_number_using_list' not found in the submission."
+
 	known_narcissus_numbers = [153, 370, 371, 407]
 	result = get_narcissus_list_func()
 
@@ -77,6 +85,8 @@ def test_get_narcissus_number_using_generator(student_submission):
 	"""Tests the generator-based narcissus number function."""
 	module = get_student_module(student_submission)
 	get_narcissus_gen_func = get_function(module, 'get_narcissus_number_using_generator')
+
+	assert get_narcissus_gen_func is not None, "Function 'get_narcissus_number_using_generator' not found in the submission."
 
 	known_narcissus_numbers = [153, 370, 371, 407]
 	result_gen = get_narcissus_gen_func()

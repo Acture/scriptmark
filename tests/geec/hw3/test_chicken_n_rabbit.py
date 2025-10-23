@@ -8,18 +8,20 @@ from typing import List, Tuple
 
 def get_student_module(student_submission):
 	"""
-	安全地从学生的提交中加载模块。
-	对于本次作业，我们假设学生提交一个名为 Lab3_2.py 或类似名称的文件。
+	A helper to get the main module from the student's submission.
+
+	This uses the get_module method from our Submission manager. For this assignment,
+	we assume the student submits exactly one '.py' file. The get_module method
+	will correctly fail if zero or more than one .py file is found.
 	"""
-	# 假设学生的文件名可能不同，但功能是测试文件中的
-	return student_submission.get_module(ends_with="Lab3_2.py")
+	return student_submission.get_module(ends_with="Lab3_2.py") or None
 
 
 def get_function(module, func_name):
-	"""安全地获取函数，如果不存在则跳过测试。"""
+	"""Safety checks if a function exists before testing it."""
 	if not hasattr(module, func_name):
-		pytest.skip(f"函数 '{func_name}' 未在提交的文件中找到。")
-	return getattr(module, func_name)
+		pytest.skip(f"Function '{func_name}' not found in the submission.")
+	return getattr(module, func_name) or None
 
 
 # --- 1. 测试核心逻辑函数：solve_chicken_rabbit ---

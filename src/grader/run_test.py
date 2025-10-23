@@ -19,19 +19,19 @@ class GraderDataPlugin:
 		"""
 		config.student_data_map = self.student_data
 
+
 def run_tests(
 	submissions_paths: List[Path] = typer.Argument(
 		..., help="一个或多个学生代码所在的目录路径。", exists=True, file_okay=False
 	),
 	tests_dir: Path = typer.Option(
-		"tests/", "--tests-dir", "-t", help="包含 pytest 测试文件的目录。", exists=True, file_okay=False
+		..., "--tests-dir", "-t", help="包含 pytest 测试文件的目录。", exists=True, file_okay=False
 	),
 	output_dir: Path = typer.Option(
 		"output/", "--output-dir", "-o", help="保存 JUnit XML 测试结果的目录。"
 	),
 	timeout: int = typer.Option(10, help="每个测试用例的超时时间（秒）。")
 ):
-
 	student_files = group_files_by_sid(submissions_paths)
 
 	info("Found {} student submissions.".format(len(student_files)))
@@ -39,7 +39,6 @@ def run_tests(
 	# --- 2. Create results directory ---
 	output_dir.mkdir(exist_ok=True)
 	info(f"Test reports will be saved in '{output_dir}'.")
-
 
 	# 3. Define a single, unified XML report path
 	summary_report_path = output_dir / "summary_report.xml"
