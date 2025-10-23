@@ -1,6 +1,6 @@
 [project]
 name = "ScriptMark"
-version = "0.1.1a1"
+version = "0.1.1"
 description = "一个可扩展的、用于自动评分学生编程作业的CLI工具。目前仅实现了基于pytest的"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"
