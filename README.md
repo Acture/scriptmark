@@ -1,9 +1,9 @@
 # ScriptMark: 自动评分工具
 
-[![PyPI](https://img.shields.io/pypi/v/您的包名)](https://pypi.org/project/您的包名/)
-[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/您的包名)](https://pypi.org/project/您的包名/)
-[![License](https://img.shields.io/pypi/l/您的包名)](./LICENSE)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/您的GitHub用户名/您的仓库名/ci.yml)](https://github.com/您的GitHub用户名/您的仓库名/actions)
+[![PyPI](https://img.shields.io/pypi/v/scriptmark)](https://pypi.org/project/scriptmark/)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/scriptmark)](https://pypi.org/project/scriptmark/)
+[![License](https://img.shields.io/pypi/l/scriptmark)](./LICENSE)
+[![Build Status](https://img.shields.io/github/actions/workflow/status/Acture/scriptmark/ci.yml)](https://github.com/Acture/scriptmark/actions)
 
 一个可扩展的、用于自动评分学生编程作业的 CLI 工具。
 
