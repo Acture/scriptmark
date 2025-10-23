@@ -37,6 +37,7 @@ class CurveMethod(Enum):
 
 class PerTestResult(BaseModel):
 	"""Represents a student's result on a single test function."""
+
 	test_name: str
 	# We only need to store the total runs and the failure details.
 	total_test: int
@@ -70,6 +71,7 @@ class PerTestResult(BaseModel):
 
 class SummaryReport(BaseModel):
 	"""Represents the complete report for a single student."""
+
 	student_id: str
 	student_name: Optional[str] = None
 	# This is the core data: a list of results for each test.
@@ -115,34 +117,43 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 
 		# 1. Use a nested defaultdict to gather the raw "source of truth" data.
 		# Structure: student_id -> test_name -> { "total_runs": int, "failures_details": list }
-		student_data = defaultdict(lambda: defaultdict(lambda: {
-			"total_runs": 0,
-			"failures_details": []
-		}))
+		student_data = defaultdict(
+			lambda: defaultdict(lambda: {"total_runs": 0, "failures_details": []})
+		)
 
-		for testcase in root.findall('.//testcase'):
-			name_attr = testcase.attrib.get('name', '')
-			match = re.search(r'\[(.*?)\]', name_attr)
+		for testcase in root.findall(".//testcase"):
+			name_attr = testcase.attrib.get("name", "")
+			match = re.search(r"\[(.*?)\]", name_attr)
 			if not match:
 				error(f"No student ID found in testcase name: '{name_attr}'")
 				continue
 
 			content_in_brackets = match.group(1)
-			student_id = content_in_brackets.split('-')[0]
-			test_name = name_attr.split('[')[0]
+			student_id = content_in_brackets.split("-")[0]
+			test_name = name_attr.split("[")[0]
 
 			# 2. Populate the raw data structure.
 			student_data[student_id][test_name]["total_runs"] += 1
 
-			failure_node = testcase.find('failure') or testcase.find('error') or testcase.find('skipped')
+			failure_node = (
+				testcase.find("failure")
+				or testcase.find("error")
+				or testcase.find("skipped")
+			)
 			if failure_node is not None:
 				traceback = failure_node.text.strip() if failure_node.text else ""
-				important_lines = [line for line in traceback.split('\n') if line.strip().startswith('E ')]
+				important_lines = [
+					line
+					for line in traceback.split("\n")
+					if line.strip().startswith("E ")
+				]
 				details = "\n".join(important_lines) if important_lines else traceback
-				student_data[student_id][test_name]["failures_details"].append(FailureDetail(
-					message=failure_node.attrib.get('message', 'No message'),
-					details=details,
-				))
+				student_data[student_id][test_name]["failures_details"].append(
+					FailureDetail(
+						message=failure_node.attrib.get("message", "No message"),
+						details=details,
+					)
+				)
 
 		# 3. Assemble the final Pydantic models from the raw data.
 		final_reports = {}
@@ -150,16 +161,17 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 			per_test_results_list = []
 			for test_name, data in tests.items():
 				# Create the inner PerTestResult object.
-				per_test_results_list.append(PerTestResult(
-					test_name=test_name,
-					total_test=data["total_runs"],
-					failures_details=data["failures_details"]
-				))
+				per_test_results_list.append(
+					PerTestResult(
+						test_name=test_name,
+						total_test=data["total_runs"],
+						failures_details=data["failures_details"],
+					)
+				)
 
 			# Create the outer SummaryReport object. Pydantic handles the rest!
 			final_reports[sid] = SummaryReport(
-				student_id=sid,
-				per_test_results=per_test_results_list
+				student_id=sid, per_test_results=per_test_results_list
 			)
 		return final_reports
 
@@ -172,40 +184,57 @@ def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
 	"""Archives the summary reports to JSON or a detailed, per-test CSV file."""
 	rich.print(f"Archiving results to: [cyan]{archive_path}[/cyan]")
 
-	suffix = archive_path.suffix.lower().lstrip('.')
+	suffix = archive_path.suffix.lower().lstrip(".")
 
 	match suffix:
 		case "json":
-			json_data = {sid: report.model_dump(mode='json') for sid, report in result.items()}
-			with open(archive_path, 'w', encoding='utf-8') as f:
+			json_data = {
+				sid: report.model_dump(mode="json") for sid, report in result.items()
+			}
+			with open(archive_path, "w", encoding="utf-8") as f:
 				# We dump the already-serialized string data.
 				json.dump(json_data, f, indent=2)
 			rich.print(f"📈 Results archived to JSON: [cyan]{archive_path}[/cyan]")
 
 		case "csv":
 			# For CSV, we create a more detailed, granular report.
-			with open(archive_path, 'w', newline='', encoding='utf-8') as f:
+			with open(archive_path, "w", newline="", encoding="utf-8") as f:
 				writer = csv.writer(f)
 				# 1. Define the new, more detailed header.
-				writer.writerow([
-					"student_name", "student_id", "test_name", "status", "passed", "failed",
-					"total_runs", "pass_rate", "failure_messages"
-				])
+				writer.writerow(
+					[
+						"student_name",
+						"student_id",
+						"test_name",
+						"status",
+						"passed",
+						"failed",
+						"total_runs",
+						"pass_rate",
+						"failure_messages",
+					]
+				)
 				# 2. Loop through each student, and then through each of their test results.
 				for sid, report in sorted(result.items()):
 					for test_result in report.per_test_results:
-						failure_msgs = "; ".join([f.message for f in test_result.failures_details])
-						writer.writerow([
-							sid,
-							test_result.test_name,
-							test_result.status.value,
-							test_result.passed_count,
-							test_result.failures_count,
-							test_result.total_test,
-							f"{test_result.pass_rate:.2f}",
-							failure_msgs
-						])
-				rich.print(f"📊 Granular results archived to CSV: [cyan]{archive_path}[/cyan]")
+						failure_msgs = "; ".join(
+							[f.message for f in test_result.failures_details]
+						)
+						writer.writerow(
+							[
+								sid,
+								test_result.test_name,
+								test_result.status.value,
+								test_result.passed_count,
+								test_result.failures_count,
+								test_result.total_test,
+								f"{test_result.pass_rate:.2f}",
+								failure_msgs,
+							]
+						)
+				rich.print(
+					f"📊 Granular results archived to CSV: [cyan]{archive_path}[/cyan]"
+				)
 		case _:
 			error(f"Error: Unsupported archive format: '{suffix}'.")
 
@@ -220,7 +249,9 @@ def load_roster(roster_path: Path) -> Dict[str, str]:
 
 	roster_map = {}
 	try:
-		with open(roster_path, 'r', encoding='utf-8-sig') as f:  # 'utf-8-sig' handles BOM
+		with open(
+			roster_path, "r", encoding="utf-8-sig"
+		) as f:  # 'utf-8-sig' handles BOM
 			reader = csv.reader(f)
 			next(reader, None)
 			for row in reader:
@@ -228,7 +259,9 @@ def load_roster(roster_path: Path) -> Dict[str, str]:
 				student_id = row[2].strip()
 				if student_id:
 					roster_map[student_id] = student_name
-		info(f"✅ Roster loaded successfully with [bold]{len(roster_map)}[/bold] entries.")
+		info(
+			f"✅ Roster loaded successfully with [bold]{len(roster_map)}[/bold] entries."
+		)
 		return roster_map
 	except FileNotFoundError:
 		error(f"[bold red]Error: Roster file not found at '{roster_path}'[/bold red]")
@@ -258,7 +291,9 @@ def apply_curve(
 
 		if method == CurveMethod.LINEAR:
 			# 线性缩放: y = (x/100) * (max - min) + min
-			curved_score = (original_rate / 100.0) * (upper_bound - lower_bound) + lower_bound
+			curved_score = (original_rate / 100.0) * (
+				upper_bound - lower_bound
+			) + lower_bound
 
 		elif method == CurveMethod.SQRT:
 			# 开方曲线: y = sqrt(x) * 10
@@ -279,26 +314,45 @@ def apply_curve(
 
 def generate_summary(
 	paths: List[Path] = typer.Argument(
-		..., help="One or more summary_report.xml files or directories containing them.", exists=True
+		...,
+		help="One or more summary_report.xml files or directories containing them.",
+		exists=True,
 	),
 	roster: Path = typer.Option(
-		None, "--roster", "-r",
+		None,
+		"--roster",
+		"-r",
 		help="Path to a CSV roster file (student_id,student_name) to look up names.",
-		exists=True, dir_okay=False, readable=True
+		exists=True,
+		dir_okay=False,
+		readable=True,
 	),
 	curve_method: CurveMethod = typer.Option(
-		CurveMethod.LINEAR, "--curve", "-c", help="选择要应用的曲线调整方法。", case_sensitive=False
+		CurveMethod.LINEAR,
+		"--curve",
+		"-c",
+		help="选择要应用的曲线调整方法。",
+		case_sensitive=False,
 	),
 	curve_range: Tuple[int, int] = typer.Option(
 		(60, 100), "--range", help="Curve adjustment range, in the form 'min-max'."
 	),
 	archive_dir: Path = typer.Option(
-		None, "--archive", "-a", help="Archive the combined results to the specified dir.", dir_okay=True,
-		file_okay=False, writable=True
+		None,
+		"--archive",
+		"-a",
+		help="Archive the combined results to the specified dir.",
+		dir_okay=True,
+		file_okay=False,
+		writable=True,
 	),
 	archive_format: str = typer.Option(
-		"csv", "--format", "-f", help="Archive format: 'json' or 'csv'.", case_sensitive=False
-	)
+		"csv",
+		"--format",
+		"-f",
+		help="Archive format: 'json' or 'csv'.",
+		case_sensitive=False,
+	),
 ):
 	"""
 	Parses one or more pytest XML reports, displays a summary, and optionally archives the results.
@@ -313,7 +367,9 @@ def generate_summary(
 			xml_files_to_parse.append(f)
 
 	if not xml_files_to_parse:
-		error("[bold red]Error: No 'summary_report.xml' files found in the specified paths.[/bold red]")
+		error(
+			"[bold red]Error: No 'summary_report.xml' files found in the specified paths.[/bold red]"
+		)
 		return
 
 	# 2. Parse all files and merge them into a single master dictionary.
@@ -323,23 +379,29 @@ def generate_summary(
 
 		missing_ids = set(roster_map.keys()) - set(result.keys())
 
-		example_report: SummaryReport = result.values().__iter__().__next__() if result else None
+		example_report: SummaryReport = (
+			result.values().__iter__().__next__() if result else None
+		)
 
 		if missing_ids:
 			for sid in missing_ids:
 				test_results = [
-					PerTestResult(test_name=example.test_name, total_test=example.total_test, failures_details=[
-						FailureDetail(
-							message="No test results found in the report.",
-							details="No test results found in the report."
-						)
-					])
+					PerTestResult(
+						test_name=example.test_name,
+						total_test=example.total_test,
+						failures_details=[
+							FailureDetail(
+								message="No test results found in the report.",
+								details="No test results found in the report.",
+							)
+						],
+					)
 					for example in example_report.per_test_results
 				]
 				result[sid] = SummaryReport(
 					student_id=sid,
 					student_name=roster_map[sid],
-					per_test_results=test_results
+					per_test_results=test_results,
 				)
 
 		if curve_method != CurveMethod.NONE:
@@ -350,7 +412,9 @@ def generate_summary(
 
 		summary_table = Table(title="🏆 Pytest Grading Summary 🏆")
 		summary_table.add_column("Student Name", style="white")  # New Column
-		summary_table.add_column("Student ID", justify="right", style="cyan", no_wrap=True)
+		summary_table.add_column(
+			"Student ID", justify="right", style="cyan", no_wrap=True
+		)
 		summary_table.add_column("Status", style="magenta")
 		summary_table.add_column("Passed", justify="right")
 		summary_table.add_column("Failed", justify="right")
@@ -370,12 +434,13 @@ def generate_summary(
 				str(report.failed_count),  # Use the computed field
 				str(report.total_tests),  # Use the computed field
 				f"{report.pass_rate:.2f}%",  # Use the computed field
-				f"{report.final_grade:.2f}%"  # New Final Grade Column
+				f"{report.final_grade:.2f}%",  # New Final Grade Column
 			)
 
-
 		# --- Display Failure Panels ---
-		failed_students = {sid: r for sid, r in result.items() if r.status == TestStatus.FAILED}
+		failed_students = {
+			sid: r for sid, r in result.items() if r.status == TestStatus.FAILED
+		}
 		if failed_students:
 			rich.print("\n\n--- [bold red]Detailed Failure Reports[/bold red] ---")
 			for sid, report in sorted(failed_students.items()):
@@ -385,8 +450,15 @@ def generate_summary(
 					if test_result.status == TestStatus.FAILED:
 						panel_content += f"[bold yellow]Failed Test:[/] [bold]{test_result.test_name}[/bold]\n"
 						for failure in test_result.failures_details:
-							panel_content += f"[dim]Message: {failure.message}[/dim]\n\n"
-							syntax = Syntax(failure.details, "python", theme="solarized-dark", line_numbers=True)
+							panel_content += (
+								f"[dim]Message: {failure.message}[/dim]\n\n"
+							)
+							syntax = Syntax(
+								failure.details,
+								"python",
+								theme="solarized-dark",
+								line_numbers=True,
+							)
 
 							temp_console = Console(record=True, width=120)
 
@@ -399,8 +471,7 @@ def generate_summary(
 					panel_content.strip(),
 					title=f"Failure Report for [bold magenta]{report.student_id}[/bold magenta]",
 					border_style="red",
-					title_align="left"
-
+					title_align="left",
 				)
 
 				rich.print(panel)

@@ -25,12 +25,17 @@ def run_tests(
 		..., help="一个或多个学生代码所在的目录路径。", exists=True, file_okay=False
 	),
 	tests_dir: Path = typer.Option(
-		..., "--tests-dir", "-t", help="包含 pytest 测试文件的目录。", exists=True, file_okay=False
+		...,
+		"--tests-dir",
+		"-t",
+		help="包含 pytest 测试文件的目录。",
+		exists=True,
+		file_okay=False,
 	),
 	output_dir: Path = typer.Option(
 		"output/", "--output-dir", "-o", help="保存 JUnit XML 测试结果的目录。"
 	),
-	timeout: int = typer.Option(10, help="每个测试用例的超时时间（秒）。")
+	timeout: int = typer.Option(10, help="每个测试用例的超时时间（秒）。"),
 ):
 	student_files = group_files_by_sid(submissions_paths)
 
@@ -50,7 +55,7 @@ def run_tests(
 		str(tests_dir),
 		f"--junitxml={summary_report_path}",
 		"-v",
-		f"--timeout={timeout}"
+		f"--timeout={timeout}",
 	]
 
 	data_plugin = GraderDataPlugin(student_files)
