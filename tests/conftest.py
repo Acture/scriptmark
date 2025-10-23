@@ -4,7 +4,7 @@ import pytest
 import importlib.util
 import sys
 from pathlib import Path
-from typing import List
+from typing import Any, Callable, List
 
 
 def pytest_generate_tests(metafunc):
@@ -96,3 +96,69 @@ def student_submission(request):
 	"""
 	student_data = request.param
 	return Submission(sid=student_data['sid'], file_paths=student_data['files'])
+
+
+@pytest.fixture(scope='function')
+def get_module(student_submission: Submission) -> Callable:
+	"""
+	"模块工厂夹具" (Module Factory Fixture)
+
+	这个夹具返回一个内部辅助函数 (`_getter`)。
+	测试用例可以调用 `_getter(file_ends_with: str)`
+	来动态加载并返回任何所需的模块。
+	"""
+
+	def _getter(file_ends_with: str) -> Any:
+		"""
+		这是实际返回给测试用例的辅助函数。
+		它使用 Submission 管理器来安全地加载模块。
+		"""
+		# Submission.get_module 已经包含了所有错误处理
+		# (例如：未找到文件, 找到多个文件, 导入失败)
+		return student_submission.get_module(ends_with=file_ends_with)
+
+	# Fixture 返回这个 _getter 函数
+	return _getter
+
+
+@pytest.fixture(scope='function')
+def get_function(get_module: Callable) -> Callable:
+	"""
+	"函数工厂夹具" (Function Factory Fixture)
+
+	这个夹具返回一个内部辅助函数 (`_getter`)。
+	测试用例可以调用 `_getter(func_name: str, file_ends_with: str)`
+	来动态地从任何文件中加载任何函数。
+
+	这个夹具依赖于上面的 `get_module` 工厂。
+	"""
+
+	def _getter(func_name: str, file_ends_with: str) -> Callable:
+		"""
+		这是实际返回给测试用例的辅助函数。
+
+		Args:
+			func_name: 要查找的函数名 (例如 "calculate_sum")
+			file_ends_with: 要加载的文件后缀 (例如 "Lab3_task1.py")
+		"""
+
+		# 步骤 1: 使用 get_module 工厂获取正确的模块
+		# get_module 是从同名夹具注入的 _getter 函数
+		module = get_module(file_ends_with)
+
+		# 步骤 2: 从加载的模块中安全地获取函数
+		if not hasattr(module, func_name):
+			pytest.skip(f"Function '{func_name}' not found in module '{file_ends_with}'.")
+
+		func = getattr(module, func_name)
+
+		if not callable(func):
+			pytest.fail(
+				f"Found '{func_name}' in '{file_ends_with}', but it is not a function.",
+				pytrace=False
+			)
+
+		return func
+
+	# Fixture 返回这个 _getter 函数
+	return _getter

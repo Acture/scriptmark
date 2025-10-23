@@ -124,6 +124,7 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 			name_attr = testcase.attrib.get('name', '')
 			match = re.search(r'\[(.*?)\]', name_attr)
 			if not match:
+				error(f"No student ID found in testcase name: '{name_attr}'")
 				continue
 
 			content_in_brackets = match.group(1)
@@ -169,38 +170,44 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 
 def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
 	"""Archives the summary reports to JSON or a detailed, per-test CSV file."""
+	rich.print(f"Archiving results to: [cyan]{archive_path}[/cyan]")
 
-	if archive_path.suffix == ".json":
-		json_data = {sid: report.model_dump(mode='json') for sid, report in result.items()}
-		with open(archive_path, 'w', encoding='utf-8') as f:
-			# We dump the already-serialized string data.
-			json.dump(json_data, f, indent=2)
-		rich.print(f"📈 Results archived to JSON: [cyan]{archive_path}[/cyan]")
+	suffix = archive_path.suffix.lower().lstrip('.')
 
-	elif archive_path.suffix == "csv":
-		# For CSV, we create a more detailed, granular report.
-		with open(archive_path, 'w', newline='', encoding='utf-8') as f:
-			writer = csv.writer(f)
-			# 1. Define the new, more detailed header.
-			writer.writerow([
-				"student_name", "student_id", "test_name", "status", "passed", "failed",
-				"total_runs", "pass_rate", "failure_messages"
-			])
-			# 2. Loop through each student, and then through each of their test results.
-			for sid, report in sorted(result.items()):
-				for test_result in report.per_test_results:
-					failure_msgs = "; ".join([f.message for f in test_result.failures_details])
-					writer.writerow([
-						sid,
-						test_result.test_name,
-						test_result.status.value,
-						test_result.passed_count,
-						test_result.failures_count,
-						test_result.total_test,
-						f"{test_result.pass_rate:.2f}",
-						failure_msgs
-					])
-		rich.print(f"📊 Granular results archived to CSV: [cyan]{archive_path}[/cyan]")
+	match suffix:
+		case "json":
+			json_data = {sid: report.model_dump(mode='json') for sid, report in result.items()}
+			with open(archive_path, 'w', encoding='utf-8') as f:
+				# We dump the already-serialized string data.
+				json.dump(json_data, f, indent=2)
+			rich.print(f"📈 Results archived to JSON: [cyan]{archive_path}[/cyan]")
+
+		case "csv":
+			# For CSV, we create a more detailed, granular report.
+			with open(archive_path, 'w', newline='', encoding='utf-8') as f:
+				writer = csv.writer(f)
+				# 1. Define the new, more detailed header.
+				writer.writerow([
+					"student_name", "student_id", "test_name", "status", "passed", "failed",
+					"total_runs", "pass_rate", "failure_messages"
+				])
+				# 2. Loop through each student, and then through each of their test results.
+				for sid, report in sorted(result.items()):
+					for test_result in report.per_test_results:
+						failure_msgs = "; ".join([f.message for f in test_result.failures_details])
+						writer.writerow([
+							sid,
+							test_result.test_name,
+							test_result.status.value,
+							test_result.passed_count,
+							test_result.failures_count,
+							test_result.total_test,
+							f"{test_result.pass_rate:.2f}",
+							failure_msgs
+						])
+				rich.print(f"📊 Granular results archived to CSV: [cyan]{archive_path}[/cyan]")
+		case _:
+			error(f"Error: Unsupported archive format: '{suffix}'.")
 
 
 def load_roster(roster_path: Path) -> Dict[str, str]:
@@ -286,7 +293,8 @@ def generate_summary(
 		(60, 100), "--range", help="Curve adjustment range, in the form 'min-max'."
 	),
 	archive_dir: Path = typer.Option(
-		None, "--archive", "-a", help="Archive the combined results to the specified dir."
+		None, "--archive", "-a", help="Archive the combined results to the specified dir.", dir_okay=True,
+		file_okay=False, writable=True
 	),
 	archive_format: str = typer.Option(
 		"csv", "--format", "-f", help="Archive format: 'json' or 'csv'.", case_sensitive=False
