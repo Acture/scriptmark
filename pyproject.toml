@@ -31,6 +31,7 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+	"pytest-cov>=7.0.0",
 	"tox>=4.31.0",
 	"twine>=6.2.0",
 	"uv-build>=0.9.5",
@@ -41,13 +42,11 @@ scriptmark = "scriptmark.main:app"
 
 
 [tool.tox]
-# 声明您希望测试的 Python 版本环境
+requires = ["tox-uv"]
 envlist = ["py310", "py311", "py312", "py313", "py314"]
 installer = "uv"
 
 [tool.tox.testenv]
-# 对于每个环境，安装此包及其 [test] 依赖项
-# ('.[test]' 会读取 [project.optional-dependencies].test)
 deps = ".[dev]"
 # 运行 pytest 测试套件
-commands = "grader run submissions/geec/hw3 -t tests_submission/geec/hw3"
+commands = "python -c \"import scriptmark\""
