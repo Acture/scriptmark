@@ -11,7 +11,7 @@ def pytest_generate_tests(metafunc):
 	"""
 	动态生成测试。现在从 pytest 的 config 对象中直接读取数据。
 	"""
-	if "student_submission" in metafunc.fixturenames:
+	if "student_submission"  in metafunc.fixturenames:
 		# --- 核心改动在这里 ---
 		# `metafunc.config` 就是上面 `pytest_configure` 操作过的 config 对象
 		if not hasattr(metafunc.config, "student_data_map"):
