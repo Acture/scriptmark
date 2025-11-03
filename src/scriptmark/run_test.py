@@ -32,8 +32,8 @@ def run_tests(
 		exists=True,
 		file_okay=False,
 	),
-	output_dir: Path = typer.Option(
-		"output/", "--output-dir", "-o", help="保存 JUnit XML 测试结果的目录。"
+	output_file: Path = typer.Option(
+		"output/summary_report.xml", "--output", "-o", help="测试报告的路径与名字。"
 	),
 	timeout: int = typer.Option(10, help="每个测试用例的超时时间（秒）。"),
 ):
@@ -41,19 +41,21 @@ def run_tests(
 
 	info("Found {} student submissions.".format(len(student_files)))
 
-	# --- 2. Create results directory ---
-	output_dir.mkdir(exist_ok=True)
-	info(f"Test reports will be saved in '{output_dir}'.")
 
-	# 3. Define a single, unified XML report path
-	summary_report_path = output_dir / "summary_report.xml"
-	output_dir.mkdir(exist_ok=True)
+	if output_file.suffix != ".xml":
+		warning("测试报告文件名必须以 .xml 结尾。")
+		output_file = output_file.with_suffix(".xml")
+
+	# --- 2. Create results directory ---
+	output_file.parent.mkdir(exist_ok=True)
+	info(f"Test reports will be saved in '{output_file}'.")
+
 
 	# 4. Run pytest ONCE for all students
 	info("Starting a single pytest session for all students...")
 	pytest_args = [
 		str(tests_dir),
-		f"--junitxml={summary_report_path}",
+		f"--junitxml={output_file}",
 		"-v",
 		f"--timeout={timeout}",
 	]
@@ -65,7 +67,7 @@ def run_tests(
 	exit_code = pytest.main(pytest_args, plugins=[data_plugin])
 
 	info("Pytest session finished.")
-	info(f"Unified report saved to '[cyan]{summary_report_path}[/cyan]'.")
+	info(f"Unified report saved to '[cyan]{output_file}[/cyan]'.")
 
 	# 你可以根据退出码判断测试是否全部通过
 	if exit_code == pytest.ExitCode.OK:

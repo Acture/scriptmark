@@ -40,6 +40,8 @@ class Submission:
 		self.files = [Path(p) for p in file_paths]
 		self._loaded_modules = {}  # Cache to avoid re-importing
 
+
+
 	def get_module(self, ends_with: str):
 		"""
 		Finds, imports, and returns a module from a file ending with a specific suffix.
@@ -88,6 +90,7 @@ class Submission:
 
 
 
+
 @pytest.fixture
 def student_submission(request, record_property):  # <-- 1. Add 'record_property' here
 	"""
@@ -102,8 +105,11 @@ def student_submission(request, record_property):  # <-- 1. Add 'record_property
 	# The rest of your function is perfect
 	return Submission(sid=student_id, file_paths=student_data["files"])
 
+def fake_input(*args, **kwargs):
+	return 0
+
 @pytest.fixture(scope="function")
-def get_module(student_submission: Submission) -> Callable:
+def get_module(student_submission: Submission, monkeypatch) -> Callable:
 	"""
 	"模块工厂夹具" (Module Factory Fixture)
 
@@ -117,13 +123,13 @@ def get_module(student_submission: Submission) -> Callable:
 		这是实际返回给测试用例的辅助函数。
 		它使用 Submission 管理器来安全地加载模块。
 		"""
+		monkeypatch.setattr('builtins.input', fake_input)
 		# Submission.get_module 已经包含了所有错误处理
 		# (例如：未找到文件, 找到多个文件, 导入失败)
 		return student_submission.get_module(ends_with=file_ends_with)
 
 	# Fixture 返回这个 _getter 函数
 	return _getter
-
 
 @pytest.fixture(scope="function")
 def get_function(get_module: Callable) -> Callable:

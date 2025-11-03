@@ -304,14 +304,14 @@ def apply_curve(
 				curved_score = lower_bound
 
 		# 确保分数不会超过最大值或低于最小值
-		report.final_grade = max(lower_bound, min(upper_bound, curved_score))
+		report.final_grade = max(lower_bound, min(upper_bound, curved_score)) if report.status != TestStatus.MISSING else 0.0
 	return results
 
 
 def generate_summary(
-	paths: List[Path] = typer.Argument(
+	file_path: Path = typer.Argument(
 		...,
-		help="One or more summary_report.xml files or directories containing them.",
+		help="One .xml file to interpret",
 		exists=True,
 	),
 	roster: Path = typer.Option(
@@ -324,7 +324,7 @@ def generate_summary(
 		readable=True,
 	),
 	curve_method: CurveMethod = typer.Option(
-		CurveMethod.LINEAR,
+		CurveMethod.SQRT,
 		"--curve",
 		"-c",
 		help="选择要应用的曲线调整方法。",
@@ -356,117 +356,103 @@ def generate_summary(
 
 	roster_map = load_roster(roster)
 
-	# 1. Find all XML files first.
-	xml_files_to_parse = []
-	for path in paths:
-		for f in path.glob("*.xml"):
-			xml_files_to_parse.append(f)
+	info(f"Parsing report: [dim]{file_path}[/dim]")
+	result = parse_unified_xml(file_path)
 
-	if not xml_files_to_parse:
-		error(
-			"[bold red]Error: No 'summary_report.xml' files found in the specified paths.[/bold red]"
-		)
-		return
+	missing_ids = set(roster_map.keys()) - set(result.keys())
 
-	# 2. Parse all files and merge them into a single master dictionary.
-	for xml_file in xml_files_to_parse:
-		info(f"Parsing report: [dim]{xml_file}[/dim]")
-		result = parse_unified_xml(xml_file)
+	example_report: SummaryReport = (
+		result.values().__iter__().__next__() if result else None
+	)
 
-		missing_ids = set(roster_map.keys()) - set(result.keys())
-
-		example_report: SummaryReport = (
-			result.values().__iter__().__next__() if result else None
-		)
-
-		if missing_ids:
-			for sid in missing_ids:
-				test_results = [
-					PerTestResult(
-						test_name=example.test_name,
-						total_test=0,  # <-- 修复 1: 他们跑了 0 次
-						failures_details=[],  # <-- 修复 2: 他们没有失败
-					)
-					for example in example_report.per_test_results
-				]
-				result[sid] = SummaryReport(
-					student_id=sid,
-					student_name=roster_map[sid],
-					per_test_results=test_results,
+	if missing_ids:
+		for sid in missing_ids:
+			test_results = [
+				PerTestResult(
+					test_name=example.test_name,
+					total_test=0,  # <-- 修复 1: 他们跑了 0 次
+					failures_details=[],  # <-- 修复 2: 他们没有失败
 				)
-
-		if curve_method != CurveMethod.NONE:
-			result = apply_curve(result, curve_method, curve_range)
-		else:
-			for report in result.values():
-				report.final_grade = report.pass_rate
-
-		summary_table = Table(title="🏆 Pytest Grading Summary 🏆")
-		summary_table.add_column("Student Name", style="white")  # New Column
-		summary_table.add_column(
-			"Student ID", justify="right", style="cyan", no_wrap=True
-		)
-		summary_table.add_column("Status", style="magenta")
-		summary_table.add_column("Passed", justify="right")
-		summary_table.add_column("Failed", justify="right")
-		summary_table.add_column("Total", justify="right")
-		summary_table.add_column("Pass Rate", justify="right")
-		summary_table.add_column("Final Grade", justify="right")  # New Column
-
-		for student_id, report in sorted(result.items()):
-			status_color = "green" if report.status == TestStatus.PASSED else "red"
-			report.student_name = roster_map.get(student_id, "N/A")
-
-			summary_table.add_row(
-				report.student_name,
-				report.student_id,
-				f"[{status_color}]{report.status.value}[/{status_color}]",
-				str(report.passed_count),  # Use the computed field
-				str(report.failed_count),  # Use the computed field
-				str(report.total_tests),  # Use the computed field
-				f"{report.pass_rate:.2f}%",  # Use the computed field
-				f"{report.final_grade:.2f}%",  # New Final Grade Column
+				for example in example_report.per_test_results
+			]
+			result[sid] = SummaryReport(
+				student_id=sid,
+				student_name=roster_map[sid],
+				per_test_results=test_results,
 			)
 
-		# --- Display Failure Panels ---
-		failed_students = {
-			sid: r for sid, r in result.items() if r.status == TestStatus.FAILED
-		}
-		if failed_students:
-			rich.print("\n\n--- [bold red]Detailed Failure Reports[/bold red] ---")
-			for sid, report in sorted(failed_students.items()):
-				# Loop through the per_test_results to show failures
-				panel_content = ""
-				for test_result in report.per_test_results:
-					if test_result.status == TestStatus.FAILED:
-						panel_content += f"[bold yellow]Failed Test:[/] [bold]{test_result.test_name}[/bold]\n"
-						for failure in test_result.failures_details:
-							panel_content += (
-								f"[dim]Message: {failure.message}[/dim]\n\n"
-							)
-							syntax = Syntax(
-								failure.details,
-								"python",
-								theme="solarized-dark",
-								line_numbers=True,
-							)
+	if curve_method != CurveMethod.NONE:
+		result = apply_curve(result, curve_method, curve_range)
+	else:
+		for report in result.values():
+			report.final_grade = report.pass_rate
 
-							temp_console = Console(record=True, width=120)
+	summary_table = Table(title="🏆 Pytest Grading Summary 🏆")
+	summary_table.add_column("Student Name", style="white")  # New Column
+	summary_table.add_column(
+		"Student ID", justify="right", style="cyan", no_wrap=True
+	)
+	summary_table.add_column("Status", style="magenta")
+	summary_table.add_column("Passed", justify="right")
+	summary_table.add_column("Failed", justify="right")
+	summary_table.add_column("Total", justify="right")
+	summary_table.add_column("Pass Rate", justify="right")
+	summary_table.add_column("Final Grade", justify="right")  # New Column
 
-							temp_console.print(syntax)
+	for student_id, report in sorted(result.items()):
+		status_color = "green" if report.status == TestStatus.PASSED else "red"
+		report.student_name = roster_map.get(student_id, "N/A")
 
-							rendered_syntax = temp_console.export_text()
+		summary_table.add_row(
+			report.student_name,
+			report.student_id,
+			f"[{status_color}]{report.status.value}[/{status_color}]",
+			str(report.passed_count),  # Use the computed field
+			str(report.failed_count),  # Use the computed field
+			str(report.total_tests),  # Use the computed field
+			f"{report.pass_rate:.2f}%",  # Use the computed field
+			f"{report.final_grade:.2f}%",  # New Final Grade Column
+		)
 
-							panel_content += rendered_syntax
-				panel = Panel(
-					panel_content.strip(),
-					title=f"Failure Report for [bold magenta]{report.student_id}[/bold magenta]",
-					border_style="red",
-					title_align="left",
-				)
+	# --- Display Failure Panels ---
+	failed_students = {
+		sid: r for sid, r in result.items() if r.status == TestStatus.FAILED
+	}
+	if failed_students:
+		rich.print("\n\n--- [bold red]Detailed Failure Reports[/bold red] ---")
+		for sid, report in sorted(failed_students.items()):
+			# Loop through the per_test_results to show failures
+			panel_content = ""
+			for test_result in report.per_test_results:
+				if test_result.status == TestStatus.FAILED:
+					panel_content += f"[bold yellow]Failed Test:[/] [bold]{test_result.test_name}[/bold]\n"
+					for failure in test_result.failures_details:
+						panel_content += (
+							f"[dim]Message: {failure.message}[/dim]\n\n"
+						)
+						syntax = Syntax(
+							failure.details,
+							"python",
+							theme="solarized-dark",
+							line_numbers=True,
+						)
 
-				rich.print(panel)
-		rich.print(summary_table)
-		if archive_dir:
-			archive_path = archive_dir / f"archive_{xml_file.stem}.{archive_format}"
-			archive_result(archive_path, result)
+						temp_console = Console(record=True, width=120)
+
+						temp_console.print(syntax)
+
+						rendered_syntax = temp_console.export_text()
+
+						panel_content += rendered_syntax
+			panel = Panel(
+				panel_content.strip(),
+				title=f"Failure Report for [bold magenta]{report.student_id}[/bold magenta]",
+				border_style="red",
+				title_align="left",
+			)
+
+			rich.print(panel)
+	rich.print(summary_table)
+	if archive_dir:
+		archive_path = archive_dir / f"archive_{file_path.stem}.{archive_format}"
+		archive_result(archive_path, result)
