@@ -87,15 +87,20 @@ class Submission:
 		return module
 
 
+
 @pytest.fixture
-def student_submission(request):
+def student_submission(request, record_property):  # <-- 1. Add 'record_property' here
 	"""
 	This fixture is now a factory. It creates and returns a Submission object
 	for each student, which the tests can then use to request modules.
 	"""
 	student_data = request.param
-	return Submission(sid=student_data["sid"], file_paths=student_data["files"])
+	student_id = student_data["sid"]  # <-- 2. Get the student ID
 
+	record_property("student_id", student_id)
+
+	# The rest of your function is perfect
+	return Submission(sid=student_id, file_paths=student_data["files"])
 
 @pytest.fixture(scope="function")
 def get_module(student_submission: Submission) -> Callable:
