@@ -52,14 +52,14 @@ class PerTestResult(BaseModel):
 	@computed_field
 	@property
 	def passed_count(self) -> int:
-		return self.total_test - self.failures_count
+		return max(self.total_test - self.failures_count, 0)
 
 	@computed_field
 	@property
 	def status(self) -> TestStatus:
 		if self.total_test == 0:
 			return TestStatus.MISSING  # 如果没有测试运行，则为 MISSING
-		return TestStatus.FAILED if self.failures_count > 0 else TestStatus.PASSED
+		return TestStatus.PASSED if self.failures_count == 0 and self.total_test > 0 else TestStatus.FAILED
 
 	@computed_field
 	@property
@@ -113,46 +113,34 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 	"""
 	Parses the unified XML report and constructs a dictionary of SummaryReport Pydantic models.
 	"""
-	try:
-		tree = ET.parse(file_path)
-		root = tree.getroot()
+	tree = ET.parse(file_path)
+	root = tree.getroot()
 
-		# 1. Use a nested defaultdict to gather the raw "source of truth" data.
-		# Structure: student_id -> test_name -> { "total_runs": int, "failures_details": list }
-		student_data = defaultdict(
-			lambda: defaultdict(lambda: {"total_runs": 0, "failures_details": []})
-		)
+	# 1. Use a nested defaultdict to gather the raw "source of truth" data.
+	# Structure: student_id -> test_name -> { "total_runs": int, "failures_details": list }
+	student_data = defaultdict(
+		lambda: defaultdict(lambda: {"total_runs": 0, "failures_details": []})
+	)
 
-		for testcase in root.findall(".//testcase"):
-			name_attr = testcase.attrib.get("name", "")
+	for node in root.iter(tag="testcase"):
 
-			student_id = None
+		name_attr = node.attrib.get("name", "")
+		property_node = node.find(f"./properties/property[@name='student_id']")
+		student_id = property_node.attrib.get("value") if property_node is not None else None
 
-			property_node = testcase.find(f"./properties/property[@name='student_id']")
-			if property_node is not None:
-				student_id = property_node.attrib.get("value")
+		if not student_id:
+			error(f"Could not determine Student ID for testcase: '{name_attr}'. Skipping.")
+			raise Exception("Could not determine Student ID for testcase.")
 
-			if not student_id:
-				match = re.search(r"\[(.*?)\]", name_attr)
-				if match:
-					content_in_brackets = match.group(1)
-					student_id = content_in_brackets.split("-")[0]
+		test_name = name_attr.split("[")[0]
 
-			if not student_id:
-				error(f"Could not determine Student ID for testcase: '{name_attr}'. Skipping.")
-				continue
+		# 2. Populate the raw data structure.
+		student_data[student_id][test_name]["total_runs"] += 1
 
-			test_name = name_attr.split("[")[0]
+		failure_nodes = [node for node in node.iter() if node.tag == "failure" or node.tag == "error" or node.tag == "skipped"]
 
-			# 2. Populate the raw data structure.
-			student_data[student_id][test_name]["total_runs"] += 1
-
-			failure_node = (
-				testcase.find("failure")
-				or testcase.find("error")
-				or testcase.find("skipped")
-			)
-			if failure_node is not None:
+		if failure_nodes is not None:
+			for failure_node in failure_nodes:
 				traceback = failure_node.text.strip() if failure_node.text else ""
 				important_lines = [
 					line
@@ -167,29 +155,25 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 					)
 				)
 
-		# 3. Assemble the final Pydantic models from the raw data.
-		final_reports = {}
-		for sid, tests in student_data.items():
-			per_test_results_list = []
-			for test_name, data in tests.items():
-				# Create the inner PerTestResult object.
-				per_test_results_list.append(
-					PerTestResult(
-						test_name=test_name,
-						total_test=data["total_runs"],
-						failures_details=data["failures_details"],
-					)
+	# 3. Assemble the final Pydantic models from the raw data.
+	final_reports = {}
+	for sid, tests in student_data.items():
+		per_test_results_list = []
+		for test_name, data in tests.items():
+			# Create the inner PerTestResult object.
+			per_test_results_list.append(
+				PerTestResult(
+					test_name=test_name,
+					total_test=data["total_runs"],
+					failures_details=data["failures_details"],
 				)
-
-			# Create the outer SummaryReport object. Pydantic handles the rest!
-			final_reports[sid] = SummaryReport(
-				student_id=sid, per_test_results=per_test_results_list
 			)
-		return final_reports
 
-	except ET.ParseError as e:
-		error(f"Error: Could not parse XML file '{file_path}'. Reason: {e}")
-		return {}
+		# Create the outer SummaryReport object. Pydantic handles the rest!
+		final_reports[sid] = SummaryReport(
+			student_id=sid, per_test_results=per_test_results_list
+		)
+	return final_reports
 
 
 def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
@@ -304,7 +288,7 @@ def apply_curve(
 		if method == CurveMethod.LINEAR:
 			# 线性缩放: y = (x/100) * (max - min) + min
 			curved_score = (original_rate / 100.0) * (
-                upper_bound - lower_bound
+				upper_bound - lower_bound
 			) + lower_bound
 
 		elif method == CurveMethod.SQRT:
