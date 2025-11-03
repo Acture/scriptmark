@@ -97,6 +97,8 @@ class SummaryReport(BaseModel):
 	@computed_field
 	@property
 	def status(self) -> TestStatus:
+		if self.total_tests == 0:  # <-- 新增这行
+			return TestStatus.MISSING  # <-- 新增这行
 		return TestStatus.FAILED if self.failed_count > 0 else TestStatus.PASSED
 
 	@computed_field
@@ -292,7 +294,7 @@ def apply_curve(
 		if method == CurveMethod.LINEAR:
 			# 线性缩放: y = (x/100) * (max - min) + min
 			curved_score = (original_rate / 100.0) * (
-				upper_bound - lower_bound
+                upper_bound - lower_bound
 			) + lower_bound
 
 		elif method == CurveMethod.SQRT:
@@ -388,13 +390,8 @@ def generate_summary(
 				test_results = [
 					PerTestResult(
 						test_name=example.test_name,
-						total_test=example.total_test,
-						failures_details=[
-							FailureDetail(
-								message="No test results found in the report.",
-								details="No test results found in the report.",
-							)
-						],
+						total_test=0,  # <-- 修复 1: 他们跑了 0 次
+						failures_details=[],  # <-- 修复 2: 他们没有失败
 					)
 					for example in example_report.per_test_results
 				]
