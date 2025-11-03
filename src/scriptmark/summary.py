@@ -125,13 +125,23 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 
 		for testcase in root.findall(".//testcase"):
 			name_attr = testcase.attrib.get("name", "")
-			match = re.search(r"\[(.*?)\]", name_attr)
-			if not match:
-				error(f"No student ID found in testcase name: '{name_attr}'")
+
+			student_id = None
+
+			property_node = testcase.find(f"./properties/property[@name='student_id']")
+			if property_node is not None:
+				student_id = property_node.attrib.get("value")
+
+			if not student_id:
+				match = re.search(r"\[(.*?)\]", name_attr)
+				if match:
+					content_in_brackets = match.group(1)
+					student_id = content_in_brackets.split("-")[0]
+
+			if not student_id:
+				error(f"Could not determine Student ID for testcase: '{name_attr}'. Skipping.")
 				continue
 
-			content_in_brackets = match.group(1)
-			student_id = content_in_brackets.split("-")[0]
 			test_name = name_attr.split("[")[0]
 
 			# 2. Populate the raw data structure.
