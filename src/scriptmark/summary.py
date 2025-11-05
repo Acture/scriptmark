@@ -189,7 +189,8 @@ def archive_result(archive_path: Path, result: Dict[str, SummaryReport]):
 			}
 			with open(archive_path, "w", encoding="utf-8") as f:
 				# We dump the already-serialized string data.
-				json.dump(json_data, f, indent=2)
+				json.dump(json_data, f, indent=2, ensure_ascii=False)
+				f.write("\n")
 			rich.print(f"📈 Results archived to JSON: [cyan]{archive_path}[/cyan]")
 
 		case "csv":
