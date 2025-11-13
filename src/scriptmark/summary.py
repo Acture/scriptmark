@@ -6,7 +6,6 @@ from collections import defaultdict
 from enum import Enum, StrEnum, auto
 from logging import error, info
 from pathlib import Path
-import re
 from typing import Dict, List, Optional, Tuple
 
 import rich
@@ -125,7 +124,7 @@ def parse_unified_xml(file_path: Path) -> Dict[str, SummaryReport]:
 	for node in root.iter(tag="testcase"):
 
 		name_attr = node.attrib.get("name", "")
-		property_node = node.find(f"./properties/property[@name='student_id']")
+		property_node = node.find("./properties/property[@name='student_id']")
 		student_id = property_node.attrib.get("value") if property_node is not None else None
 
 		if not student_id:
