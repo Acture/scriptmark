@@ -1,5 +1,3 @@
-import pytest
-from typing import List, Tuple, Set
 
 # --- 测试配置 ---
 FILE_NAME = "chichen.py"

@@ -1,5 +1,3 @@
-import pytest
-from typing import Optional
 
 # --- 测试配置 ---
 FILE_NAME = "diamond.py"

@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from scriptmark.summary import parse_xml
+from scriptmark.summary import parse_unified_xml
 
 
 def test_parse(test_xml: Path):
-	t = parse_xml(test_xml)
+	parse_unified_xml(test_xml)

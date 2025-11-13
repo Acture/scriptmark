@@ -1,5 +1,3 @@
-import pytest
-from typing import List
 
 # --- 测试配置 ---
 FILE_NAME = "k.py"
