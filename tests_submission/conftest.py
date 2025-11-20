@@ -1,4 +1,5 @@
 # tests/conftest.py (Upgraded Version)
+import builtins
 import logging
 
 import pytest
@@ -6,6 +7,25 @@ import importlib.util
 import sys
 from pathlib import Path
 from typing import Any, Callable, List
+
+
+@pytest.fixture(autouse=True)
+def disable_input(monkeypatch):
+	"""
+	默认禁用 input() 函数。
+	任何尝试调用 input() 的代码都会立即抛出 RuntimeError。
+	防止自动化测试因等待用户输入而无限期挂起。
+	"""
+
+	def mock_input(prompt=""):
+		raise RuntimeError(
+			f"❌ Error: input() called during test.\n"
+			f"Promt was: '{prompt}'\n"
+			f"Please remove interactive input calls from your solution functions."
+		)
+
+	# 将内置的 input 替换为 mock_input
+	monkeypatch.setattr(builtins, "input", mock_input)
 
 
 def pytest_generate_tests(metafunc):
