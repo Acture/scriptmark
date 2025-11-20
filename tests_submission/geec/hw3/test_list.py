@@ -1,54 +1,71 @@
 # tests/test_assignment_template.py
 
 import pytest
-from typing import Generator
+from typing import Callable, Generator
+
+FILE_NAME = "Lab3_1"
+FUNC_NAME_1 = "sort_a"
+FUNC_NAME_2 = "get_prime_number_from_a"
+FUNC_NAME_3 = "get_number_divisible_by_2or3"
+FUNC_NAME_4 = "get_narcissus_number_using_list"
+FUNC_NAME_5 = "get_narcissus_number_using_generator"
 
 
-# --- Helper function to reduce repetition ---
-def get_student_module(student_submission):
+@pytest.fixture(scope="function")
+def student_function_sort_a(get_function) -> Callable[[], list[int]]:
 	"""
-	A helper to get the main module from the student's submission.
-
-	This uses the get_module method from our Submission manager. For this assignment,
-	we assume the student submits exactly one '.py' file. The get_module method
-	will correctly fail if zero or more than one .py file is found.
+	获取学生提交的函数
 	"""
-	return student_submission.get_module(ends_with="Lab3_1.py") or None
+	return get_function(FUNC_NAME_1, FILE_NAME)
 
 
-def get_function(module, func_name):
-	"""Safety checks if a function exists before testing it."""
-	if not hasattr(module, func_name):
-		pytest.skip(f"Function '{func_name}' not found in the submission.")
-	return getattr(module, func_name) or None
+@pytest.fixture(scope="function")
+def student_function_get_prime_number_from_a(get_function) -> Callable[[], list[int]]:
+	"""
+	获取学生提交的函数
+	"""
+	return get_function(FUNC_NAME_2, FILE_NAME)
+
+
+@pytest.fixture(scope="function")
+def student_function_get_number_divisible_by_2or3(get_function) -> Callable[[], list[int]]:
+	"""
+	获取学生提交的函数
+	"""
+	return get_function(FUNC_NAME_3, FILE_NAME)
+
+
+@pytest.fixture(scope="function")
+def student_function_get_narcissus_number_using_list(get_function) -> Callable[[], list[int]]:
+	"""
+	获取学生提交的函数
+	"""
+	return get_function(FUNC_NAME_4, FILE_NAME)
+
+
+@pytest.fixture(scope="function")
+def student_function_get_narcissus_number_using_generator(get_function) -> Callable[[], list[int]]:
+	"""
+	获取学生提交的函数
+	"""
+	return get_function(FUNC_NAME_5, FILE_NAME)
 
 
 # --- Tests for each function ---
 
 
-def test_sort_a_returns_reversed_list(student_submission):
+def test_sort_a_returns_reversed_list(student_function_sort_a):
 	"""Tests the sort_a() function by first loading the student's module."""
-	module = get_student_module(student_submission)
-	sort_a_func = get_function(module, "sort_a")
 
-	assert sort_a_func is not None, "Function 'sort_a' not found in the submission."
-
-	result = sort_a_func()
+	result = student_function_sort_a()
 
 	assert isinstance(result, list), "Return value must be a list."
 	assert len(result) == 100, "List must contain 100 elements."
 	assert result == list(range(99, -1, -1)), "List is not correctly reversed."
 
 
-def test_get_prime_number_from_a(student_submission):
+def test_get_prime_number_from_a(student_function_get_prime_number_from_a):
 	"""Tests the get_prime_number_from_a() function."""
-	module = get_student_module(student_submission)
-	get_primes_func = get_function(module, "get_prime_number_from_a")
-
-	assert (
-		get_primes_func is not None
-	), "Function 'get_prime_number_from_a' not found in the submission."
-
 	known_primes = [
 		2,
 		3,
@@ -76,23 +93,16 @@ def test_get_prime_number_from_a(student_submission):
 		89,
 		97,
 	]
-	result = get_primes_func()
+	result = student_function_get_prime_number_from_a()
 
 	assert isinstance(result, list), "Return value must be a list."
 	assert sorted(result) == known_primes, "The list of prime numbers is incorrect."
 
 
-def test_get_number_divisible_by_2or3(student_submission):
+def test_get_number_divisible_by_2or3(student_function_get_number_divisible_by_2or3):
 	"""Tests the get_number_divisible_by_2or3() function."""
-	module = get_student_module(student_submission)
-	get_divisible_func = get_function(module, "get_number_divisible_by_2or3")
-
-	assert (
-		get_divisible_func is not None
-	), "Function 'get_number_divisible_by_2or3' not found in the submission."
-
 	expected_result = [n for n in range(100) if n % 2 == 0 or n % 3 == 0]
-	result = get_divisible_func()
+	result = student_function_get_number_divisible_by_2or3()
 
 	assert isinstance(result, list), "Return value must be a list."
 	assert sorted(result) == sorted(
@@ -100,17 +110,11 @@ def test_get_number_divisible_by_2or3(student_submission):
 	), "The list of numbers divisible by 2 or 3 is incorrect."
 
 
-def test_get_narcissus_number_using_list(student_submission):
+def test_get_narcissus_number_using_list(student_function_get_narcissus_number_using_list):
 	"""Tests the list-based narcissus number function."""
-	module = get_student_module(student_submission)
-	get_narcissus_list_func = get_function(module, "get_narcissus_number_using_list")
-
-	assert (
-		get_narcissus_list_func is not None
-	), "Function 'get_narcissus_number_using_list' not found in the submission."
 
 	known_narcissus_numbers = [153, 370, 371, 407]
-	result = get_narcissus_list_func()
+	result = student_function_get_narcissus_number_using_list()
 
 	assert isinstance(result, list), "Return value must be a list."
 	assert (
@@ -118,19 +122,10 @@ def test_get_narcissus_number_using_list(student_submission):
 	), "The list of narcissistic numbers is incorrect."
 
 
-def test_get_narcissus_number_using_generator(student_submission):
+def test_get_narcissus_number_using_generator(student_function_get_narcissus_number_using_generator):
 	"""Tests the generator-based narcissus number function."""
-	module = get_student_module(student_submission)
-	get_narcissus_gen_func = get_function(
-		module, "get_narcissus_number_using_generator"
-	)
-
-	assert (
-		get_narcissus_gen_func is not None
-	), "Function 'get_narcissus_number_using_generator' not found in the submission."
-
 	known_narcissus_numbers = [153, 370, 371, 407]
-	result_gen = get_narcissus_gen_func()
+	result_gen = student_function_get_narcissus_number_using_generator()
 
 	assert isinstance(result_gen, Generator), "Return value must be a generator."
 	result_list = list(result_gen)

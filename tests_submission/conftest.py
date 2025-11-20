@@ -1,4 +1,5 @@
 # tests/conftest.py (Upgraded Version)
+import logging
 
 import pytest
 import importlib.util
@@ -11,7 +12,7 @@ def pytest_generate_tests(metafunc):
 	"""
 	动态生成测试。现在从 pytest 的 config 对象中直接读取数据。
 	"""
-	if "student_submission"  in metafunc.fixturenames:
+	if "student_submission" in metafunc.fixturenames:
 		# --- 核心改动在这里 ---
 		# `metafunc.config` 就是上面 `pytest_configure` 操作过的 config 对象
 		if not hasattr(metafunc.config, "student_data_map"):
@@ -40,32 +41,51 @@ class Submission:
 		self.files = [Path(p) for p in file_paths]
 		self._loaded_modules = {}  # Cache to avoid re-importing
 
-
-
 	def get_module(self, ends_with: str):
 		"""
 		Finds, imports, and returns a module from a file ending with a specific suffix.
 		"""
+		if ends_with.endswith(".py"):
+			ends_with = ends_with[:-3]
+			logging.warning(f"Stripping '.py' suffix from <{ends_with}> for {self.sid}")
+
 		# Check cache first
 		if ends_with in self._loaded_modules:
 			return self._loaded_modules[ends_with]
 
 		# Find the file that matches the suffix
-		found_files = [p for p in self.files if p.name.endswith(ends_with)]
 
-		# --- Crucial Error Handling ---
-		if not found_files:
+		file_path = None
+
+		for p in self.files:
+			if p.name.endswith(ends_with):
+				file_path = p
+				break
+
+		if not file_path:
+			for p in self.files:
+				possible_strips = [p.name.rstrip("-1"), p.name.rstrip("-2"), p.name.rstrip("_1"), p.name.rstrip("_2"), p.name.rstrip(".1"), p.name.rstrip(".2")]
+				for ps in possible_strips:
+					if ps.endswith(ends_with):
+						file_path = p
+						logging.warning(f"Using Striped Name {ps} instead of <{p.name}> for {p.name}")
+						break
+				if file_path:
+					break
+
+		if not file_path:
+			for p in self.files:
+				in_stem = ends_with.split('.')[0]
+				if in_stem in p.name:
+					file_path = p
+					logging.warning(f"Using <IN> {in_stem} instead of endswith <{ends_with}> for {p.name}")
+					break
+
+		if not file_path:
 			pytest.fail(
-				f"For student '{self.sid}', no file ending with '{ends_with}' was found."
+				f"Could not find a file ending with '{ends_with}' for student {self.sid}."
 			)
 
-		if len(found_files) > 1:
-			pytest.fail(
-				f"For student '{self.sid}', multiple files found ending with '{ends_with}': "
-				f"{[p.name for p in found_files]}. Test is ambiguous."
-			)
-
-		file_path = found_files[0]
 		module_name = file_path.stem
 
 		# --- Dynamic Import Logic ---
@@ -89,8 +109,6 @@ class Submission:
 		return module
 
 
-
-
 @pytest.fixture
 def student_submission(request, record_property):  # <-- 1. Add 'record_property' here
 	"""
@@ -105,8 +123,10 @@ def student_submission(request, record_property):  # <-- 1. Add 'record_property
 	# The rest of your function is perfect
 	return Submission(sid=student_id, file_paths=student_data["files"])
 
+
 def fake_input(*args, **kwargs):
 	return 0
+
 
 @pytest.fixture(scope="function")
 def get_module(student_submission: Submission, monkeypatch) -> Callable:
@@ -130,6 +150,7 @@ def get_module(student_submission: Submission, monkeypatch) -> Callable:
 
 	# Fixture 返回这个 _getter 函数
 	return _getter
+
 
 @pytest.fixture(scope="function")
 def get_function(get_module: Callable) -> Callable:

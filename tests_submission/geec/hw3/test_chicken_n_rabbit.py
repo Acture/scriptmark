@@ -1,31 +1,32 @@
 # tests/test_chicken_rabbit.py
+from typing import Callable, List, Tuple
 
 import pytest
 
-
 # --- 辅助函数，用于安全地加载模块和函数 ---
 
+FILE_NAME = "Lab3_2"
+FUNC_NAME_1 = "solve_chicken_rabbit"
+FUNC_NAME_2 = "get_user_input"
 
-def get_student_module(student_submission):
+
+@pytest.fixture(scope="function")
+def student_function_solve_chicken_rabbit(get_function) -> Callable[[int, int], List[Tuple[int, int]]]:
 	"""
-	A helper to get the main module from the student's submission.
-
-	This uses the get_module method from our Submission manager. For this assignment,
-	we assume the student submits exactly one '.py' file. The get_module method
-	will correctly fail if zero or more than one .py file is found.
+	获取学生提交的函数
 	"""
-	return student_submission.get_module(ends_with="Lab3_2.py") or None
+	return get_function(FUNC_NAME_1, FILE_NAME)
 
 
-def get_function(module, func_name):
-	"""Safety checks if a function exists before testing it."""
-	if not hasattr(module, func_name):
-		pytest.skip(f"Function '{func_name}' not found in the submission.")
-	return getattr(module, func_name) or None
+@pytest.fixture(scope="function")
+def student_function_get_user_input(get_function) -> Callable[[int, int], List[Tuple[int, int]]]:
+	"""
+	获取学生提交的函数
+	"""
+	return get_function(FUNC_NAME_2, FILE_NAME)
 
 
 # --- 1. 测试核心逻辑函数：solve_chicken_rabbit ---
-
 
 # 使用 pytest.mark.parametrize 为 solve_chicken_rabbit 提供多种测试场景
 @pytest.mark.parametrize(
@@ -48,16 +49,13 @@ def get_function(module, func_name):
 	],
 )
 def test_solve_chicken_rabbit(
-	student_submission, total_heads, total_feet, expected_solution
+	student_function_solve_chicken_rabbit, total_heads, total_feet, expected_solution
 ):
 	"""
 	对 solve_chicken_rabbit 函数进行参数化测试，覆盖多种情况。
 	"""
-	module = get_student_module(student_submission)
-	solve_func = get_function(module, "solve_chicken_rabbit")
-
 	# 调用学生实现的函数
-	actual_solution = solve_func(total_heads, total_feet)
+	actual_solution = student_function_solve_chicken_rabbit(total_heads, total_feet)
 
 	# 断言：检查返回类型是否为列表
 	assert isinstance(actual_solution, list), "返回值应为一个列表。"
@@ -72,21 +70,18 @@ def test_solve_chicken_rabbit(
 # --- 2. 测试用户交互函数：get_user_input ---
 
 
-def test_get_user_input_valid_input(student_submission, monkeypatch):
+def test_get_user_input_valid_input(student_function_get_user_input, monkeypatch):
 	"""
 	测试 get_user_input 函数能否正确处理有效的用户输入。
 	我们使用 monkeypatch 来模拟用户的键盘输入。
 	"""
-	module = get_student_module(student_submission)
-	input_func = get_function(module, "get_user_input")
-
 	# 模拟用户先后输入 "35" 和 "94"
 	user_inputs = "35\n94\n"
 	monkeypatch.setattr("sys.stdin", iter(user_inputs.splitlines()))
 
 	# 调用学生的函数，并捕获其返回值
 	# 注意：这个测试依赖于学生在 get_user_input 函数中正确地 return 了获取到的值
-	returned_heads, returned_feet = input_func()
+	returned_heads, returned_feet = student_function_get_user_input()
 
 	# 断言：检查函数是否正确返回了用户输入的值
 	assert returned_heads == 35, "未能正确获取并返回头的数量。"
@@ -94,19 +89,16 @@ def test_get_user_input_valid_input(student_submission, monkeypatch):
 
 
 # (可选的高级测试)
-def test_get_user_input_prints_solution(student_submission, monkeypatch, capsys):
+def test_get_user_input_prints_solution(student_function_get_user_input, monkeypatch, capsys):
 	"""
 	(高级) 测试 get_user_input 是否在获取输入后，调用了核心函数并打印了正确结果。
 	"""
-	module = get_student_module(student_submission)
-	input_func = get_function(module, "get_user_input")
-
 	# 模拟用户输入
 	user_inputs = "35\n94\n"
 	monkeypatch.setattr("sys.stdin", iter(user_inputs.splitlines()))
 
 	# 运行函数
-	input_func()
+	student_function_get_user_input()
 
 	# 捕获打印到终端的输出
 	captured = capsys.readouterr()
