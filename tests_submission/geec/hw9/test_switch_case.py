@@ -89,7 +89,7 @@ def test_process_files_success(student_function_process_file, tmp_path, file_con
 	assert actual_out == expected_content_in_file
 
 
-pytest.mark.parametrize("pre_existing_content, new_input_content, expected_output_content", [
+@pytest.mark.parametrize("pre_existing_content, new_input_content, expected_output_content", [
 	# 情况 1: 旧内容较短，新内容覆盖后变长 (常规覆盖)
 	("old", "hello world", "HELLO WORLD"),
 
@@ -100,8 +100,6 @@ pytest.mark.parametrize("pre_existing_content, new_input_content, expected_outpu
 	# 情况 3: 覆盖为空 (检测是否能清空文件)
 	("Some content", "", ""),
 ])
-
-
 def test_process_files_overwrite(student_function_process_file, tmp_path, pre_existing_content, new_input_content, expected_output_content):
 	"""
 	[参数化] 测试文件覆盖功能。

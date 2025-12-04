@@ -170,3 +170,5 @@ config.toml
 /*.zip
 templates
 *.csv
+/archive
+/output

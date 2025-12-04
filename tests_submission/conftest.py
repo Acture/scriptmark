@@ -1,6 +1,7 @@
 # tests/conftest.py (Upgraded Version)
 import builtins
 import logging
+import signal
 
 import pytest
 import importlib.util
@@ -26,6 +27,33 @@ def disable_input(monkeypatch):
 
 	# 将内置的 input 替换为 mock_input
 	monkeypatch.setattr(builtins, "input", mock_input)
+
+
+@pytest.fixture(autouse=True)
+def limit_execution_time():
+	"""
+	限制每个测试用例的执行时间。
+	默认设置为 2 秒。作为防止 'except:' (裸except) 捕获 BaseException 的最后一道防线。
+	"""
+	# Windows 系统不支持 SIGALRM，直接跳过
+	if not hasattr(signal, "SIGALRM"):
+		yield
+		return
+
+	def handler(signum, frame):
+		raise TimeoutError("❌ Test timed out! (Limit: 2s) - 可能存在死循环")
+
+	# 注册信号处理器
+	original_handler = signal.signal(signal.SIGALRM, handler)
+	# 设置 2 秒超时
+	signal.alarm(2)
+
+	try:
+		yield
+	finally:
+		# 取消闹钟并还原处理器
+		signal.alarm(0)
+		signal.signal(signal.SIGALRM, original_handler)
 
 
 def pytest_generate_tests(metafunc):
