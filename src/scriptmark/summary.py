@@ -387,7 +387,7 @@ def generate_summary(
 		for report in result.values():
 			report.final_grade = report.pass_rate
 
-	summary_table = Table(title="🏆 Pytest Grading Summary 🏆")
+	summary_table = Table(title=f"🏆 Pytest Grading Summary - {file_path.stem} 🏆")
 	summary_table.add_column("Student Name", style="white")  # New Column
 	summary_table.add_column(
 		"Student ID", justify="right", style="cyan", no_wrap=True
