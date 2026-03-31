@@ -15,20 +15,24 @@ use crate::checker::{CheckInput, Checker};
 /// Outputs JSON on stdout: `{"ok": true, "value": ..., "type": "..."}` or
 /// `{"ok": false, "error_type": "...", "error_message": "..."}`.
 const HELPER_SCRIPT: &str = r#"
-import importlib.util, sys, json, builtins
-
-builtins.input = lambda *a, **k: (_ for _ in ()).throw(
-    RuntimeError("input() is disabled during grading")
-)
+import importlib.util, sys, json, builtins, io
 
 payload = json.loads(sys.argv[1])
 file_path = payload["file"]
 func_name = payload["function"]
 args = payload["args"]
 
+# Override input/print during module loading to prevent student top-level code
+# from blocking (input) or polluting stdout (print)
+_real_print = builtins.print
+_real_stdout = sys.stdout
+builtins.input = lambda *a, **k: "0"
+sys.stdout = io.StringIO()  # swallow prints during module load
+
 spec = importlib.util.spec_from_file_location("student_mod", file_path)
 if spec is None or spec.loader is None:
-    print(json.dumps({"ok": False, "error_type": "ImportError", "error_message": f"Cannot load {file_path}"}))
+    sys.stdout = _real_stdout
+    _real_print(json.dumps({"ok": False, "error_type": "ImportError", "error_message": f"Cannot load {file_path}"}))
     sys.exit(0)
 
 mod = importlib.util.module_from_spec(spec)
@@ -40,19 +44,23 @@ for key, val in payload.get("vars", {}).items():
 try:
     spec.loader.exec_module(mod)
 except Exception as e:
-    print(json.dumps({"ok": False, "error_type": type(e).__name__, "error_message": str(e)}))
+    sys.stdout = _real_stdout
+    _real_print(json.dumps({"ok": False, "error_type": type(e).__name__, "error_message": str(e)}))
     sys.exit(0)
 
+# Restore stdout for function execution — student function output is captured
+sys.stdout = _real_stdout
+
 if not hasattr(mod, func_name):
-    print(json.dumps({"ok": False, "error_type": "AttributeError", "error_message": f"Function '{func_name}' not found"}))
+    _real_print(json.dumps({"ok": False, "error_type": "AttributeError", "error_message": f"Function '{func_name}' not found"}))
     sys.exit(0)
 
 func = getattr(mod, func_name)
 try:
     result = func(*args)
-    print(json.dumps({"ok": True, "value": result, "type": type(result).__name__}))
+    _real_print(json.dumps({"ok": True, "value": result, "type": type(result).__name__}))
 except Exception as e:
-    print(json.dumps({"ok": False, "error_type": type(e).__name__, "error_message": str(e)}))
+    _real_print(json.dumps({"ok": False, "error_type": type(e).__name__, "error_message": str(e)}))
 "#;
 
 /// Executor for Python student code.
