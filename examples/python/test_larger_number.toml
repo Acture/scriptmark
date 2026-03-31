@@ -4,7 +4,7 @@ file = "Lab5_1.py"
 function = "find_larger_number"
 language = "python"
 
-# --- Valid inputs ---
+# --- Manual cases (edge cases) ---
 
 [[cases]]
 name = "3 < 5"
@@ -62,3 +62,33 @@ expect_error = "TypeError"
 name = "invalid: list vs int"
 args = [[1, 2], 3]
 expect_error = "TypeError"
+
+# --- Parametrized: auto-generated random tests ---
+
+[[cases]]
+name = "random int pairs"
+
+[cases.parametrize]
+count = 30
+seed = 42
+
+[cases.parametrize.args]
+a = "int(-1000, 1000)"
+b = "int(-1000, 1000)"
+
+[cases.parametrize.oracle]
+rhai = "if a >= b { a } else { b }"
+
+[[cases]]
+name = "random float pairs"
+
+[cases.parametrize]
+count = 10
+seed = 99
+
+[cases.parametrize.args]
+a = "float(-100.0, 100.0)"
+b = "float(-100.0, 100.0)"
+
+[cases.parametrize.oracle]
+rhai = "if a >= b { a } else { b }"
