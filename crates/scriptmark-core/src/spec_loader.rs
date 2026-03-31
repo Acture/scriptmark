@@ -119,9 +119,9 @@ name = "GEEC Python"
 language = "python"
 
 [grading]
-method = "sqrt"
-lower_bound = 60
-upper_bound = 100
+template = "sqrt"
+lower = 60
+upper = 100
 "#,
         )
         .unwrap();

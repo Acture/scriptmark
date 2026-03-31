@@ -1,24 +1,43 @@
 use serde::{Deserialize, Serialize};
 
-/// Grade curve method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CurveMethod {
-    #[default]
-    None,
-    Linear,
-    Sqrt,
+/// Grading policy — how to convert pass rate to final grade.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum GradingPolicy {
+    /// Named template: "none", "linear", "sqrt", "log", "strict"
+    Template(TemplatePolicy),
+    /// Custom Rhai formula
+    Formula(FormulaPolicy),
 }
 
-/// Configuration for grade curving.
+/// Named grading template with configurable bounds.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CurveConfig {
-    #[serde(default)]
-    pub method: CurveMethod,
+pub struct TemplatePolicy {
+    /// Template name
+    pub template: String,
+    /// Lower bound (default 60)
     #[serde(default = "default_lower")]
-    pub lower_bound: f64,
+    pub lower: f64,
+    /// Upper bound (default 100)
     #[serde(default = "default_upper")]
-    pub upper_bound: f64,
+    pub upper: f64,
+}
+
+/// Custom grading formula evaluated via Rhai.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormulaPolicy {
+    /// Rhai expression. Variables: rate, passed, total, lint_score
+    pub formula: String,
+}
+
+impl Default for GradingPolicy {
+    fn default() -> Self {
+        Self::Template(TemplatePolicy {
+            template: "sqrt".to_string(),
+            lower: 60.0,
+            upper: 100.0,
+        })
+    }
 }
 
 fn default_lower() -> f64 {
@@ -28,22 +47,12 @@ fn default_upper() -> f64 {
     100.0
 }
 
-impl Default for CurveConfig {
-    fn default() -> Self {
-        Self {
-            method: CurveMethod::None,
-            lower_bound: 60.0,
-            upper_bound: 100.0,
-        }
-    }
-}
-
 /// Course-level configuration (from course.toml).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CourseConfig {
     pub course: CourseInfo,
     #[serde(default)]
-    pub grading: CurveConfig,
+    pub grading: GradingPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
