@@ -1,11 +1,20 @@
-use crate::models::{CurveConfig, CurveMethod, StudentReport, TestStatus};
+use rhai::{Dynamic, Engine, Scope};
 
-/// Apply a grade curve to all student reports.
+use crate::models::{FormulaPolicy, GradingPolicy, StudentReport, TemplatePolicy, TestStatus};
+
+/// Apply a grading policy to all student reports.
 ///
-/// Modifies `final_grade` on each report based on the curve method.
-pub fn apply_curve(reports: &mut [StudentReport], config: &CurveConfig) {
-    let lower = config.lower_bound;
-    let upper = config.upper_bound;
+/// Modifies `final_grade` on each report based on the policy.
+pub fn apply_grading(reports: &mut [StudentReport], policy: &GradingPolicy) {
+    match policy {
+        GradingPolicy::Template(t) => apply_template(reports, t),
+        GradingPolicy::Formula(f) => apply_formula(reports, f),
+    }
+}
+
+fn apply_template(reports: &mut [StudentReport], config: &TemplatePolicy) {
+    let lower = config.lower;
+    let upper = config.upper;
 
     for report in reports.iter_mut() {
         if report.status() == TestStatus::Missing {
@@ -15,28 +24,69 @@ pub fn apply_curve(reports: &mut [StudentReport], config: &CurveConfig) {
 
         let rate = report.pass_rate();
 
-        let curved = match config.method {
-            CurveMethod::None => rate,
-            CurveMethod::Linear => {
-                // y = (x/100) * (max - min) + min
-                (rate / 100.0) * (upper - lower) + lower
-            }
-            CurveMethod::Sqrt => {
-                // y = sqrt(x) * multiplier + base
+        let grade = match config.template.as_str() {
+            "none" => rate,
+            "linear" => lower + (rate / 100.0) * (upper - lower),
+            "sqrt" => {
                 let multiplier = (upper - lower) / 10.0;
-                multiplier * rate.sqrt() + lower
+                lower + multiplier * rate.sqrt()
             }
+            "log" => lower + (1.0 + rate).ln() / (101.0_f64).ln() * (upper - lower),
+            "strict" => {
+                if rate >= 100.0 {
+                    upper
+                } else if rate >= 80.0 {
+                    lower + (rate - 80.0) / 20.0 * (upper - lower)
+                } else {
+                    lower
+                }
+            }
+            _ => rate, // unknown template, fall back to raw rate
         };
+
+        report.final_grade = Some(grade.clamp(0.0, upper));
 
         // Blend lint score if available
-        let final_score = if let Some(lint) = report.lint_score {
-            let weight = 0.1; // TODO: make configurable from LintConfig.weight
-            curved * (1.0 - weight) + lint * weight
-        } else {
-            curved
-        };
+        if let Some(lint) = report.lint_score {
+            let test_weight = 0.9;
+            let blended = report.final_grade.unwrap() * test_weight
+                + lint * (1.0 - test_weight) / 100.0 * upper;
+            report.final_grade = Some(blended.clamp(0.0, upper));
+        }
+    }
+}
 
-        report.final_grade = Some(final_score.clamp(lower, upper));
+fn apply_formula(reports: &mut [StudentReport], config: &FormulaPolicy) {
+    let engine = Engine::new();
+
+    for report in reports.iter_mut() {
+        if report.status() == TestStatus::Missing {
+            report.final_grade = Some(0.0);
+            continue;
+        }
+
+        let mut scope = Scope::new();
+        scope.push("rate", report.pass_rate());
+        scope.push("passed", report.total_passed() as i64);
+        scope.push("total", report.total_cases() as i64);
+        scope.push("lint_score", report.lint_score.unwrap_or(0.0));
+
+        match engine.eval_with_scope::<Dynamic>(&mut scope, &config.formula) {
+            Ok(val) => {
+                let grade = if let Ok(f) = val.as_float() {
+                    f
+                } else if let Ok(i) = val.as_int() {
+                    i as f64
+                } else {
+                    0.0
+                };
+                report.final_grade = Some(grade.clamp(0.0, 100.0));
+            }
+            Err(e) => {
+                eprintln!("Grading formula error for {}: {}", report.student_id, e);
+                report.final_grade = Some(0.0);
+            }
+        }
     }
 }
 
@@ -76,46 +126,63 @@ mod tests {
         }
     }
 
+    fn template(name: &str) -> GradingPolicy {
+        GradingPolicy::Template(TemplatePolicy {
+            template: name.to_string(),
+            lower: 60.0,
+            upper: 100.0,
+        })
+    }
+
     #[test]
-    fn test_curve_none() {
+    fn test_template_none() {
         let mut reports = vec![make_report(70)];
-        apply_curve(
-            &mut reports,
-            &CurveConfig {
-                method: CurveMethod::None,
-                ..Default::default()
-            },
-        );
+        apply_grading(&mut reports, &template("none"));
         assert!((reports[0].final_grade.unwrap() - 70.0).abs() < 0.1);
     }
 
     #[test]
-    fn test_curve_linear() {
+    fn test_template_linear() {
+        let policy = template("linear");
+
         let mut reports = vec![make_report(100)];
-        let config = CurveConfig {
-            method: CurveMethod::Linear,
-            lower_bound: 60.0,
-            upper_bound: 100.0,
-        };
-        apply_curve(&mut reports, &config);
+        apply_grading(&mut reports, &policy);
         assert!((reports[0].final_grade.unwrap() - 100.0).abs() < 0.1);
 
         let mut reports = vec![make_report(0)];
-        apply_curve(&mut reports, &config);
+        apply_grading(&mut reports, &policy);
         assert!((reports[0].final_grade.unwrap() - 60.0).abs() < 0.1);
     }
 
     #[test]
-    fn test_curve_sqrt() {
+    fn test_template_sqrt() {
         let mut reports = vec![make_report(100)];
-        let config = CurveConfig {
-            method: CurveMethod::Sqrt,
-            lower_bound: 60.0,
-            upper_bound: 100.0,
-        };
-        apply_curve(&mut reports, &config);
+        apply_grading(&mut reports, &template("sqrt"));
         // sqrt(100) = 10, multiplier = 4, so 4*10 + 60 = 100
         assert!((reports[0].final_grade.unwrap() - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_template_log() {
+        let mut reports = vec![make_report(100)];
+        apply_grading(&mut reports, &template("log"));
+        // ln(101)/ln(101) * 40 + 60 = 100
+        assert!((reports[0].final_grade.unwrap() - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_template_strict() {
+        let policy = template("strict");
+
+        // 100% pass rate -> upper
+        let mut reports = vec![make_report(100)];
+        apply_grading(&mut reports, &policy);
+        assert!((reports[0].final_grade.unwrap() - 100.0).abs() < 0.1);
+
+        // 50% pass rate -> lower (below 80%)
+        let mut reports = vec![make_report(50)];
+        apply_grading(&mut reports, &policy);
+        assert!((reports[0].final_grade.unwrap() - 60.0).abs() < 0.1);
     }
 
     #[test]
@@ -128,7 +195,43 @@ mod tests {
             backend_name: None,
             lint_score: None,
         }];
-        apply_curve(&mut reports, &CurveConfig::default());
+        apply_grading(&mut reports, &GradingPolicy::default());
+        assert_eq!(reports[0].final_grade, Some(0.0));
+    }
+
+    #[test]
+    fn test_formula_basic() {
+        let policy = GradingPolicy::Formula(FormulaPolicy {
+            formula: "rate * 0.9 + 10.0".to_string(),
+        });
+        let mut reports = vec![make_report(100)];
+        apply_grading(&mut reports, &policy);
+        // 100 * 0.9 + 10 = 100
+        assert!((reports[0].final_grade.unwrap() - 100.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_formula_uses_variables() {
+        let policy = GradingPolicy::Formula(FormulaPolicy {
+            formula: "if passed == total { 100.0 } else { 50.0 }".to_string(),
+        });
+
+        let mut reports = vec![make_report(100)];
+        apply_grading(&mut reports, &policy);
+        assert!((reports[0].final_grade.unwrap() - 100.0).abs() < 0.1);
+
+        let mut reports = vec![make_report(50)];
+        apply_grading(&mut reports, &policy);
+        assert!((reports[0].final_grade.unwrap() - 50.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn test_formula_error_gives_zero() {
+        let policy = GradingPolicy::Formula(FormulaPolicy {
+            formula: "undefined_var + 1".to_string(),
+        });
+        let mut reports = vec![make_report(100)];
+        apply_grading(&mut reports, &policy);
         assert_eq!(reports[0].final_grade, Some(0.0));
     }
 }

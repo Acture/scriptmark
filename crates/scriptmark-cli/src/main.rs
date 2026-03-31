@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use scriptmark_core::discovery::discover_submissions;
-use scriptmark_core::grading::apply_curve;
-use scriptmark_core::models::{CurveConfig, CurveMethod};
+use scriptmark_core::grading::apply_grading;
+use scriptmark_core::models::{FormulaPolicy, GradingPolicy, TemplatePolicy};
 use scriptmark_core::roster::load_roster;
 use scriptmark_core::spec_loader::load_specs_from_dir;
 use scriptmark_runner::orchestrator;
@@ -59,11 +59,16 @@ struct GradeArgs {
     #[arg(short, long)]
     roster: Option<PathBuf>,
 
-    /// Grade curve method
-    #[arg(short, long, default_value = "sqrt", value_parser = parse_curve_method)]
-    curve: CurveMethod,
+    /// Grading template: none, linear, sqrt, log, strict (default: sqrt)
+    #[arg(short = 'g', long, default_value = "sqrt")]
+    grading: String,
 
-    /// Curve range: lower,upper
+    /// Custom grading formula (Rhai expression). Overrides --grading.
+    /// Variables: rate, passed, total, lint_score
+    #[arg(long)]
+    formula: Option<String>,
+
+    /// Grade range: lower,upper
     #[arg(long, default_value = "60,100", value_parser = parse_range)]
     range: (f64, f64),
 
@@ -124,11 +129,16 @@ struct SummarizeArgs {
     #[arg(short, long)]
     roster: Option<PathBuf>,
 
-    /// Grade curve method
-    #[arg(short, long, default_value = "sqrt", value_parser = parse_curve_method)]
-    curve: CurveMethod,
+    /// Grading template: none, linear, sqrt, log, strict (default: sqrt)
+    #[arg(short = 'g', long, default_value = "sqrt")]
+    grading: String,
 
-    /// Curve range: lower,upper
+    /// Custom grading formula (Rhai expression). Overrides --grading.
+    /// Variables: rate, passed, total, lint_score
+    #[arg(long)]
+    formula: Option<String>,
+
+    /// Grade range: lower,upper
     #[arg(long, default_value = "60,100", value_parser = parse_range)]
     range: (f64, f64),
 }
@@ -207,12 +217,17 @@ struct ReportArgs {
     similarity_threshold: f64,
 }
 
-fn parse_curve_method(s: &str) -> Result<CurveMethod, String> {
-    match s.to_lowercase().as_str() {
-        "none" => Ok(CurveMethod::None),
-        "linear" => Ok(CurveMethod::Linear),
-        "sqrt" => Ok(CurveMethod::Sqrt),
-        _ => Err(format!("unknown curve method: {s} (use none/linear/sqrt)")),
+fn build_grading_policy(grading: &str, formula: Option<&str>, range: (f64, f64)) -> GradingPolicy {
+    if let Some(formula) = formula {
+        GradingPolicy::Formula(FormulaPolicy {
+            formula: formula.to_string(),
+        })
+    } else {
+        GradingPolicy::Template(TemplatePolicy {
+            template: grading.to_string(),
+            lower: range.0,
+            upper: range.1,
+        })
     }
 }
 
@@ -285,14 +300,10 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
         }
     }
 
-    // 5. Apply curve
-    let curve_config = CurveConfig {
-        method: args.curve,
-        lower_bound: args.range.0,
-        upper_bound: args.range.1,
-    };
+    // 5. Apply grading policy
+    let policy = build_grading_policy(&args.grading, args.formula.as_deref(), args.range);
     let mut reports: Vec<_> = results.into_values().collect();
-    apply_curve(&mut reports, &curve_config);
+    apply_grading(&mut reports, &policy);
     reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
 
     // 6. Display
@@ -423,12 +434,8 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
         }
     }
 
-    let curve_config = CurveConfig {
-        method: args.curve,
-        lower_bound: args.range.0,
-        upper_bound: args.range.1,
-    };
-    apply_curve(&mut reports, &curve_config);
+    let policy = build_grading_policy(&args.grading, args.formula.as_deref(), args.range);
+    apply_grading(&mut reports, &policy);
     reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
 
     let report_refs: Vec<_> = reports.iter().collect();
