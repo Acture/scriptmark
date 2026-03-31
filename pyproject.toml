@@ -61,3 +61,6 @@ quote-style = "double"
 indent-style = "tab"
 skip-magic-trailing-comma = false
 line-ending = "auto"
+[tool.pytest.ini_options]
+addopts = "-q"
+disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true
