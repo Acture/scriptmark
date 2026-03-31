@@ -525,9 +525,11 @@ fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
             "\x1b[32m" // green
         };
         println!(
-            "  {}{:.1}%\x1b[0m  {} ↔ {}",
+            "  {}{:.1}%\x1b[0m (style:{:.0}% struct:{:.0}%)  {} ↔ {}",
             color,
             pair.score * 100.0,
+            pair.style_score * 100.0,
+            pair.structure_score * 100.0,
             pair.student_a,
             pair.student_b,
         );
@@ -535,12 +537,14 @@ fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
 
     if let Some(output) = &args.output {
         let mut wtr = csv::Writer::from_path(output)?;
-        wtr.write_record(["student_a", "student_b", "similarity"])?;
+        wtr.write_record(["student_a", "student_b", "combined", "style", "structure"])?;
         for pair in &pairs {
             wtr.write_record([
                 &pair.student_a,
                 &pair.student_b,
                 &format!("{:.4}", pair.score),
+                &format!("{:.4}", pair.style_score),
+                &format!("{:.4}", pair.structure_score),
             ])?;
         }
         wtr.flush()?;

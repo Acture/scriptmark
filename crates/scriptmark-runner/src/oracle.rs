@@ -24,6 +24,7 @@ pub async fn resolve_oracle(
             vars: Default::default(),
             setup: vec![],
             cases: vec![],
+            lint: None,
         };
         let result = executor
             .execute_case(&[ref_file], &ref_spec, case, 10)

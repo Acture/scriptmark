@@ -28,7 +28,15 @@ pub fn apply_curve(reports: &mut [StudentReport], config: &CurveConfig) {
             }
         };
 
-        report.final_grade = Some(curved.clamp(lower, upper));
+        // Blend lint score if available
+        let final_score = if let Some(lint) = report.lint_score {
+            let weight = 0.1; // TODO: make configurable from LintConfig.weight
+            curved * (1.0 - weight) + lint * weight
+        } else {
+            curved
+        };
+
+        report.final_grade = Some(final_score.clamp(lower, upper));
     }
 }
 
@@ -64,6 +72,7 @@ mod tests {
             }],
             final_grade: None,
             backend_name: None,
+            lint_score: None,
         }
     }
 
@@ -117,6 +126,7 @@ mod tests {
             test_results: vec![],
             final_grade: None,
             backend_name: None,
+            lint_score: None,
         }];
         apply_curve(&mut reports, &CurveConfig::default());
         assert_eq!(reports[0].final_grade, Some(0.0));

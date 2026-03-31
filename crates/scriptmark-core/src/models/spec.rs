@@ -1,5 +1,26 @@
 use serde::{Deserialize, Serialize};
 
+/// Configuration for lint-based code style scoring.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LintConfig {
+    /// Lint command template. `{file}` is replaced with student file path.
+    pub command: String,
+    /// Max warnings that maps to 0% style score.
+    #[serde(default = "default_max_warnings")]
+    pub max_warnings: usize,
+    /// Weight in final grade (0.0-1.0). 0.1 = 10% of grade.
+    #[serde(default = "default_weight")]
+    pub weight: f64,
+}
+
+fn default_max_warnings() -> usize {
+    10
+}
+
+fn default_weight() -> f64 {
+    0.1
+}
+
 /// How to check the result of a test case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -168,4 +189,7 @@ pub struct TestSpec {
     pub setup: Vec<SetupStep>,
     /// Test cases — scored.
     pub cases: Vec<TestCase>,
+    /// Optional lint-based style scoring.
+    #[serde(default)]
+    pub lint: Option<LintConfig>,
 }
