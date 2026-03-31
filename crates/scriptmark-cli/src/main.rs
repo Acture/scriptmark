@@ -1,4 +1,5 @@
 mod display;
+mod report;
 
 use std::path::PathBuf;
 
@@ -36,6 +37,8 @@ enum Commands {
     GradesPush(GradesPushArgs),
     /// Detect code similarity between student submissions
     Similarity(SimilarityArgs),
+    /// Generate an HTML report from grading results
+    Report(ReportArgs),
 }
 
 #[derive(Parser)]
@@ -182,6 +185,28 @@ struct SimilarityArgs {
     output: Option<PathBuf>,
 }
 
+#[derive(Parser)]
+struct ReportArgs {
+    /// Path to results JSON file (from scriptmark grade)
+    results: PathBuf,
+
+    /// Output HTML report path
+    #[arg(short, long, default_value = "report.html")]
+    output: PathBuf,
+
+    /// Title for the report
+    #[arg(long, default_value = "Grading Report")]
+    title: String,
+
+    /// Also include similarity data (provide submissions dir)
+    #[arg(long)]
+    similarity_dir: Option<PathBuf>,
+
+    /// Similarity threshold
+    #[arg(long, default_value = "0.6")]
+    similarity_threshold: f64,
+}
+
 fn parse_curve_method(s: &str) -> Result<CurveMethod, String> {
     match s.to_lowercase().as_str() {
         "none" => Ok(CurveMethod::None),
@@ -212,6 +237,7 @@ async fn main() -> Result<()> {
         Commands::RosterPull(args) => cmd_roster_pull(args).await,
         Commands::GradesPush(args) => cmd_grades_push(args).await,
         Commands::Similarity(args) => cmd_similarity(args),
+        Commands::Report(args) => cmd_report(args),
     }
 }
 
@@ -551,5 +577,40 @@ fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
         println!("\nReport saved to {}", output.display());
     }
 
+    Ok(())
+}
+
+fn cmd_report(args: ReportArgs) -> Result<()> {
+    let content = std::fs::read_to_string(&args.results).context("Failed to read results file")?;
+    let reports: Vec<scriptmark_core::models::StudentReport> =
+        serde_json::from_str(&content).context("Failed to parse results JSON")?;
+
+    let similarity = if let Some(sim_dir) = &args.similarity_dir {
+        let mut submissions: std::collections::HashMap<String, Vec<PathBuf>> =
+            std::collections::HashMap::new();
+        for entry in std::fs::read_dir(sim_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("py") {
+                continue;
+            }
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let sid = filename.split('_').next().unwrap_or("").to_string();
+            if !sid.is_empty() {
+                submissions.entry(sid).or_default().push(path);
+            }
+        }
+        Some(scriptmark_core::similarity::compare_submissions(
+            &submissions,
+            25,
+            args.similarity_threshold,
+        ))
+    } else {
+        None
+    };
+
+    report::generate_html_report(&reports, similarity.as_deref(), &args.title, &args.output)?;
+
+    println!("HTML report generated: {}", args.output.display());
     Ok(())
 }

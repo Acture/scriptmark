@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{TITLE}} — ScriptMark Report</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0e1117;--surface:#161b22;--surface-hover:#1c2129;--border:#30363d;--text:#e6edf3;--text-dim:#8b949e;--accent:#58a6ff;--green:#3fb950;--red:#f85149;--yellow:#d29922;--orange:#db6d28;--font:'DM Sans',-apple-system,sans-serif;--mono:'JetBrains Mono',monospace}
+body{font-family:var(--font);background:var(--bg);color:var(--text);line-height:1.5;min-height:100vh}
+.container{max-width:1400px;margin:0 auto;padding:2rem}
+header{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:2.5rem;padding-bottom:1.5rem;border-bottom:1px solid var(--border)}
+header h1{font-size:1.75rem;font-weight:700;letter-spacing:-0.02em}
+header h1 span{color:var(--accent)}
+header .meta{font-size:.85rem;color:var(--text-dim);font-family:var(--mono)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2.5rem}
+.stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;overflow:hidden}
+.stat-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--accent)}
+.stat-card.green::before{background:var(--green)}.stat-card.red::before{background:var(--red)}.stat-card.yellow::before{background:var(--yellow)}
+.stat-card .value{font-size:2rem;font-weight:700;font-family:var(--mono);line-height:1.2}
+.stat-card .label{font-size:.8rem;color:var(--text-dim);margin-top:.25rem;text-transform:uppercase;letter-spacing:.05em}
+.tabs{display:flex;gap:0;margin-bottom:1.5rem;border-bottom:1px solid var(--border)}
+.tab{padding:.75rem 1.5rem;cursor:pointer;color:var(--text-dim);font-weight:500;font-size:.9rem;border-bottom:2px solid transparent;transition:all .15s;user-select:none}
+.tab:hover{color:var(--text)}.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab-content{display:none}.tab-content.active{display:block}
+.chart-container{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:2rem}
+.chart-container h3{font-size:.85rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.05em;margin-bottom:1rem}
+.bar-chart{display:flex;align-items:flex-end;gap:2px;height:120px}
+.bar{flex:1;border-radius:2px 2px 0 0;min-width:8px;position:relative;transition:opacity .15s;cursor:pointer}
+.bar:hover{opacity:.8}
+.bar .tooltip{display:none;position:absolute;bottom:100%;left:50%;transform:translateX(-50%);background:var(--text);color:var(--bg);padding:.25rem .5rem;border-radius:4px;font-size:.75rem;font-family:var(--mono);white-space:nowrap;margin-bottom:4px}
+.bar:hover .tooltip{display:block}
+.bar-labels{display:flex;gap:2px;margin-top:.5rem}
+.bar-labels span{flex:1;text-align:center;font-size:.65rem;color:var(--text-dim);font-family:var(--mono)}
+.search-bar{margin-bottom:1rem}
+.search-bar input{width:100%;max-width:400px;padding:.6rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:8px;color:var(--text);font-family:var(--font);font-size:.9rem;outline:none}
+.search-bar input:focus{border-color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:.875rem}
+thead th{text-align:left;padding:.75rem 1rem;border-bottom:1px solid var(--border);color:var(--text-dim);font-weight:500;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;cursor:pointer;user-select:none;white-space:nowrap}
+thead th:hover{color:var(--text)}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s;cursor:pointer}
+tbody tr:hover{background:var(--surface-hover)}
+td{padding:.6rem 1rem;font-family:var(--mono);font-size:.8rem}
+td.name-col{font-family:var(--font);font-size:.875rem}
+.status-badge{display:inline-block;padding:.15rem .6rem;border-radius:999px;font-size:.7rem;font-weight:600;text-transform:uppercase;letter-spacing:.03em}
+.status-passed{background:rgba(63,185,80,.15);color:var(--green)}
+.status-failed{background:rgba(248,81,73,.15);color:var(--red)}
+.status-error{background:rgba(219,109,40,.15);color:var(--orange)}
+.status-missing{background:rgba(139,148,158,.15);color:var(--text-dim)}
+.grade-cell{font-weight:700;font-size:.9rem}
+.detail-panel{display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:2rem}
+.detail-panel.active{display:block}
+.detail-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:1rem}
+.detail-header h2{font-size:1.1rem}
+.close-btn{background:none;border:1px solid var(--border);color:var(--text-dim);padding:.3rem .8rem;border-radius:6px;cursor:pointer;font-size:.8rem}
+.close-btn:hover{color:var(--text);border-color:var(--text-dim)}
+.case-list{display:grid;gap:.5rem}
+.case-item{display:grid;grid-template-columns:auto 1fr auto;gap:.75rem;align-items:center;padding:.5rem .75rem;border-radius:6px;font-size:.8rem;font-family:var(--mono)}
+.case-item.passed{background:rgba(63,185,80,.05)}.case-item.failed{background:rgba(248,81,73,.08)}
+.case-icon{font-size:1rem}
+.case-msg{color:var(--text-dim);font-size:.75rem}
+.sim-pair{display:grid;grid-template-columns:80px 1fr;gap:1rem;align-items:center;padding:.6rem 1rem;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:.8rem}
+.sim-score{font-weight:700;font-size:.9rem}
+.sim-bar-bg{height:6px;background:var(--border);border-radius:3px;overflow:hidden}
+.sim-bar-fill{height:100%;border-radius:3px}
+.sim-details{font-size:.7rem;color:var(--text-dim)}
+footer{margin-top:3rem;padding-top:1.5rem;border-top:1px solid var(--border);text-align:center;font-size:.75rem;color:var(--text-dim)}
+footer a{color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <h1><span>ScriptMark</span> Report</h1>
+    <div class="meta">{{TITLE}}</div>
+  </header>
+  <div class="stats" id="stats"></div>
+  <div class="tabs">
+    <div class="tab active" data-tab="overview">Overview</div>
+    <div class="tab" data-tab="students">Students</div>
+    <div class="tab" data-tab="similarity">Similarity</div>
+  </div>
+  <div id="detail-panel" class="detail-panel"></div>
+  <div id="tab-overview" class="tab-content active">
+    <div class="chart-container"><h3>Grade Distribution</h3><div id="grade-chart" class="bar-chart"></div><div id="grade-labels" class="bar-labels"></div></div>
+    <div class="chart-container"><h3>Pass Rate Distribution</h3><div id="pass-chart" class="bar-chart"></div><div id="pass-labels" class="bar-labels"></div></div>
+  </div>
+  <div id="tab-students" class="tab-content">
+    <div class="search-bar"><input type="text" id="search" placeholder="Search by ID or name..."></div>
+    <table><thead><tr>
+      <th data-sort="name">Name</th><th data-sort="id">Student ID</th><th data-sort="status">Status</th>
+      <th data-sort="passed">Passed</th><th data-sort="failed">Failed</th><th data-sort="total">Total</th>
+      <th data-sort="rate">Pass Rate</th><th data-sort="grade">Grade</th>
+    </tr></thead><tbody id="student-table"></tbody></table>
+  </div>
+  <div id="tab-similarity" class="tab-content"><div id="sim-list"></div></div>
+  <footer>Generated by <a href="https://github.com/Acture/scriptmark">ScriptMark</a></footer>
+</div>
+<script>
+// Data injected by ScriptMark at generation time (trusted source)
+const REPORTS = {{REPORTS_JSON}};
+const SIMILARITY = {{SIMILARITY_JSON}};
+
+REPORTS.forEach(r => {
+  r._total = (r.test_results||[]).reduce((s,t) => s + (t.cases||[]).length, 0);
+  r._passed = (r.test_results||[]).reduce((s,t) => s + (t.cases||[]).filter(c => c.status==='passed').length, 0);
+  r._failed = r._total - r._passed;
+  r._rate = r._total > 0 ? (r._passed / r._total * 100) : 0;
+  r._grade = r.final_grade || 0;
+  r._status = r._total === 0 ? 'missing' : r._failed > 0 ? 'failed' : 'passed';
+});
+
+const el = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const totalStudents = REPORTS.length;
+const passedStudents = REPORTS.filter(r => r._status==='passed').length;
+const avgGrade = REPORTS.reduce((s,r) => s+r._grade, 0) / Math.max(totalStudents,1);
+const totalCases = REPORTS.reduce((s,r) => s+r._total, 0);
+const totalPassed = REPORTS.reduce((s,r) => s+r._passed, 0);
+
+el('stats').textContent = '';
+[
+  {v: totalStudents, l:'Students', c:''},
+  {v: passedStudents, l:'All Passed', c:'green'},
+  {v: totalStudents-passedStudents, l:'Has Failures', c:'red'},
+  {v: avgGrade.toFixed(1), l:'Avg Grade', c:'yellow'},
+  {v: `${totalPassed}/${totalCases}`, l:'Cases Passed', c:''},
+  {v: SIMILARITY.length, l:'Similar Pairs', c:''}
+].forEach(s => {
+  const d = document.createElement('div');
+  d.className = 'stat-card' + (s.c ? ' '+s.c : '');
+  const v = document.createElement('div'); v.className='value'; v.textContent=s.v;
+  const l = document.createElement('div'); l.className='label'; l.textContent=s.l;
+  d.appendChild(v); d.appendChild(l); el('stats').appendChild(d);
+});
+
+function drawChart(cid, lid, values, bs, mx, colorFn) {
+  const bk={}; for(let i=0;i<=mx;i+=bs) bk[i]=0;
+  values.forEach(v => { const b=Math.min(Math.floor(v/bs)*bs,mx-bs); bk[b]=(bk[b]||0)+1; });
+  const mc=Math.max(...Object.values(bk),1);
+  const c=el(cid); const l=el(lid); c.textContent=''; l.textContent='';
+  Object.keys(bk).map(Number).sort((a,b)=>a-b).forEach(k => {
+    const bar=document.createElement('div'); bar.className='bar';
+    bar.style.height=Math.max(bk[k]/mc*100,2)+'%'; bar.style.background=colorFn(k);
+    const tip=document.createElement('div'); tip.className='tooltip'; tip.textContent=`${k}-${k+bs}: ${bk[k]}`;
+    bar.appendChild(tip); c.appendChild(bar);
+    const sp=document.createElement('span'); sp.textContent=k; l.appendChild(sp);
+  });
+}
+drawChart('grade-chart','grade-labels',REPORTS.map(r=>r._grade),5,100,k=>k>=90?'var(--green)':k>=70?'var(--accent)':k>=60?'var(--yellow)':'var(--red)');
+drawChart('pass-chart','pass-labels',REPORTS.map(r=>r._rate),10,100,k=>k>=80?'var(--green)':k>=50?'var(--yellow)':'var(--red)');
+
+let sortKey='grade', sortDir=-1;
+function renderTable(filter) {
+  let d=[...REPORTS];
+  if(filter){const f=filter.toLowerCase();d=d.filter(r=>r.student_id.includes(f)||(r.student_name||'').toLowerCase().includes(f));}
+  d.sort((a,b)=>{
+    const va=sortKey==='name'?(a.student_name||''):sortKey==='id'?a.student_id:sortKey==='grade'?a._grade:sortKey==='rate'?a._rate:sortKey==='passed'?a._passed:sortKey==='failed'?a._failed:sortKey==='total'?a._total:a._status;
+    const vb=sortKey==='name'?(b.student_name||''):sortKey==='id'?b.student_id:sortKey==='grade'?b._grade:sortKey==='rate'?b._rate:sortKey==='passed'?b._passed:sortKey==='failed'?b._failed:sortKey==='total'?b._total:b._status;
+    return typeof va==='number'?(va-vb)*sortDir:String(va).localeCompare(String(vb))*sortDir;
+  });
+  const tbody=el('student-table'); tbody.textContent='';
+  d.forEach(r=>{
+    const tr=document.createElement('tr'); tr.dataset.sid=r.student_id;
+    const gc=r._grade>=90?'var(--green)':r._grade>=70?'var(--accent)':r._grade>=60?'var(--yellow)':'var(--red)';
+    [{t:r.student_name||'N/A',c:'name-col'},{t:r.student_id},{t:r._status,badge:true},{t:r._passed},{t:r._failed},{t:r._total},{t:r._rate.toFixed(1)+'%'},{t:r._grade.toFixed(1),style:`color:${gc};font-weight:700`}].forEach(col=>{
+      const td=document.createElement('td'); if(col.c)td.className=col.c; if(col.style)td.setAttribute('style',col.style);
+      if(col.badge){const sp=document.createElement('span');sp.className=`status-badge status-${col.t}`;sp.textContent=col.t;td.appendChild(sp);}
+      else td.textContent=col.t;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+}
+renderTable('');
+el('search').addEventListener('input',e=>renderTable(e.target.value));
+document.querySelectorAll('thead th').forEach(th=>th.addEventListener('click',()=>{const k=th.dataset.sort;if(sortKey===k)sortDir*=-1;else{sortKey=k;sortDir=-1;}renderTable(el('search').value);}));
+
+el('student-table').addEventListener('click',e=>{
+  const tr=e.target.closest('tr'); if(!tr)return;
+  const r=REPORTS.find(x=>x.student_id===tr.dataset.sid); if(!r)return;
+  const panel=el('detail-panel'); panel.textContent='';
+  const hdr=document.createElement('div');hdr.className='detail-header';
+  const h2=document.createElement('h2');h2.textContent=`${r.student_name||'N/A'} (${r.student_id})`;
+  const btn=document.createElement('button');btn.className='close-btn';btn.textContent='Close';btn.onclick=()=>panel.classList.remove('active');
+  hdr.appendChild(h2);hdr.appendChild(btn);panel.appendChild(hdr);
+  const list=document.createElement('div');list.className='case-list';
+  (r.test_results||[]).forEach(t=>(t.cases||[]).forEach(c=>{
+    const item=document.createElement('div');item.className=`case-item ${c.status==='passed'?'passed':'failed'}`;
+    const icon=document.createElement('span');icon.className='case-icon';icon.textContent=c.status==='passed'?'✓':'✗';
+    const name=document.createElement('span');name.textContent=c.case_name;
+    const msg=document.createElement('span');msg.className='case-msg';
+    msg.textContent=[c.failure?c.failure.message:'',c.expected?'expected: '+c.expected:'',c.actual?'got: '+c.actual:''].filter(Boolean).join(' · ');
+    item.appendChild(icon);item.appendChild(name);item.appendChild(msg);list.appendChild(item);
+  }));
+  panel.appendChild(list);panel.classList.add('active');panel.scrollIntoView({behavior:'smooth',block:'start'});
+});
+
+const simList=el('sim-list');
+if(SIMILARITY.length===0){const p=document.createElement('p');p.style.cssText='color:var(--text-dim);padding:2rem;text-align:center';p.textContent='No similarity data.';simList.appendChild(p);}
+else SIMILARITY.forEach(p=>{
+  const color=p.score>.9?'var(--red)':p.score>.75?'var(--yellow)':'var(--green)';
+  const row=document.createElement('div');row.className='sim-pair';
+  const sc=document.createElement('div');sc.className='sim-score';sc.style.color=color;sc.textContent=(p.score*100).toFixed(1)+'%';
+  const info=document.createElement('div');
+  const names=document.createElement('div');names.textContent=`${p.a} ↔ ${p.b}`;
+  const barBg=document.createElement('div');barBg.className='sim-bar-bg';
+  const barFill=document.createElement('div');barFill.className='sim-bar-fill';barFill.style.cssText=`width:${p.score*100}%;background:${color}`;
+  barBg.appendChild(barFill);
+  const det=document.createElement('div');det.className='sim-details';det.textContent=`style: ${(p.style*100).toFixed(0)}% · structure: ${(p.structure*100).toFixed(0)}%`;
+  info.appendChild(names);info.appendChild(barBg);info.appendChild(det);
+  row.appendChild(sc);row.appendChild(info);simList.appendChild(row);
+});
+
+document.querySelectorAll('.tab').forEach(tab=>tab.addEventListener('click',()=>{
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  tab.classList.add('active');el(`tab-${tab.dataset.tab}`).classList.add('active');
+}));
+</script>
+</body>
+</html>
