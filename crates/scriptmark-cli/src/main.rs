@@ -30,6 +30,10 @@ enum Commands {
     Run(RunArgs),
     /// Summarize existing results (re-analyze without re-running)
     Summarize(SummarizeArgs),
+    /// Pull student roster from Canvas LMS
+    RosterPull(RosterPullArgs),
+    /// Push grades to Canvas LMS
+    GradesPush(GradesPushArgs),
 }
 
 #[derive(Parser)]
@@ -124,6 +128,39 @@ struct SummarizeArgs {
     range: (f64, f64),
 }
 
+#[derive(Parser)]
+struct RosterPullArgs {
+    /// Canvas API base URL (e.g. https://canvas.university.edu)
+    #[arg(long)]
+    canvas_url: String,
+
+    /// Canvas course ID
+    #[arg(long)]
+    course_id: u64,
+
+    /// Output roster CSV path
+    #[arg(short, long, default_value = "roster.csv")]
+    output: PathBuf,
+}
+
+#[derive(Parser)]
+struct GradesPushArgs {
+    /// Canvas API base URL
+    #[arg(long)]
+    canvas_url: String,
+
+    /// Canvas course ID
+    #[arg(long)]
+    course_id: u64,
+
+    /// Canvas assignment ID
+    #[arg(long)]
+    assignment_id: u64,
+
+    /// Path to results JSON file (from scriptmark grade)
+    results: PathBuf,
+}
+
 fn parse_curve_method(s: &str) -> Result<CurveMethod, String> {
     match s.to_lowercase().as_str() {
         "none" => Ok(CurveMethod::None),
@@ -151,6 +188,8 @@ async fn main() -> Result<()> {
         Commands::Grade(args) => cmd_grade(args).await,
         Commands::Run(args) => cmd_run(args).await,
         Commands::Summarize(args) => cmd_summarize(args),
+        Commands::RosterPull(args) => cmd_roster_pull(args).await,
+        Commands::GradesPush(args) => cmd_grades_push(args).await,
     }
 }
 
@@ -349,5 +388,61 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
     display::display_failures(&report_refs);
     display::display_stats(&report_refs);
 
+    Ok(())
+}
+
+async fn cmd_roster_pull(args: RosterPullArgs) -> Result<()> {
+    let client = scriptmark_canvas::CanvasClient::new(&args.canvas_url)
+        .context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?;
+
+    println!("Pulling roster from Canvas course {}...", args.course_id);
+    let roster = client
+        .pull_roster(args.course_id)
+        .await
+        .context("Failed to pull roster from Canvas")?;
+
+    println!("Found {} students", roster.len());
+
+    scriptmark_canvas::CanvasClient::save_roster_csv(&roster, &args.output)
+        .context("Failed to save roster CSV")?;
+
+    println!("Roster saved to {}", args.output.display());
+    Ok(())
+}
+
+async fn cmd_grades_push(args: GradesPushArgs) -> Result<()> {
+    let client = scriptmark_canvas::CanvasClient::new(&args.canvas_url)
+        .context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?;
+
+    let content = std::fs::read_to_string(&args.results).context("Failed to read results file")?;
+    let reports: Vec<scriptmark_core::models::StudentReport> =
+        serde_json::from_str(&content).context("Failed to parse results JSON")?;
+
+    // Build grades map: try to parse student_id as u64 (Canvas user ID)
+    let mut grades = std::collections::HashMap::new();
+    for report in &reports {
+        if let Some(grade) = report.final_grade {
+            if let Ok(uid) = report.student_id.parse::<u64>() {
+                grades.insert(uid, grade);
+            } else {
+                eprintln!(
+                    "Warning: cannot push grade for '{}' — student_id is not a Canvas user ID",
+                    report.student_id
+                );
+            }
+        }
+    }
+
+    println!(
+        "Pushing {} grades to Canvas assignment {}...",
+        grades.len(),
+        args.assignment_id
+    );
+    let results = client
+        .push_grades(args.course_id, args.assignment_id, &grades)
+        .await
+        .context("Failed to push grades to Canvas")?;
+
+    println!("Successfully pushed {} grades", results.len());
     Ok(())
 }
