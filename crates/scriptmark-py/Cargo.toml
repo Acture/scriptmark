@@ -1,0 +1,16 @@
+[package]
+name = "scriptmark-py"
+description = "Python bindings for ScriptMark via PyO3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "_scriptmark"
+crate-type = ["cdylib"]
+
+[dependencies]
+scriptmark-core = { workspace = true }
+scriptmark-runner = { workspace = true }
+pyo3 = { workspace = true }

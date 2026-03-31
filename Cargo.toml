@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+	"crates/scriptmark-core",
+	"crates/scriptmark-runner",
+	"crates/scriptmark-cli",
+	"crates/scriptmark-py",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+authors = ["Acture <acturea@gmail.com>"]
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+csv = "1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Scripting
+rhai = "1"
+
+# Display
+comfy-table = "7"
+owo-colors = "4"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Regex
+regex = "1"
+
+# Python bindings
+pyo3 = { version = "0.24", features = ["extension-module"] }
+
+# Internal
+scriptmark-core = { path = "crates/scriptmark-core" }
+scriptmark-runner = { path = "crates/scriptmark-runner" }
