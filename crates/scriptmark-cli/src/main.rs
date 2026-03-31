@@ -34,6 +34,8 @@ enum Commands {
     RosterPull(RosterPullArgs),
     /// Push grades to Canvas LMS
     GradesPush(GradesPushArgs),
+    /// Detect code similarity between student submissions
+    Similarity(SimilarityArgs),
 }
 
 #[derive(Parser)]
@@ -161,6 +163,25 @@ struct GradesPushArgs {
     results: PathBuf,
 }
 
+#[derive(Parser)]
+struct SimilarityArgs {
+    /// Directories containing student submissions
+    #[arg(required = true)]
+    submissions: Vec<PathBuf>,
+
+    /// N-gram size for fingerprinting (default: 25)
+    #[arg(long, default_value = "25")]
+    ngram_size: usize,
+
+    /// Minimum similarity threshold to report (0.0-1.0, default: 0.6)
+    #[arg(long, default_value = "0.6")]
+    threshold: f64,
+
+    /// Output CSV file for similarity report
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
 fn parse_curve_method(s: &str) -> Result<CurveMethod, String> {
     match s.to_lowercase().as_str() {
         "none" => Ok(CurveMethod::None),
@@ -190,6 +211,7 @@ async fn main() -> Result<()> {
         Commands::Summarize(args) => cmd_summarize(args),
         Commands::RosterPull(args) => cmd_roster_pull(args).await,
         Commands::GradesPush(args) => cmd_grades_push(args).await,
+        Commands::Similarity(args) => cmd_similarity(args),
     }
 }
 
@@ -444,5 +466,86 @@ async fn cmd_grades_push(args: GradesPushArgs) -> Result<()> {
         .context("Failed to push grades to Canvas")?;
 
     println!("Successfully pushed {} grades", results.len());
+    Ok(())
+}
+
+fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
+    use scriptmark_core::similarity::compare_submissions;
+
+    // Collect files grouped by student ID
+    let mut submissions: std::collections::HashMap<String, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+
+    for dir in &args.submissions {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("py") {
+                continue;
+            }
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let sid = filename.split('_').next().unwrap_or("").to_string();
+            if !sid.is_empty() {
+                submissions.entry(sid).or_default().push(path);
+            }
+        }
+    }
+
+    println!(
+        "Comparing {} students (n-gram={}, threshold={:.0}%)",
+        submissions.len(),
+        args.ngram_size,
+        args.threshold * 100.0
+    );
+
+    let pairs = compare_submissions(&submissions, args.ngram_size, args.threshold);
+
+    if pairs.is_empty() {
+        println!(
+            "No pairs above {:.0}% similarity threshold.",
+            args.threshold * 100.0
+        );
+        return Ok(());
+    }
+
+    use owo_colors::OwoColorize;
+
+    println!(
+        "\n{} {} pairs above threshold:\n",
+        "Found".bold(),
+        pairs.len()
+    );
+
+    for pair in &pairs {
+        let color = if pair.score > 0.9 {
+            "\x1b[31m" // red
+        } else if pair.score > 0.75 {
+            "\x1b[33m" // yellow
+        } else {
+            "\x1b[32m" // green
+        };
+        println!(
+            "  {}{:.1}%\x1b[0m  {} ↔ {}",
+            color,
+            pair.score * 100.0,
+            pair.student_a,
+            pair.student_b,
+        );
+    }
+
+    if let Some(output) = &args.output {
+        let mut wtr = csv::Writer::from_path(output)?;
+        wtr.write_record(["student_a", "student_b", "similarity"])?;
+        for pair in &pairs {
+            wtr.write_record([
+                &pair.student_a,
+                &pair.student_b,
+                &format!("{:.4}", pair.score),
+            ])?;
+        }
+        wtr.flush()?;
+        println!("\nReport saved to {}", output.display());
+    }
+
     Ok(())
 }

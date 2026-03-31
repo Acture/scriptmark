@@ -15,12 +15,19 @@ use crate::checker::{CheckInput, Checker};
 /// Outputs JSON on stdout: `{"ok": true, "value": ..., "type": "..."}` or
 /// `{"ok": false, "error_type": "...", "error_message": "..."}`.
 const HELPER_SCRIPT: &str = r#"
-import importlib.util, sys, json, builtins, io
+import importlib.util, sys, json, builtins, io, py_compile
 
 payload = json.loads(sys.argv[1])
 file_path = payload["file"]
 func_name = payload["function"]
 args = payload["args"]
+
+# Step 0: Syntax pre-check — catch SyntaxError/IndentationError early
+try:
+    py_compile.compile(file_path, doraise=True)
+except py_compile.PyCompileError as e:
+    print(json.dumps({"ok": False, "error_type": "SyntaxError", "error_message": str(e)}))
+    sys.exit(0)
 
 # Override input/print during module loading to prevent student top-level code
 # from blocking (input) or polluting stdout (print)
