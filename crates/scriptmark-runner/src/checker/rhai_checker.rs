@@ -19,7 +19,7 @@ impl RhaiChecker {
 }
 
 /// Convert a serde_json::Value to a Rhai Dynamic value.
-fn json_to_dynamic(value: &serde_json::Value) -> Dynamic {
+pub fn json_to_dynamic(value: &serde_json::Value) -> Dynamic {
     match value {
         serde_json::Value::Null => Dynamic::UNIT,
         serde_json::Value::Bool(b) => Dynamic::from(*b),

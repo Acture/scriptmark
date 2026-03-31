@@ -40,8 +40,41 @@ pub struct CheckSpec {
     pub tolerance: Option<f64>,
 }
 
-/// A single test case within a test spec.
+/// Oracle — how to determine the expected output for generated inputs.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Oracle {
+    /// Teacher's reference implementation file. Same function name, compare outputs.
+    #[serde(default)]
+    pub reference: Option<String>,
+    /// Rhai expression computing expected value from generated args.
+    #[serde(default)]
+    pub rhai: Option<String>,
+    /// Built-in checker name (just verifies a property, no expected value).
+    #[serde(default)]
+    pub check: Option<String>,
+    /// Python script oracle.
+    #[serde(default)]
+    pub python: Option<String>,
+}
+
+/// Parametrize configuration — auto-generate test cases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Parametrize {
+    /// Number of test cases to generate.
+    pub count: usize,
+    /// Random seed for reproducibility.
+    #[serde(default)]
+    pub seed: Option<u64>,
+    /// Generator expressions per argument. Key = arg name, Value = generator string.
+    #[serde(default)]
+    pub args: std::collections::HashMap<String, String>,
+    /// How to determine the expected output.
+    #[serde(default)]
+    pub oracle: Oracle,
+}
+
+/// A single test case within a test spec.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TestCase {
     pub name: String,
 
@@ -77,6 +110,10 @@ pub struct TestCase {
     /// Per-case timeout override in seconds.
     #[serde(default)]
     pub timeout: Option<u64>,
+
+    /// Parametrize configuration for auto-generating test cases.
+    #[serde(default)]
+    pub parametrize: Option<Parametrize>,
 }
 
 /// Metadata for a test spec file.
