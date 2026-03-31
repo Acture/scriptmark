@@ -87,6 +87,9 @@ pub struct StudentReport {
     pub final_grade: Option<f64>,
     #[serde(default)]
     pub backend_name: Option<String>,
+    /// Lint-based style score (0-100). Set by linter, used by grading.
+    #[serde(default)]
+    pub lint_score: Option<f64>,
 }
 
 impl StudentReport {

@@ -105,6 +105,7 @@ async fn run_student(
                     vars: Default::default(),
                     setup: vec![],
                     cases: vec![],
+                    lint: None,
                 };
 
                 let result = executor
@@ -211,11 +212,24 @@ async fn run_student(
         });
     }
 
+    // Run lint if any spec has a lint config (use the first one found).
+    let mut lint_score = None;
+    for spec in specs {
+        if let Some(lint_config) = &spec.lint {
+            if let Some(first_file) = files.first() {
+                let result = crate::linter::run_lint(lint_config, &first_file.path);
+                lint_score = Some(result.style_score);
+            }
+            break;
+        }
+    }
+
     StudentReport {
         student_id: sid.to_string(),
         student_name: None,
         test_results,
         final_grade: None,
         backend_name: Some("python".to_string()),
+        lint_score,
     }
 }
