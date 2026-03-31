@@ -94,6 +94,7 @@ async fn run_student(
                     expected_stdout: None,
                     check: None,
                     timeout: None,
+                    parametrize: None,
                 };
 
                 let setup_spec = TestSpec {
@@ -120,6 +121,29 @@ async fn run_student(
                         .and_then(|s| serde_json::from_str(s).ok())
                         .unwrap_or(serde_json::Value::Null)
                 }
+            } else if let Some(script_path) = &step.file {
+                // Run teacher script, capture JSON stdout
+                match tokio::process::Command::new("python3")
+                    .arg(script_path)
+                    .output()
+                    .await
+                {
+                    Ok(output) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null)
+                    }
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        eprintln!("Setup script '{}' failed: {}", script_path, stderr.trim());
+                        setup_failed = true;
+                        serde_json::Value::Null
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to run setup script '{}': {}", script_path, e);
+                        setup_failed = true;
+                        serde_json::Value::Null
+                    }
+                }
             } else {
                 serde_json::Value::Null
             };
@@ -127,9 +151,31 @@ async fn run_student(
             context.insert(step.id.clone(), value);
         }
 
-        // 3. Run cases with resolved args
+        // 3. Expand parametrized cases
+        let expanded_cases = crate::expander::expand_cases(&spec.cases);
+
+        // 4. Resolve oracles for parametrized cases
+        let mut final_cases = Vec::new();
+        for mut case in expanded_cases {
+            // Find original parametrized case to get oracle config
+            let original = spec
+                .cases
+                .iter()
+                .find(|c| case.name.starts_with(&c.name) && c.parametrize.is_some());
+            if let Some(orig) = original
+                && let Some(param) = &orig.parametrize
+            {
+                let mut arg_names: Vec<String> = param.args.keys().cloned().collect();
+                arg_names.sort();
+                crate::oracle::resolve_oracle(&mut case, &param.oracle, spec, executor, &arg_names)
+                    .await;
+            }
+            final_cases.push(case);
+        }
+
+        // 5. Run cases with resolved args
         let mut cases = Vec::new();
-        for case in &spec.cases {
+        for case in &final_cases {
             if setup_failed {
                 cases.push(CaseResult {
                     case_name: case.name.clone(),

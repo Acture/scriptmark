@@ -130,4 +130,44 @@ upper_bound = 100
         assert_eq!(config.course.name, "GEEC Python");
         assert_eq!(config.course.language, "python");
     }
+
+    #[test]
+    fn test_load_parametrized_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_param.toml");
+        std::fs::write(
+            &path,
+            r#"
+[meta]
+name = "random_max"
+file = "lab5.py"
+function = "find_larger_number"
+language = "python"
+
+[[cases]]
+name = "random pairs"
+
+[cases.parametrize]
+count = 20
+seed = 42
+
+[cases.parametrize.args]
+a = "int(-100, 100)"
+b = "int(-100, 100)"
+
+[cases.parametrize.oracle]
+reference = "solutions/lab5.py"
+"#,
+        )
+        .unwrap();
+
+        let spec = load_spec(&path).unwrap();
+        assert_eq!(spec.cases.len(), 1);
+        let case = &spec.cases[0];
+        let param = case.parametrize.as_ref().unwrap();
+        assert_eq!(param.count, 20);
+        assert_eq!(param.seed, Some(42));
+        assert_eq!(param.args.len(), 2);
+        assert!(param.oracle.reference.is_some());
+    }
 }

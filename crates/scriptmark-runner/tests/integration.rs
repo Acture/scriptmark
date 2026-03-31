@@ -370,3 +370,196 @@ expect = 0.001
         "Student should be able to access EPSILON global injected by vars"
     );
 }
+
+#[tokio::test]
+async fn test_parametrize_with_reference_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Student — correct max implementation
+    std::fs::write(
+        dir.path().join("alice_lab5.py"),
+        "def find_max(a, b):\n    return max(a, b)\n",
+    )
+    .unwrap();
+
+    // Teacher reference implementation (the oracle)
+    let solutions_dir = dir.path().join("solutions");
+    std::fs::create_dir(&solutions_dir).unwrap();
+    std::fs::write(
+        solutions_dir.join("lab5.py"),
+        "def find_max(a, b):\n    return max(a, b)\n",
+    )
+    .unwrap();
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "parametrized_max"
+file = "lab5.py"
+function = "find_max"
+language = "python"
+
+[[cases]]
+name = "random max"
+
+[cases.parametrize]
+count = 10
+seed = 42
+
+[cases.parametrize.args]
+a = "int(-50, 50)"
+b = "int(-50, 50)"
+
+[cases.parametrize.oracle]
+reference = "{}/solutions/lab5.py"
+"#,
+        dir.path().display()
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_lab5.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(alice.total_cases(), 10, "Should have 10 generated cases");
+    assert_eq!(
+        alice.total_passed(),
+        10,
+        "Correct implementation should pass all generated cases"
+    );
+}
+
+#[tokio::test]
+async fn test_parametrize_with_rhai_oracle() {
+    let dir = tempfile::tempdir().unwrap();
+
+    std::fs::write(
+        dir.path().join("alice_lab5.py"),
+        "def find_max(a, b):\n    return max(a, b)\n",
+    )
+    .unwrap();
+
+    let spec: TestSpec = toml::from_str(
+        r#"
+[meta]
+name = "rhai_oracle_max"
+file = "lab5.py"
+function = "find_max"
+language = "python"
+
+[[cases]]
+name = "rhai oracle"
+
+[cases.parametrize]
+count = 5
+seed = 123
+
+[cases.parametrize.args]
+a = "int(0, 100)"
+b = "int(0, 100)"
+
+[cases.parametrize.oracle]
+rhai = "if a >= b { a } else { b }"
+"#,
+    )
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_lab5.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(alice.total_cases(), 5, "Should have 5 generated cases");
+    assert_eq!(
+        alice.total_passed(),
+        5,
+        "Correct max implementation should match Rhai oracle"
+    );
+}
+
+#[tokio::test]
+async fn test_setup_file_source() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Teacher generator script — outputs JSON to stdout
+    std::fs::write(
+        dir.path().join("gen_data.py"),
+        r#"
+import json
+data = {"values": [10, 20, 30], "name": "test_data"}
+print(json.dumps(data))
+"#,
+    )
+    .unwrap();
+
+    // Student code — reads the generated data
+    std::fs::write(
+        dir.path().join("alice_proc.py"),
+        r#"
+def sum_values(data):
+    return sum(data["values"])
+"#,
+    )
+    .unwrap();
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "file_source_test"
+file = "proc.py"
+function = "sum_values"
+language = "python"
+
+[[setup]]
+id = "data"
+file = "{}/gen_data.py"
+
+[[cases]]
+name = "sum generated values"
+args = ["$data"]
+expect = 60
+"#,
+        dir.path().display()
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_proc.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(alice.total_cases(), 1);
+    assert_eq!(
+        alice.test_results[0].cases[0].status,
+        TestStatus::Passed,
+        "Should pass: teacher script generates data, student sums it correctly"
+    );
+}

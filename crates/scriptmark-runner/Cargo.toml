@@ -15,6 +15,7 @@ rhai = { workspace = true }
 regex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
