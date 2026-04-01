@@ -5,6 +5,7 @@ members = [
 	"crates/scriptmark-runner",
 	"crates/scriptmark-cli",
 	"crates/scriptmark-canvas",
+	"crates/scriptmark-db",
 	"crates/scriptmark-py",
 ]
 
@@ -52,3 +53,5 @@ pyo3 = { version = "0.24", features = ["extension-module"] }
 scriptmark-core = { path = "crates/scriptmark-core" }
 scriptmark-runner = { path = "crates/scriptmark-runner" }
 scriptmark-canvas = { path = "crates/scriptmark-canvas" }
+scriptmark-db = { path = "crates/scriptmark-db" }
+rusqlite = { version = "0.34", features = ["bundled"] }
