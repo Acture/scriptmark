@@ -228,7 +228,7 @@ for case in payload["cases"]:
 
     if check_fn:
         try:
-            passed, msg = _call_checker(check_fn, _make_serializable(val), case.get("expected"))
+            passed, msg = _call_checker(check_fn, val, case.get("expected"))
             results.append({"ok": bool(passed), "name": case["name"],
                 "value": _make_serializable(val), "type": type(val).__name__,
                 "checked": True, "message": msg or ""})

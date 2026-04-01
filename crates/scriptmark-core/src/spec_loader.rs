@@ -3,11 +3,31 @@ use std::path::Path;
 use crate::models::{AssignmentConfig, CourseConfig, TestSpec};
 
 /// Load a test specification from a TOML file.
+///
+/// Relative paths in `imports` are resolved relative to the TOML file's directory.
 pub fn load_spec(path: &Path) -> Result<TestSpec, SpecError> {
     let content =
         std::fs::read_to_string(path).map_err(|e| SpecError::IoError(path.to_path_buf(), e))?;
-    let spec: TestSpec =
+    let mut spec: TestSpec =
         toml::from_str(&content).map_err(|e| SpecError::ParseError(path.to_path_buf(), e))?;
+
+    // Resolve relative imports paths against the spec file's parent directory
+    if let Some(parent) = path.parent() {
+        spec.meta.imports = spec
+            .meta
+            .imports
+            .into_iter()
+            .map(|p| {
+                let imp_path = Path::new(&p);
+                if imp_path.is_relative() {
+                    parent.join(imp_path).to_string_lossy().to_string()
+                } else {
+                    p
+                }
+            })
+            .collect();
+    }
+
     Ok(spec)
 }
 
