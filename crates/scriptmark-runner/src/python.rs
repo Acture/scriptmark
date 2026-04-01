@@ -58,11 +58,39 @@ except Exception as e:
 # Restore stdout for function execution — student function output is captured
 sys.stdout = _real_stdout
 
-if not hasattr(mod, func_name):
+def _fuzzy_lookup(module, name, expected_argc=None):
+    """Find function by exact name or best fuzzy match (name + signature similarity)."""
+    if hasattr(module, name):
+        return getattr(module, name), name
+    from difflib import SequenceMatcher
+    candidates = [(n, getattr(module, n)) for n in dir(module)
+                  if callable(getattr(module, n)) and not n.startswith("_")]
+    if not candidates:
+        return None, name
+    scored = []
+    for n, obj in candidates:
+        name_sim = SequenceMatcher(None, name.lower(), n.lower()).ratio()
+        sig_bonus = 0.0
+        if expected_argc is not None:
+            try:
+                import inspect
+                params = [p for p in inspect.signature(obj).parameters.values()
+                          if p.name != "self"]
+                if len(params) == expected_argc:
+                    sig_bonus = 0.2
+            except (ValueError, TypeError):
+                pass
+        scored.append((n, name_sim + sig_bonus, obj))
+    scored.sort(key=lambda x: -x[1])
+    best_name, best_score, best_obj = scored[0]
+    if best_score >= 0.5:
+        return best_obj, best_name
+    return None, name
+
+func, matched_name = _fuzzy_lookup(mod, func_name, len(args))
+if func is None:
     _real_print(json.dumps({"ok": False, "error_type": "AttributeError", "error_message": f"Function '{func_name}' not found"}))
     sys.exit(0)
-
-func = getattr(mod, func_name)
 try:
     result = func(*args)
     _real_print(json.dumps({"ok": True, "value": result, "type": type(result).__name__}))
@@ -189,12 +217,42 @@ except Exception as e:
 sys.stdout = _real_stdout
 builtins.print = _real_print
 
+def _fuzzy_lookup(module, name, expected_argc=None):
+    """Find function by exact name or best fuzzy match (name + signature similarity)."""
+    if hasattr(module, name):
+        return getattr(module, name), name
+    from difflib import SequenceMatcher
+    candidates = [(n, getattr(module, n)) for n in dir(module)
+                  if callable(getattr(module, n)) and not n.startswith("_")]
+    if not candidates:
+        return None, name
+    scored = []
+    for n, obj in candidates:
+        name_sim = SequenceMatcher(None, name.lower(), n.lower()).ratio()
+        sig_bonus = 0.0
+        if expected_argc is not None:
+            try:
+                import inspect
+                params = [p for p in inspect.signature(obj).parameters.values()
+                          if p.name != "self"]
+                if len(params) == expected_argc:
+                    sig_bonus = 0.2
+            except (ValueError, TypeError):
+                pass
+        scored.append((n, name_sim + sig_bonus, obj))
+    scored.sort(key=lambda x: -x[1])
+    best_name, best_score, best_obj = scored[0]
+    if best_score >= 0.5:
+        return best_obj, best_name
+    return None, name
+
 # 5. Run setup steps
 for step in payload.get("setup", []):
     fname = step["function"]
-    if not hasattr(student_mod, fname):
+    argc = len(step.get("args", []))
+    func, matched = _fuzzy_lookup(student_mod, fname, argc)
+    if func is None:
         _fail(step["id"], "AttributeError", f"Function '{fname}' not found")
-    func = getattr(student_mod, fname)
     args = _resolve_refs(step.get("args", []))
     try:
         _ctx[step["id"]] = func(*args)
@@ -205,11 +263,12 @@ for step in payload.get("setup", []):
 results = []
 for case in payload["cases"]:
     fname = case["function"]
-    if not hasattr(student_mod, fname):
+    argc = len(case.get("args", []))
+    func, matched = _fuzzy_lookup(student_mod, fname, argc)
+    if func is None:
         results.append({"ok": False, "name": case["name"],
             "error_type": "AttributeError", "error_message": f"Function '{fname}' not found"})
         continue
-    func = getattr(student_mod, fname)
     args = _resolve_refs(case.get("args", []), do_copy=copy_refs)
     try:
         val = func(*args)
@@ -266,12 +325,25 @@ impl PythonExecutor {
     }
 
     /// Find the student file matching the spec's file pattern.
-    fn find_student_file<'a>(
+    ///
+    /// Strategy (scored, best wins):
+    /// 1. Exact suffix match (100) → highest confidence
+    /// 2. Strip numeric prefixes, compare stems (80-100)
+    /// 3. Stem-contains (40-60)
+    /// 4. Function-definition scan (+200 bonus) → if spec has function hint,
+    ///    files containing `def function_name` get a large boost
+    fn find_student_file_with_hint<'a>(
         &self,
         student_files: &'a [StudentFile],
         pattern: &str,
+        function_hint: Option<&str>,
     ) -> Option<&'a StudentFile> {
-        // Exact suffix match first
+        let pattern_stem = Path::new(pattern)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(pattern);
+
+        // 1. Exact suffix match — highest confidence
         if let Some(f) = student_files.iter().find(|f| {
             f.path
                 .file_name()
@@ -280,17 +352,65 @@ impl PythonExecutor {
         }) {
             return Some(f);
         }
-        // Stem-contains match as fallback
-        let stem = Path::new(pattern)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(pattern);
-        student_files.iter().find(|f| {
-            f.path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.contains(stem))
-        })
+
+        // Helper: strip numeric prefix segments (SID_uploadID_fileID_)
+        // "21300110043_171469_6012331_Lab3_2-2.py" → "Lab3_2-2.py"
+        fn extract_actual_name(filename: &str) -> &str {
+            let mut rest = filename;
+            loop {
+                if let Some(idx) = rest.find('_') {
+                    let prefix = &rest[..idx];
+                    if prefix.chars().all(|c| c.is_ascii_digit()) {
+                        rest = &rest[idx + 1..];
+                        continue;
+                    }
+                }
+                break;
+            }
+            rest
+        }
+
+        // 2. Score all candidates by filename similarity + function content
+        let mut scored: Vec<(&'a StudentFile, u32)> = student_files
+            .iter()
+            .filter_map(|f| {
+                let filename = f.path.file_name()?.to_str()?;
+                let actual = extract_actual_name(filename);
+                let actual_stem = Path::new(actual)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or(actual);
+
+                let mut score: u32 = 0;
+
+                // --- Filename similarity ---
+                if actual_stem == pattern_stem {
+                    score += 100;
+                } else if actual_stem.starts_with(pattern_stem) {
+                    score += 80;
+                } else if actual.contains(pattern_stem) {
+                    score += 60;
+                } else if filename.contains(pattern_stem) {
+                    score += 40;
+                }
+
+                // --- Function definition scan (highest priority tiebreaker) ---
+                if let Some(func_name) = function_hint
+                    && let Ok(content) = std::fs::read_to_string(&f.path)
+                {
+                    let needle = format!("def {func_name}");
+                    if content.contains(&needle) {
+                        score += 200; // trumps filename-only matches
+                    }
+                }
+
+                if score > 0 { Some((f, score)) } else { None }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.cmp(&a.1));
+
+        scored.first().map(|(f, _)| *f)
     }
 
     /// Execute a function-call test case via the helper script.
@@ -673,28 +793,35 @@ impl PythonExecutor {
     ) -> Vec<CaseResult> {
         let start = Instant::now();
 
-        let student_file = match self.find_student_file(student_files, &spec.meta.file) {
-            Some(f) => f,
-            None => {
-                return cases
-                    .iter()
-                    .map(|c| CaseResult {
-                        case_name: c.name.clone(),
-                        status: TestStatus::Error,
-                        actual: None,
-                        expected: None,
-                        failure: Some(FailureDetail {
-                            message: format!(
-                                "No file matching '{}' found in submission",
-                                spec.meta.file
-                            ),
-                            details: String::new(),
-                        }),
-                        elapsed_ms: Some(0),
-                    })
-                    .collect();
-            }
-        };
+        // Collect function hints from cases for smarter file matching
+        let func_hint = cases
+            .iter()
+            .find_map(|c| c.function.as_deref())
+            .or(spec.meta.function.as_deref());
+
+        let student_file =
+            match self.find_student_file_with_hint(student_files, &spec.meta.file, func_hint) {
+                Some(f) => f,
+                None => {
+                    return cases
+                        .iter()
+                        .map(|c| CaseResult {
+                            case_name: c.name.clone(),
+                            status: TestStatus::Error,
+                            actual: None,
+                            expected: None,
+                            failure: Some(FailureDetail {
+                                message: format!(
+                                    "No file matching '{}' found in submission",
+                                    spec.meta.file
+                                ),
+                                details: String::new(),
+                            }),
+                            elapsed_ms: Some(0),
+                        })
+                        .collect();
+                }
+            };
 
         // Build case payloads — include check_function if specified via CheckSpec
         let case_payloads: Vec<serde_json::Value> = cases
@@ -1013,7 +1140,11 @@ impl PythonExecutor {
         case: &TestCase,
         timeout_secs: u64,
     ) -> CaseResult {
-        let student_file = match self.find_student_file(student_files, &spec.meta.file) {
+        let student_file = match self.find_student_file_with_hint(
+            student_files,
+            &spec.meta.file,
+            spec.meta.function.as_deref(),
+        ) {
             Some(f) => f,
             None => {
                 return CaseResult {
