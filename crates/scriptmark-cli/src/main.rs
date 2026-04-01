@@ -439,10 +439,14 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
             let _ = database.import_roster(&roster);
         }
 
+        // Derive assignment name: try parent dir name (e.g. "hw5" from "courses/geec/hw5/tests")
+        // then fall back to tests_dir name, then "unknown"
         let assignment = args
             .tests_dir
-            .file_name()
+            .parent()
+            .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
+            .or_else(|| args.tests_dir.file_name().and_then(|n| n.to_str()))
             .unwrap_or("unknown");
 
         let session_id = database
