@@ -7,6 +7,7 @@ members = [
 	"crates/scriptmark-canvas",
 	"crates/scriptmark-db",
 	"crates/scriptmark-py",
+	"crates/scriptmark-tui",
 ]
 
 [workspace.package]
@@ -54,4 +55,7 @@ scriptmark-core = { path = "crates/scriptmark-core" }
 scriptmark-runner = { path = "crates/scriptmark-runner" }
 scriptmark-canvas = { path = "crates/scriptmark-canvas" }
 scriptmark-db = { path = "crates/scriptmark-db" }
+scriptmark-tui = { path = "crates/scriptmark-tui" }
+ratatui = "0.29"
+crossterm = "0.29"
 rusqlite = { version = "0.34", features = ["bundled"] }

@@ -22,3 +22,4 @@ serde_json = { workspace = true }
 csv = { workspace = true }
 scriptmark-canvas = { workspace = true }
 scriptmark-db = { workspace = true }
+scriptmark-tui = { workspace = true }

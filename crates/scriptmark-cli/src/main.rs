@@ -39,6 +39,12 @@ enum Commands {
     Similarity(SimilarityArgs),
     /// Generate an HTML report from grading results
     Report(ReportArgs),
+    /// Launch interactive TUI
+    Tui {
+        /// Database file path
+        #[arg(long, default_value = "scriptmark.db")]
+        db: PathBuf,
+    },
     /// Database management commands
     Db(DbCommand),
 }
@@ -297,6 +303,7 @@ async fn main() -> Result<()> {
         Commands::GradesPush(args) => cmd_grades_push(args).await,
         Commands::Similarity(args) => cmd_similarity(args),
         Commands::Report(args) => cmd_report(args),
+        Commands::Tui { db } => scriptmark_tui::run_tui(&db).context("TUI error"),
         Commands::Db(cmd) => cmd_db(cmd),
     }
 }
