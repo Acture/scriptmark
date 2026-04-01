@@ -59,6 +59,10 @@ pub struct CheckSpec {
     /// Tolerance for approx checker
     #[serde(default)]
     pub tolerance: Option<f64>,
+    /// In-process checker function name (looked up in teacher imports / _ctx).
+    /// Used in chain mode — runs in the same Python process as student code.
+    #[serde(default)]
+    pub function: Option<String>,
 }
 
 /// Oracle — how to determine the expected output for generated inputs.
@@ -135,6 +139,11 @@ pub struct TestCase {
     /// Parametrize configuration for auto-generating test cases.
     #[serde(default)]
     pub parametrize: Option<Parametrize>,
+
+    /// Per-case function name override (used in chain mode where different
+    /// cases may call different functions).
+    #[serde(default)]
+    pub function: Option<String>,
 }
 
 /// Metadata for a test spec file.
@@ -156,6 +165,20 @@ pub struct TestMeta {
     /// Placeholders: {source}, {output}
     #[serde(default)]
     pub compile: Option<String>,
+
+    /// Teacher module paths — loaded before student code in chain mode.
+    /// Exports (public names) populate the `$ref` context as live Python objects.
+    #[serde(default)]
+    pub imports: Vec<String>,
+
+    /// Whether to deepcopy `$ref` args before each case (prevents mutation).
+    /// Defaults to true. Set false for large data where copy is expensive.
+    #[serde(default = "default_copy_refs")]
+    pub copy_refs: bool,
+}
+
+fn default_copy_refs() -> bool {
+    true
 }
 
 /// A setup step — calls a function, stores result for `$ref`. Not scored.

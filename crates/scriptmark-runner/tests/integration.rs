@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::Write;
 
 use scriptmark_core::models::*;
 use scriptmark_runner::orchestrator;
@@ -561,5 +562,385 @@ expect = 60
         alice.test_results[0].cases[0].status,
         TestStatus::Passed,
         "Should pass: teacher script generates data, student sums it correctly"
+    );
+}
+
+// ============================================================
+// Chain mode tests
+// ============================================================
+
+/// Helper to write a file and return its path as a string.
+fn write_file(dir: &std::path::Path, name: &str, content: &str) -> String {
+    let path = dir.join(name);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    let mut f = std::fs::File::create(&path).unwrap();
+    f.write_all(content.as_bytes()).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+#[tokio::test]
+async fn test_chain_basic_imports() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Teacher module: provides DATA
+    let teacher_path = write_file(
+        dir.path(),
+        "teacher.py",
+        r#"
+class Dataset:
+    def __init__(self, values):
+        self.values = values
+
+DATA = Dataset([10, 20, 30])
+"#,
+    );
+
+    // Student: processes the teacher's DATA
+    write_file(
+        dir.path(),
+        "alice_hw.py",
+        r#"
+def total(data):
+    return sum(data.values)
+
+def average(data):
+    return sum(data.values) / len(data.values)
+"#,
+    );
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "chain_basic"
+file = "hw.py"
+language = "python"
+imports = ["{teacher_path}"]
+
+[[cases]]
+name = "sum values"
+function = "total"
+args = ["$DATA"]
+expect = 60
+
+[[cases]]
+name = "average values"
+function = "average"
+args = ["$DATA"]
+expect = 20.0
+"#,
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_hw.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(alice.total_cases(), 2);
+    assert_eq!(
+        alice.test_results[0].cases[0].status,
+        TestStatus::Passed,
+        "total($DATA) should be 60"
+    );
+    assert_eq!(
+        alice.test_results[0].cases[1].status,
+        TestStatus::Passed,
+        "average($DATA) should be 20.0"
+    );
+}
+
+#[tokio::test]
+async fn test_chain_decorator_checker() {
+    let dir = tempfile::tempdir().unwrap();
+
+    // Teacher module: DATA + @checker for validate
+    let teacher_path = write_file(
+        dir.path(),
+        "teacher.py",
+        r#"
+DATA = list(range(10))
+
+@checker
+def check_subset(result, expected, DATA):
+    """Auto-injected DATA from _ctx."""
+    if not isinstance(result, list):
+        return False, f"Expected list, got {type(result).__name__}"
+    for item in result:
+        if item not in DATA:
+            return False, f"{item} not in DATA"
+    return True, ""
+"#,
+    );
+
+    // Student returns a subset
+    write_file(
+        dir.path(),
+        "alice_hw.py",
+        r#"
+def subset(data, n):
+    return data[:n]
+"#,
+    );
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "checker_test"
+file = "hw.py"
+language = "python"
+imports = ["{teacher_path}"]
+
+[[cases]]
+name = "first 3 elements"
+function = "subset"
+args = ["$DATA", 3]
+expect = [0, 1, 2]
+"#,
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_hw.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(alice.total_cases(), 1);
+    assert_eq!(
+        alice.test_results[0].cases[0].status,
+        TestStatus::Passed,
+        "@checker should validate subset against DATA"
+    );
+}
+
+#[tokio::test]
+async fn test_chain_decorator_checker_fails() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let teacher_path = write_file(
+        dir.path(),
+        "teacher.py",
+        r#"
+DATA = [1, 2, 3]
+
+@checker("get_items")
+def validate_items(result, expected, DATA):
+    for item in result:
+        if item not in DATA:
+            return False, f"{item} not in DATA"
+    return True, ""
+"#,
+    );
+
+    // Student returns items not in DATA
+    write_file(
+        dir.path(),
+        "alice_hw.py",
+        r#"
+def get_items():
+    return [1, 2, 99]
+"#,
+    );
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "checker_fail_test"
+file = "hw.py"
+language = "python"
+imports = ["{teacher_path}"]
+
+[[cases]]
+name = "bad items"
+function = "get_items"
+args = []
+"#,
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_hw.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(
+        alice.test_results[0].cases[0].status,
+        TestStatus::Failed,
+        "@checker('get_items') should detect 99 not in DATA"
+    );
+    assert!(
+        alice.test_results[0].cases[0]
+            .failure
+            .as_ref()
+            .unwrap()
+            .message
+            .contains("99"),
+        "Error message should mention the invalid item"
+    );
+}
+
+#[tokio::test]
+async fn test_chain_setup_failure() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let teacher_path = write_file(dir.path(), "teacher.py", "GREETING = 'hello'\n");
+
+    // Student has no load_data function
+    write_file(
+        dir.path(),
+        "alice_hw.py",
+        r#"
+def process(data):
+    return len(data)
+"#,
+    );
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "setup_fail"
+file = "hw.py"
+language = "python"
+imports = ["{teacher_path}"]
+
+[[setup]]
+id = "data"
+function = "load_data"
+args = ["test.csv"]
+
+[[cases]]
+name = "should be skipped"
+function = "process"
+args = ["$data"]
+expect = 10
+"#,
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_hw.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    assert_eq!(
+        alice.test_results[0].cases[0].status,
+        TestStatus::Error,
+        "All cases should error when setup fails"
+    );
+    let msg = &alice.test_results[0].cases[0]
+        .failure
+        .as_ref()
+        .unwrap()
+        .message;
+    assert!(
+        msg.contains("setup") || msg.contains("Setup") || msg.contains("not found"),
+        "Error should mention setup failure, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn test_chain_copy_refs_prevents_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let teacher_path = write_file(dir.path(), "teacher.py", "DATA = [1, 2, 3, 4, 5]\n");
+
+    // Student mutates the input!
+    write_file(
+        dir.path(),
+        "alice_hw.py",
+        r#"
+def pop_and_sum(data):
+    data.pop()  # mutates!
+    return sum(data)
+
+def length(data):
+    return len(data)
+"#,
+    );
+
+    let spec: TestSpec = toml::from_str(&format!(
+        r#"
+[meta]
+name = "mutation_test"
+file = "hw.py"
+language = "python"
+imports = ["{teacher_path}"]
+
+[[cases]]
+name = "pop_and_sum"
+function = "pop_and_sum"
+args = ["$DATA"]
+expect = 10
+
+[[cases]]
+name = "length after mutation"
+function = "length"
+args = ["$DATA"]
+expect = 5
+"#,
+    ))
+    .unwrap();
+
+    let executor = PythonExecutor::new();
+    let submissions = SubmissionSet {
+        by_student: HashMap::from([(
+            "alice".to_string(),
+            vec![StudentFile {
+                path: dir.path().join("alice_hw.py"),
+                language: "python".to_string(),
+            }],
+        )]),
+    };
+
+    let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+    let alice = &results["alice"];
+
+    // With copy_refs=true (default), second case should still see original DATA
+    assert_eq!(
+        alice.test_results[0].cases[0].status,
+        TestStatus::Passed,
+        "pop_and_sum should work on copied data"
+    );
+    assert_eq!(
+        alice.test_results[0].cases[1].status,
+        TestStatus::Passed,
+        "length should still be 5 because DATA was deepcopied per case"
     );
 }
