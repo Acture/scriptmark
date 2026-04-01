@@ -39,6 +39,8 @@ enum Commands {
     Similarity(SimilarityArgs),
     /// Generate an HTML report from grading results
     Report(ReportArgs),
+    /// Database management commands
+    Db(DbCommand),
 }
 
 #[derive(Parser)]
@@ -91,6 +93,10 @@ struct GradeArgs {
     /// Archive format
     #[arg(short, long, default_value = "csv")]
     format: String,
+
+    /// Save results to SQLite database
+    #[arg(long)]
+    db: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -217,6 +223,44 @@ struct ReportArgs {
     similarity_threshold: f64,
 }
 
+#[derive(Parser)]
+struct DbCommand {
+    #[command(subcommand)]
+    action: DbAction,
+}
+
+#[derive(Subcommand)]
+enum DbAction {
+    /// Initialize a new database
+    Init {
+        /// Database file path
+        #[arg(default_value = "scriptmark.db")]
+        path: PathBuf,
+    },
+    /// Import a roster CSV into the database
+    ImportRoster {
+        /// Roster CSV file
+        roster: PathBuf,
+        /// Database file path
+        #[arg(long, default_value = "scriptmark.db")]
+        db: PathBuf,
+    },
+    /// List all grading sessions
+    Sessions {
+        /// Database file path
+        #[arg(long, default_value = "scriptmark.db")]
+        db: PathBuf,
+    },
+    /// Show a student's history across all sessions
+    History {
+        /// Student ID
+        student_id: String,
+        /// Database file path
+        #[arg(long, default_value = "scriptmark.db")]
+        db: PathBuf,
+    },
+}
+
 fn build_grading_policy(grading: &str, formula: Option<&str>, range: (f64, f64)) -> GradingPolicy {
     if let Some(formula) = formula {
         GradingPolicy::Formula(FormulaPolicy {
@@ -253,6 +297,7 @@ async fn main() -> Result<()> {
         Commands::GradesPush(args) => cmd_grades_push(args).await,
         Commands::Similarity(args) => cmd_similarity(args),
         Commands::Report(args) => cmd_report(args),
+        Commands::Db(cmd) => cmd_db(cmd),
     }
 }
 
@@ -374,6 +419,34 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
             }
         }
         println!("Archived to {}", archive_path.display());
+    }
+
+    // 9. Save to database if --db specified
+    if let Some(db_path) = &args.db {
+        let database = scriptmark_db::Database::open(db_path).context("Failed to open database")?;
+
+        // Import roster if we loaded one
+        if let Some(roster_path) = &args.roster
+            && let Ok(roster) = scriptmark_core::roster::load_roster(roster_path)
+        {
+            let _ = database.import_roster(&roster);
+        }
+
+        let assignment = args
+            .tests_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown");
+
+        let session_id = database
+            .save_session(assignment, &reports, None)
+            .context("Failed to save session to database")?;
+
+        println!(
+            "Saved to database: {} (session #{})",
+            db_path.display(),
+            session_id
+        );
     }
 
     Ok(())
@@ -620,4 +693,90 @@ fn cmd_report(args: ReportArgs) -> Result<()> {
 
     println!("HTML report generated: {}", args.output.display());
     Ok(())
+}
+
+fn cmd_db(cmd: DbCommand) -> Result<()> {
+    match cmd.action {
+        DbAction::Init { path } => {
+            let _db =
+                scriptmark_db::Database::open(&path).context("Failed to initialize database")?;
+            println!("Database initialized: {}", path.display());
+            Ok(())
+        }
+        DbAction::ImportRoster { roster, db } => {
+            let database = scriptmark_db::Database::open(&db).context("Failed to open database")?;
+            let roster_map = scriptmark_core::roster::load_roster(&roster)
+                .context("Failed to load roster CSV")?;
+            let count = database
+                .import_roster(&roster_map)
+                .context("Failed to import roster")?;
+            println!("Imported {} students into {}", count, db.display());
+            Ok(())
+        }
+        DbAction::Sessions { db } => {
+            let database = scriptmark_db::Database::open(&db).context("Failed to open database")?;
+            let sessions = database
+                .list_sessions()
+                .context("Failed to list sessions")?;
+            if sessions.is_empty() {
+                println!("No sessions found.");
+                return Ok(());
+            }
+            use owo_colors::OwoColorize;
+            println!(
+                "{:>4}  {:<20}  {:>8}  {:>8}  Date",
+                "ID", "Assignment", "Students", "Avg"
+            );
+            println!("{}", "-".repeat(70));
+            for s in &sessions {
+                println!(
+                    "{:>4}  {:<20}  {:>8}  {:>7.1}  {}",
+                    s.id.to_string().cyan(),
+                    s.assignment,
+                    s.student_count,
+                    s.avg_grade,
+                    s.created_at.dimmed(),
+                );
+            }
+            Ok(())
+        }
+        DbAction::History { student_id, db } => {
+            let database = scriptmark_db::Database::open(&db).context("Failed to open database")?;
+            let name = database.get_student_name(&student_id);
+            let history = database
+                .get_student_history(&student_id)
+                .context("Failed to get student history")?;
+            if history.is_empty() {
+                println!("No history found for student '{}'.", student_id);
+                return Ok(());
+            }
+            use owo_colors::OwoColorize;
+            println!("History for {} ({}):\n", name.bold(), student_id.cyan());
+            println!(
+                "{:<15}  {:>8}  {:>10}  {:>8}/{:<8}  Date",
+                "Assignment", "Grade", "Pass Rate", "Passed", "Total"
+            );
+            println!("{}", "-".repeat(75));
+            for (session, result) in &history {
+                let grade_color = if result.final_grade >= 90.0 {
+                    "\x1b[32m"
+                } else if result.final_grade >= 70.0 {
+                    "\x1b[34m"
+                } else {
+                    "\x1b[31m"
+                };
+                println!(
+                    "{:<15}  {}{:>7.1}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
+                    session.assignment,
+                    grade_color,
+                    result.final_grade,
+                    result.pass_rate,
+                    result.passed_cases,
+                    result.total_cases,
+                    session.created_at.dimmed(),
+                );
+            }
+            Ok(())
+        }
+    }
 }
