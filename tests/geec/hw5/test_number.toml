@@ -1,0 +1,74 @@
+[meta]
+name = "find_larger_number"
+file = "Lab5_1.py"
+function = "find_larger_number"
+language = "python"
+
+[[cases]]
+name = "3 < 5"
+args = [3, 5]
+expect = 5
+
+[[cases]]
+name = "negative: -3 < -2"
+args = [-3, -2]
+expect = -2
+
+[[cases]]
+name = "mixed: -1 < 1"
+args = [-1, 1]
+expect = 1
+
+[[cases]]
+name = "float: 2.5 > 2.4"
+args = [2.5, 2.4]
+expect = 2.5
+
+[[cases]]
+name = "mixed: 10 > -10"
+args = [10, -10]
+expect = 10
+
+[[cases]]
+name = "equal: 0 == 0"
+args = [0, 0]
+expect = 0
+
+[[cases]]
+name = "equal float: 7.7"
+args = [7.7, 7.7]
+expect = 7.7
+
+[[cases]]
+name = "equal negative: -5"
+args = [-5, -5]
+expect = -5
+
+[[cases]]
+name = "invalid: str vs int"
+args = ["a", 1]
+expect_error = "TypeError"
+
+[[cases]]
+name = "invalid: int vs str"
+args = [1, "b"]
+expect_error = "TypeError"
+
+[[cases]]
+name = "invalid: list vs int"
+args = [[1, 2], 3]
+expect_error = "TypeError"
+
+# Note: None-arg tests omitted (TOML has no null literal)
+
+# --- Parametrized random tests ---
+[[cases]]
+name = "random int pairs"
+[cases.parametrize]
+count = 20
+seed = 42
+[cases.parametrize.args]
+a = "int(-1000, 1000)"
+b = "int(-1000, 1000)"
+[cases.parametrize.oracle]
+rhai = "if a >= b { a } else { b }"

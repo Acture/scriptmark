@@ -1,0 +1,11 @@
+[meta]
+name = "hundred_animals"
+file = "chichen.py"
+function = "find_chicken_solutions"
+language = "python"
+
+[[cases]]
+name = "4 solutions for 100 animals, 100 yuan"
+args = []
+check = "set_eq"
+expect = [[0, 25, 75], [4, 18, 78], [8, 11, 81], [12, 4, 84]]

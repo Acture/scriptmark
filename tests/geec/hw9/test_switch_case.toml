@@ -1,0 +1,55 @@
+[meta]
+name = "switch_case"
+file = "switch_case.py"
+function = "switch_case"
+language = "python"
+
+[[cases]]
+name = "hello -> HELLO"
+args = ["hello"]
+expect = "HELLO"
+
+[[cases]]
+name = "world -> WORLD"
+args = ["world"]
+expect = "WORLD"
+
+[[cases]]
+name = "Hello, World!"
+args = ["Hello, World!"]
+expect = "HELLO, WORLD!"
+
+[[cases]]
+name = "mixed: Python 3.12 is Cool"
+args = ["Python 3.12 is Cool"]
+expect = "PYTHON 3.12 IS COOL"
+
+[[cases]]
+name = "digits only"
+args = ["12345"]
+expect = "12345"
+
+[[cases]]
+name = "symbols only"
+args = ["!@#$%"]
+expect = "!@#$%"
+
+[[cases]]
+name = "already upper"
+args = ["ALREADY UPPER"]
+expect = "ALREADY UPPER"
+
+[[cases]]
+name = "empty"
+args = [""]
+expect = ""
+
+[[cases]]
+name = "single a"
+args = ["a"]
+expect = "A"
+
+[[cases]]
+name = "single z"
+args = ["z"]
+expect = "Z"

@@ -1,0 +1,60 @@
+[meta]
+name = "leap_year"
+file = "Leap.py"
+function = "isLeap"
+language = "python"
+
+[[cases]]
+name = "2000: div by 400 -> leap"
+args = [2000]
+expect = true
+
+[[cases]]
+name = "1600: div by 400 -> leap"
+args = [1600]
+expect = true
+
+[[cases]]
+name = "2024: div by 4, not 100 -> leap"
+args = [2024]
+expect = true
+
+[[cases]]
+name = "2004: div by 4, not 100 -> leap"
+args = [2004]
+expect = true
+
+[[cases]]
+name = "1996: div by 4, not 100 -> leap"
+args = [1996]
+expect = true
+
+[[cases]]
+name = "1900: div by 100, not 400 -> not leap"
+args = [1900]
+expect = false
+
+[[cases]]
+name = "1700: div by 100, not 400 -> not leap"
+args = [1700]
+expect = false
+
+[[cases]]
+name = "2100: div by 100, not 400 -> not leap"
+args = [2100]
+expect = false
+
+[[cases]]
+name = "2023: not div by 4 -> not leap"
+args = [2023]
+expect = false
+
+[[cases]]
+name = "2025: not div by 4 -> not leap"
+args = [2025]
+expect = false
+
+[[cases]]
+name = "1: not div by 4 -> not leap"
+args = [1]
+expect = false

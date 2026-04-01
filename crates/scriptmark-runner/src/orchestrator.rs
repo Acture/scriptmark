@@ -95,6 +95,7 @@ async fn run_student(
                     check: None,
                     timeout: None,
                     parametrize: None,
+                    function: None,
                 };
 
                 let setup_spec = TestSpec {
@@ -174,37 +175,49 @@ async fn run_student(
             final_cases.push(case);
         }
 
-        // 5. Run cases with resolved args
-        let mut cases = Vec::new();
-        for case in &final_cases {
-            if setup_failed {
-                cases.push(CaseResult {
-                    case_name: case.name.clone(),
-                    status: TestStatus::Error,
-                    actual: None,
-                    expected: None,
-                    failure: Some(FailureDetail {
-                        message: "Skipped: setup step failed".to_string(),
-                        details: String::new(),
-                    }),
-                    elapsed_ms: Some(0),
-                });
-                continue;
+        // 5. Run cases — chain mode or per-case mode
+        let use_chain =
+            !spec.meta.imports.is_empty() || final_cases.iter().any(|c| c.function.is_some());
+
+        let cases = if use_chain {
+            // Chain mode: single subprocess handles setup + all cases
+            executor
+                .execute_chain(files, spec, &final_cases, timeout_secs)
+                .await
+        } else {
+            // Per-case mode (original behavior)
+            let mut cases = Vec::new();
+            for case in &final_cases {
+                if setup_failed {
+                    cases.push(CaseResult {
+                        case_name: case.name.clone(),
+                        status: TestStatus::Error,
+                        actual: None,
+                        expected: None,
+                        failure: Some(FailureDetail {
+                            message: "Skipped: setup step failed".to_string(),
+                            details: String::new(),
+                        }),
+                        elapsed_ms: Some(0),
+                    });
+                    continue;
+                }
+
+                let case_timeout = case.timeout.unwrap_or(timeout_secs);
+
+                // Resolve $ref in args
+                let resolved_case = scriptmark_core::models::TestCase {
+                    args: resolve_args(&case.args, &context),
+                    ..case.clone()
+                };
+
+                let result = executor
+                    .execute_case(files, spec, &resolved_case, case_timeout)
+                    .await;
+                cases.push(result);
             }
-
-            let case_timeout = case.timeout.unwrap_or(timeout_secs);
-
-            // Resolve $ref in args
-            let resolved_case = scriptmark_core::models::TestCase {
-                args: resolve_args(&case.args, &context),
-                ..case.clone()
-            };
-
-            let result = executor
-                .execute_case(files, spec, &resolved_case, case_timeout)
-                .await;
-            cases.push(result);
-        }
+            cases
+        };
 
         test_results.push(TestResult {
             spec_name: spec.meta.name.clone(),
