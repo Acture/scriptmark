@@ -47,6 +47,9 @@ regex = "1"
 # Archive
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
+# System
+libc = "0.2"
+
 # Random
 rand = "0.9"
 

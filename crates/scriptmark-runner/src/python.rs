@@ -490,21 +490,24 @@ impl PythonExecutor {
 	) -> Result<Output, SpawnError> {
 		let mut child = cmd.spawn().map_err(SpawnError::Spawn)?;
 
-		// Take pipes so we can read them after wait
+		// Take pipes and read concurrently with wait to avoid deadlock
+		// (if child fills the pipe buffer, it blocks until someone reads)
 		let stdout_pipe = child.stdout.take();
 		let stderr_pipe = child.stderr.take();
 
 		let timeout = std::time::Duration::from_secs(timeout_secs);
-		match tokio::time::timeout(timeout, child.wait()).await {
-			Ok(Ok(status)) => {
-				let stdout = read_pipe(stdout_pipe).await;
-				let stderr = read_pipe(stderr_pipe).await;
-				Ok(Output {
-					status,
-					stdout,
-					stderr,
-				})
-			}
+		match tokio::time::timeout(timeout, async {
+			let (stdout, stderr, status) =
+				tokio::join!(read_pipe(stdout_pipe), read_pipe(stderr_pipe), child.wait(),);
+			status.map(|s| Output {
+				status: s,
+				stdout,
+				stderr,
+			})
+		})
+		.await
+		{
+			Ok(Ok(output)) => Ok(output),
 			Ok(Err(e)) => Err(SpawnError::Spawn(e)),
 			Err(_) => {
 				let _ = child.kill().await;
@@ -853,33 +856,46 @@ impl PythonExecutor {
 	}
 
 	/// Wait for a child process with timeout, then compare stdout.
+	/// Kills the child on timeout to prevent orphaned processes.
 	async fn await_child_output(
 		&self,
-		child: tokio::process::Child,
+		mut child: tokio::process::Child,
 		case: &TestCase,
 		timeout_secs: u64,
 		start: Instant,
 	) -> CaseResult {
-		let result = tokio::time::timeout(
-			std::time::Duration::from_secs(timeout_secs),
-			child.wait_with_output(),
-		)
+		// Take pipes and read concurrently with wait (same pattern as spawn_with_timeout)
+		let stdout_pipe = child.stdout.take();
+		let stderr_pipe = child.stderr.take();
+
+		let result = tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), async {
+			let (stdout, _stderr, status) =
+				tokio::join!(read_pipe(stdout_pipe), read_pipe(stderr_pipe), child.wait(),);
+			status.map(|s| Output {
+				status: s,
+				stdout,
+				stderr: _stderr,
+			})
+		})
 		.await;
 
 		let elapsed = start.elapsed().as_millis() as u64;
 
 		match result {
-			Err(_) => CaseResult {
-				case_name: case.name.clone(),
-				status: TestStatus::Timeout,
-				actual: None,
-				expected: case.expected_stdout.clone(),
-				failure: Some(FailureDetail {
-					message: format!("Timed out after {timeout_secs}s"),
-					details: String::new(),
-				}),
-				elapsed_ms: Some(elapsed),
-			},
+			Err(_) => {
+				let _ = child.kill().await;
+				CaseResult {
+					case_name: case.name.clone(),
+					status: TestStatus::Timeout,
+					actual: None,
+					expected: case.expected_stdout.clone(),
+					failure: Some(FailureDetail {
+						message: format!("Timed out after {timeout_secs}s"),
+						details: String::new(),
+					}),
+					elapsed_ms: Some(elapsed),
+				}
+			}
 			Ok(Err(e)) => CaseResult {
 				case_name: case.name.clone(),
 				status: TestStatus::Error,
