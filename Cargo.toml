@@ -44,6 +44,9 @@ anyhow = "1"
 # Regex
 regex = "1"
 
+# Archive
+zip = { version = "8", default-features = false, features = ["deflate"] }
+
 # Random
 rand = "0.9"
 
