@@ -172,3 +172,8 @@ templates
 *.csv
 /archive
 /output
+/prepared
+/Lab9_out*
+*.fish
+.scriptmark_extracted/
+.remember/
