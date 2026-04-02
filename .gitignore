@@ -177,3 +177,4 @@ templates
 *.fish
 .scriptmark_extracted/
 .remember/
+tests/geec/
