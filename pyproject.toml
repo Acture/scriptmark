@@ -23,4 +23,4 @@ classifiers = [
 features = ["pyo3/extension-module"]
 module-name = "scriptmark._scriptmark"
 manifest-path = "crates/scriptmark-py/Cargo.toml"
-strip = true
+python-source = "python"
