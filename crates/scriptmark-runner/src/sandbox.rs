@@ -61,8 +61,13 @@ pub fn apply_sandbox(cmd: &mut tokio::process::Command, config: &SandboxConfig) 
 	}
 }
 
+#[cfg(target_os = "macos")]
+type RlimitResource = libc::c_int;
+#[cfg(target_os = "linux")]
+type RlimitResource = libc::__rlimit_resource_t;
+
 #[cfg(unix)]
-fn set_rlimit(resource: libc::c_int, limit: u64) -> std::io::Result<()> {
+fn set_rlimit(resource: RlimitResource, limit: u64) -> std::io::Result<()> {
 	let rlim = libc::rlimit {
 		rlim_cur: limit as libc::rlim_t,
 		rlim_max: limit as libc::rlim_t,
