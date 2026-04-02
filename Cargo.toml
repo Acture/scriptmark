@@ -15,6 +15,10 @@ version = "0.2.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 authors = ["Acture <acturea@gmail.com>"]
+repository = "https://github.com/Acture/ScriptMark"
+homepage = "https://github.com/Acture/ScriptMark"
+keywords = ["grading", "education", "autograding", "cli"]
+categories = ["command-line-utilities", "education"]
 
 [workspace.dependencies]
 # Serialization
@@ -57,11 +61,11 @@ rand = "0.9"
 pyo3 = { version = "0.24", features = ["extension-module"] }
 
 # Internal
-scriptmark-core = { path = "crates/scriptmark-core" }
-scriptmark-runner = { path = "crates/scriptmark-runner" }
-scriptmark-canvas = { path = "crates/scriptmark-canvas" }
-scriptmark-db = { path = "crates/scriptmark-db" }
-scriptmark-tui = { path = "crates/scriptmark-tui" }
+scriptmark-core = { path = "crates/scriptmark-core", version = "0.2.0" }
+scriptmark-runner = { path = "crates/scriptmark-runner", version = "0.2.0" }
+scriptmark-canvas = { path = "crates/scriptmark-canvas", version = "0.2.0" }
+scriptmark-db = { path = "crates/scriptmark-db", version = "0.2.0" }
+scriptmark-tui = { path = "crates/scriptmark-tui", version = "0.2.0" }
 ratatui = "0.29"
 crossterm = "0.29"
 rusqlite = { version = "0.34", features = ["bundled"] }

@@ -1,66 +1,26 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
 [project]
-name = "ScriptMark"
-version = "0.1.1"
-description = "一个可扩展的、用于自动评分学生编程作业的CLI工具。目前仅实现了基于pytest的"
-readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.10"
-dependencies = [
-	"pydantic>=2.12.3",
-	"pytest>=8.4.2",
-	"pytest-timeout>=2.4.0",
-	"rich>=14.2.0",
-	"typer>=0.20.0",
-]
+name = "scriptmark"
+version = "0.2.0"
+description = "Automated grading CLI for student programming assignments"
+readme = "README.md"
 license = { text = "GPL-3.0-or-later" }
-keywords = ["grader", "pytest", "education", "autograding"]
+requires-python = ">=3.10"
+authors = [{ name = "Acture", email = "acturea@gmail.com" }]
+keywords = ["grading", "education", "autograding", "cli"]
 classifiers = [
 	"Development Status :: 3 - Alpha",
-	"Intended Audience :: Developers",
 	"Intended Audience :: Education",
-	"Operating System :: OS Independent",
-	"Programming Language :: Python :: 3",
-	"Programming Language :: Python :: 3.14",
-]
-authors = [
-	{ name = "Acture", email = "acturea@gmail.com" }
+	"License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+	"Programming Language :: Rust",
+	"Programming Language :: Python :: Implementation :: CPython",
 ]
 
-[build-system]
-requires = ["uv_build>=0.9.5"]
-build-backend = "uv_build"
-
-[dependency-groups]
-dev = [
-	"pytest-cov>=7.0.0",
-	"tox>=4.31.0",
-	"twine>=6.2.0",
-	"uv-build>=0.9.5",
-]
-
-[project.scripts]
-scriptmark = "scriptmark.main:app"
-[tool.uv]
-upgrade = true
-
-
-[tool.tox]
-requires = ["tox-uv"]
-envlist = ["py310", "py311", "py312", "py313", "py314"]
-installer = "uv"
-
-[tool.tox.testenv]
-deps = ".[dev]"
-# 运行 pytest 测试套件
-commands = "python -c \"import scriptmark\""
-
-[tool.ruff]
-indent-width = 4
-
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "tab"
-skip-magic-trailing-comma = false
-line-ending = "auto"
-[tool.pytest.ini_options]
-addopts = "-q"
-disable_test_id_escaping_and_forfeit_all_rights_to_community_support = true
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "scriptmark._scriptmark"
+manifest-path = "crates/scriptmark-py/Cargo.toml"
+strip = true
