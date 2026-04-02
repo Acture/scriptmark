@@ -3,8 +3,8 @@ use rusqlite::Connection;
 use crate::DbError;
 
 pub fn migrate(conn: &Connection) -> Result<(), DbError> {
-    conn.execute_batch(
-        "
+	conn.execute_batch(
+		"
 		CREATE TABLE IF NOT EXISTS students (
 			id TEXT PRIMARY KEY,
 			name TEXT,
@@ -50,6 +50,6 @@ pub fn migrate(conn: &Connection) -> Result<(), DbError> {
 		CREATE INDEX IF NOT EXISTS idx_results_student ON results(student_id);
 		CREATE INDEX IF NOT EXISTS idx_similarity_session ON similarity(session_id);
 		",
-    )?;
-    Ok(())
+	)?;
+	Ok(())
 }
