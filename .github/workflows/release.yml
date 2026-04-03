@@ -24,7 +24,7 @@ jobs:
             artifact: scriptmark
             cross: true
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             artifact: scriptmark
           - target: aarch64-apple-darwin
             os: macos-latest
@@ -69,7 +69,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
@@ -85,7 +85,14 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist
           manylinux: auto
-          before-script-linux: yum install -y perl-IPC-Cmd
+          before-script-linux: |
+            if command -v yum &> /dev/null; then
+              yum install -y perl-IPC-Cmd
+            elif command -v apt-get &> /dev/null; then
+              apt-get update && apt-get install -y perl
+            elif command -v apk &> /dev/null; then
+              apk add perl
+            fi
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.target }}
