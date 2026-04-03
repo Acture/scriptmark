@@ -19,6 +19,7 @@ repository = "https://github.com/Acture/ScriptMark"
 homepage = "https://github.com/Acture/ScriptMark"
 keywords = ["grading", "education", "autograding", "cli"]
 categories = ["command-line-utilities"]
+readme = "README.md"
 
 [workspace.dependencies]
 # Serialization
