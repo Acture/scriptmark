@@ -9,54 +9,73 @@ Automated grading CLI for student programming assignments. Rust core, TOML test 
 
 ## Installation
 
-### Rust CLI
-
 ```bash
-cargo install scriptmark
+cargo install scriptmark     # Rust
+pip install scriptmark        # Python
 ```
 
-### Python
+## Quick Start
+
+Write a TOML test spec, point ScriptMark at student submissions:
 
 ```bash
-pip install scriptmark
+scriptmark grade submissions/ -t tests/
 ```
+
+```
+┌─────────┬─────────────┬────────┬────────┬────────┬───────┬───────────┬───────┐
+│ Student ┆ ID          ┆ Status ┆ Passed ┆ Failed ┆ Total ┆ Pass Rate ┆ Grade │
+╞═════════╪═════════════╪════════╪════════╪════════╪═══════╪═══════════╪═══════╡
+│ Alice   ┆ 22300110012 ┆ PASSED ┆     10 ┆      0 ┆    10 ┆   100.0%  ┆ 100.0 │
+│ Bob     ┆ 22300110039 ┆ FAILED ┆      7 ┆      3 ┆    10 ┆    70.0%  ┆  83.7 │
+│ Carol   ┆ 22300110046 ┆ FAILED ┆      3 ┆      7 ┆    10 ┆    30.0%  ┆  69.0 │
+└─────────┴─────────────┴────────┴────────┴────────┴───────┴───────────┴───────┘
+```
+
+83 students graded in under 2 seconds on an M1 Mac.
+
+## CLI Usage
+
+```bash
+# Grade with roster, grading curve, and database storage
+scriptmark grade submissions/ -t tests/ -r roster.csv -g sqrt --db grades.db
+
+# Run tests only (raw JSON output)
+scriptmark run submissions/ -t tests/ -o results.json
+
+# Detect plagiarism
+scriptmark similarity submissions/ --threshold 0.8
+
+# Generate HTML report
+scriptmark report results.json -o report.html
+
+# Canvas LMS: pull roster / push grades
+CANVAS_TOKEN=... scriptmark roster-pull --canvas-url https://... --course-id 12345
+CANVAS_TOKEN=... scriptmark grades-push --canvas-url https://... --course-id 12345 --assignment-id 67890 results.json
+
+# Browse results interactively
+scriptmark tui grades.db
+```
+
+## Python API
 
 ```python
 import scriptmark
 
+# One-shot grading
 results = scriptmark.grade(["submissions/"], "tests/")
 for r in results:
     print(f"{r.student_id}: {r.grade:.1f} ({r.passed}/{r.total})")
+
+# Discover student files
+subs = scriptmark.discover(["submissions/"])  # {'alice': ['path/to/alice_lab5.py'], ...}
+
+# Load and inspect a spec
+spec = scriptmark.load_spec("tests/test_lab5.toml")
+print(spec.name, spec.function, spec.num_cases)
 ```
 
-### From source
-
-```bash
-git clone https://github.com/Acture/scriptmark.git
-cd scriptmark
-cargo install --path crates/scriptmark
-```
-
-Requires `python3` on PATH for running student Python code.
-
-## Features
-
-- **Custom test engine** -- runs student code in subprocess, no pytest/unittest required
-- **TOML-based specs** -- declarative test cases with expected values, checkers, and parametrization
-- **8 built-in checkers** -- exact, approx, sorted, set_eq, contains, regex, text, plus Rhai expressions and external Python checkers
-- **Parallel execution** -- tokio-based orchestrator grades all students concurrently
-- **Sandboxed execution** -- env isolation, import allowlist, resource limits (setrlimit), timeout with process kill
-- **Parametrize + oracle** -- auto-generate test cases with random inputs and teacher reference implementations
-- **Canvas LMS integration** -- pull rosters, push grades
-- **Similarity detection** -- style + structural code similarity scoring
-- **Interactive TUI** -- browse students, sessions, and similarity in the terminal
-- **HTML reports** -- standalone dashboard with per-student breakdowns
-- **SQLite storage** -- persist grading history across sessions
-- **Python API** -- `scriptmark.grade()`, `scriptmark.run()`, `scriptmark.discover()`, `scriptmark.load_spec()`
-
-## Quick Start
-
-1. Write a TOML test spec:
+## TOML Test Specs
 
 ```toml
 [meta]
@@ -64,6 +83,7 @@ name = "find_max"
 file = "lab5.py"
 function = "find_max"
 language = "python"
+allowed_imports = ["numpy"]  # optional: extra packages beyond safe stdlib
 
 [[cases]]
 name = "basic"
@@ -86,68 +106,28 @@ nums = "list(int(-100, 100), 5, 20)"
 rhai = "nums.sort(); nums[nums.len() - 1]"
 ```
 
-2. Grade submissions:
-
-```bash
-scriptmark grade submissions/ -t tests/
-```
-
-## TOML Spec Format
-
-Each `.toml` file defines tests for one function/file:
-
-| Section | Purpose |
-|---------|---------|
-| `[meta]` | Target file, function, language, teacher imports, `allowed_imports` |
-| `[vars]` | Constants injected as Python globals |
-| `[[setup]]` | Call functions, store results as `$ref` for later cases |
-| `[[cases]]` | Scored test cases with `expect`, `check`, or `expect_error` |
-| `[cases.parametrize]` | Auto-generate cases with random args + oracle |
-| `[lint]` | Optional style scoring via pylint/ruff |
-
 ### Checkers
 
 | Checker | Usage |
 |---------|-------|
 | `exact` (default) | `expect = 42` |
 | `approx` | `expect = 3.14` with `tolerance = 0.01` |
-| `text` | Normalized multiline comparison (strips trailing whitespace + blank lines) |
-| `sorted` | Validates array is sorted |
-| `set_eq` | Unordered array comparison |
-| `contains` | Substring match |
+| `text` | Normalized multiline comparison |
+| `sorted` / `set_eq` / `contains` | Collection checks |
 | `regex` | `check = { regex = "^\\d+$" }` |
-| Rhai expression | `check = { rhai = "result > 0 && result < 100" }` |
+| Rhai expression | `check = { rhai = "result > 0" }` |
 | Python script | `check = { python = "verifiers/check.py" }` |
 
-## CLI Commands
+## Features
 
-```
-scriptmark grade        Run tests + summarize + display grades
-scriptmark run          Run tests only, output JSON
-scriptmark summarize    Re-analyze existing results
-scriptmark similarity   Detect code similarity between submissions
-scriptmark report       Generate HTML report
-scriptmark db           Database management (init, import-roster, sessions, history)
-scriptmark tui          Interactive terminal UI
-scriptmark roster-pull  Pull roster from Canvas LMS
-scriptmark grades-push  Push grades to Canvas LMS
-```
-
-## Architecture
-
-Single Rust crate (`scriptmark`) with modular structure:
-
-```
-models/       Data models, TOML spec parsing, grading policies
-discovery     Student file discovery + ZIP extraction
-runner/       PythonExecutor, orchestrator, sandbox, parametrize, oracle
-checker/      Checker trait + 8 built-in implementations + Rhai + Python
-db/           SQLite persistence (rusqlite, bundled)
-canvas/       Canvas LMS API client (reqwest + rustls)
-tui/          Interactive terminal UI (ratatui)
-```
-
-`scriptmark-py` is a separate PyO3 cdylib crate providing Python bindings, distributed via PyPI.
+- **Custom test engine** -- subprocess execution, no pytest dependency
+- **Sandboxed** -- env isolation, import allowlist, setrlimit, timeout with kill
+- **Parallel** -- tokio orchestrator, grades 80+ students in seconds
+- **Parametrize + oracle** -- random inputs with teacher reference implementations
+- **Canvas LMS** -- roster pull, grades push
+- **Similarity detection** -- style + structural code comparison
+- **TUI + HTML reports** -- interactive browser and standalone dashboards
+- **SQLite** -- persist grading history across sessions
 
 ## License
 
