@@ -4,12 +4,12 @@ use std::path::Path;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use scriptmark_core::discovery::discover_submissions;
-use scriptmark_core::grading::apply_grading;
-use scriptmark_core::models::{StudentReport, TestSpec};
-use scriptmark_core::spec_loader::load_specs_from_dir;
-use scriptmark_runner::orchestrator::run_all;
-use scriptmark_runner::python::PythonExecutor;
+use scriptmark::discovery::discover_submissions;
+use scriptmark::grading::apply_grading;
+use scriptmark::models::{StudentReport, TestSpec};
+use scriptmark::runner::orchestrator::run_all;
+use scriptmark::runner::python::PythonExecutor;
+use scriptmark::spec_loader::load_specs_from_dir;
 
 /// A test specification loaded from a TOML file.
 #[pyclass(name = "TestSpec")]
@@ -179,7 +179,7 @@ fn grade(
 
 	// Apply grading policy
 	let grading_policy =
-		scriptmark_core::models::GradingPolicy::Template(scriptmark_core::models::TemplatePolicy {
+		scriptmark::models::GradingPolicy::Template(scriptmark::models::TemplatePolicy {
 			template: policy.to_string(),
 			lower: 60.0,
 			upper: 100.0,

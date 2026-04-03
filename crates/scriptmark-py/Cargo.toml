@@ -12,8 +12,7 @@ name = "_scriptmark"
 crate-type = ["cdylib"]
 
 [dependencies]
-scriptmark-core = { workspace = true }
-scriptmark-runner = { workspace = true }
+scriptmark = { path = "../scriptmark" }
 pyo3 = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

@@ -1,13 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-	"crates/scriptmark-core",
-	"crates/scriptmark-runner",
-	"crates/scriptmark-cli",
-	"crates/scriptmark-canvas",
-	"crates/scriptmark-db",
+	"crates/scriptmark",
 	"crates/scriptmark-py",
-	"crates/scriptmark-tui",
 ]
 
 [workspace.package]
@@ -61,12 +56,6 @@ rand = "0.9"
 # Python bindings
 pyo3 = { version = "0.24", features = ["extension-module"] }
 
-# Internal
-scriptmark-core = { path = "crates/scriptmark-core", version = "0.2.0" }
-scriptmark-runner = { path = "crates/scriptmark-runner", version = "0.2.0" }
-scriptmark-canvas = { path = "crates/scriptmark-canvas", version = "0.2.0" }
-scriptmark-db = { path = "crates/scriptmark-db", version = "0.2.0" }
-scriptmark-tui = { path = "crates/scriptmark-tui", version = "0.2.0" }
 ratatui = "0.29"
 crossterm = "0.29"
 rusqlite = { version = "0.34", features = ["bundled"] }
