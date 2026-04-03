@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 use crate::checker::builtin::{ExactChecker, resolve_builtin};
 use crate::checker::{CheckInput, Checker};
+#[cfg(unix)]
 use crate::sandbox::apply_sandbox;
 
 enum SpawnError {
