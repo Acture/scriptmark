@@ -18,7 +18,7 @@ authors = ["Acture <acturea@gmail.com>"]
 repository = "https://github.com/Acture/ScriptMark"
 homepage = "https://github.com/Acture/ScriptMark"
 keywords = ["grading", "education", "autograding", "cli"]
-categories = ["command-line-utilities", "education"]
+categories = ["command-line-utilities"]
 
 [workspace.dependencies]
 # Serialization
