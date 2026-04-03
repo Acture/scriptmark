@@ -178,3 +178,4 @@ templates
 .scriptmark_extracted/
 .remember/
 tests/geec/
+tests_submission/
