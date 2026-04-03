@@ -1,10 +1,43 @@
 # ScriptMark
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Acture/scriptmark/ci.yml?label=CI)](https://github.com/Acture/scriptmark/actions)
-[![Crates.io](https://img.shields.io/crates/v/scriptmark-cli)](https://crates.io/crates/scriptmark-cli)
-[![License](https://img.shields.io/crates/l/scriptmark-cli)](./LICENSE)
+[![Crates.io](https://img.shields.io/crates/v/scriptmark)](https://crates.io/crates/scriptmark)
+[![PyPI](https://img.shields.io/pypi/v/scriptmark)](https://pypi.org/project/scriptmark/)
+[![License](https://img.shields.io/crates/l/scriptmark)](./LICENSE)
 
-Automated grading CLI for student programming assignments. Rust core, TOML test specifications, no pytest dependency.
+Automated grading CLI for student programming assignments. Rust core, TOML test specifications, Python bindings via PyO3.
+
+## Installation
+
+### Rust CLI
+
+```bash
+cargo install scriptmark
+```
+
+### Python
+
+```bash
+pip install scriptmark
+```
+
+```python
+import scriptmark
+
+results = scriptmark.grade(["submissions/"], "tests/")
+for r in results:
+    print(f"{r.student_id}: {r.grade:.1f} ({r.passed}/{r.total})")
+```
+
+### From source
+
+```bash
+git clone https://github.com/Acture/scriptmark.git
+cd scriptmark
+cargo install --path crates/scriptmark
+```
+
+Requires `python3` on PATH for running student Python code.
 
 ## Features
 
@@ -19,24 +52,7 @@ Automated grading CLI for student programming assignments. Rust core, TOML test 
 - **Interactive TUI** -- browse students, sessions, and similarity in the terminal
 - **HTML reports** -- standalone dashboard with per-student breakdowns
 - **SQLite storage** -- persist grading history across sessions
-
-## Installation
-
-### From source (recommended for now)
-
-```bash
-git clone https://github.com/Acture/scriptmark.git
-cd scriptmark
-cargo install --path crates/scriptmark-cli
-```
-
-### From crates.io (once published)
-
-```bash
-cargo install scriptmark-cli
-```
-
-Requires `python3` on PATH for running student Python code.
+- **Python API** -- `scriptmark.grade()`, `scriptmark.run()`, `scriptmark.discover()`, `scriptmark.load_spec()`
 
 ## Quick Start
 
@@ -82,7 +98,7 @@ Each `.toml` file defines tests for one function/file:
 
 | Section | Purpose |
 |---------|---------|
-| `[meta]` | Target file, function, language, teacher imports |
+| `[meta]` | Target file, function, language, teacher imports, `allowed_imports` |
 | `[vars]` | Constants injected as Python globals |
 | `[[setup]]` | Call functions, store results as `$ref` for later cases |
 | `[[cases]]` | Scored test cases with `expect`, `check`, or `expect_error` |
@@ -106,30 +122,32 @@ Each `.toml` file defines tests for one function/file:
 ## CLI Commands
 
 ```
-scriptmark grade      Run tests + summarize + display grades
-scriptmark run        Run tests only, output JSON
-scriptmark summarize  Re-analyze existing results
-scriptmark similarity Detect code similarity between submissions
-scriptmark report     Generate HTML report
-scriptmark db         Database management (init, import-roster, sessions, history)
-scriptmark tui        Interactive terminal UI
+scriptmark grade        Run tests + summarize + display grades
+scriptmark run          Run tests only, output JSON
+scriptmark summarize    Re-analyze existing results
+scriptmark similarity   Detect code similarity between submissions
+scriptmark report       Generate HTML report
+scriptmark db           Database management (init, import-roster, sessions, history)
+scriptmark tui          Interactive terminal UI
 scriptmark roster-pull  Pull roster from Canvas LMS
 scriptmark grades-push  Push grades to Canvas LMS
 ```
 
 ## Architecture
 
-8-crate Rust workspace:
+Single Rust crate (`scriptmark`) with modular structure:
 
 ```
-scriptmark-core       Models, TOML parsing, discovery, grading, similarity
-scriptmark-runner     PythonExecutor, Checker trait, orchestrator, parametrize, oracle
-scriptmark-cli        clap CLI with 9 commands + HTML report template
-scriptmark-db         SQLite persistence (rusqlite, bundled)
-scriptmark-canvas     Canvas LMS API client (reqwest)
-scriptmark-tui        ratatui terminal UI
-scriptmark-py         PyO3 Python bindings (in development)
+models/       Data models, TOML spec parsing, grading policies
+discovery     Student file discovery + ZIP extraction
+runner/       PythonExecutor, orchestrator, sandbox, parametrize, oracle
+checker/      Checker trait + 8 built-in implementations + Rhai + Python
+db/           SQLite persistence (rusqlite, bundled)
+canvas/       Canvas LMS API client (reqwest + rustls)
+tui/          Interactive terminal UI (ratatui)
 ```
+
+`scriptmark-py` is a separate PyO3 cdylib crate providing Python bindings, distributed via PyPI.
 
 ## License
 
