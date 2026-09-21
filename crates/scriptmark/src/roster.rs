@@ -148,18 +148,27 @@ impl Roster {
 }
 
 fn duplicate_diagnostics(entries: &[RosterEntry]) -> Vec<InputDiagnostic> {
-	let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+	// Counted by key value rather than by its rendering: the `Display` prefixes are not
+	// escaped, so two different keys can render alike.
+	let mut counts: std::collections::BTreeMap<&StudentKey, usize> = Default::default();
 	for entry in entries {
-		*counts.entry(entry.key.to_string()).or_default() += 1;
+		*counts.entry(&entry.key).or_default() += 1;
 	}
 	counts
 		.into_iter()
 		.filter(|(_, count)| *count > 1)
 		.map(|(key, count)| {
-			InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry { key, count })
+			InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry {
+				key: key.to_string(),
+				count,
+			})
 		})
 		.collect()
 }
+
+/// Prefixes [`StudentKey`] uses to mark an unconfirmed or Canvas-native key. A 学号 may not
+/// begin with one, or the rendering would stop being reversible.
+const RESERVED_PREFIXES: [&str; 2] = ["local:", "canvas:"];
 
 /// Load a roster CSV.
 ///
@@ -207,6 +216,20 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 		};
 
 		let student_number = normalize_key(student_number);
+		if let Some(prefix) = RESERVED_PREFIXES
+			.iter()
+			.find(|p| student_number.starts_with(**p))
+		{
+			diagnostics.push(
+				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
+					reason: format!(
+						"student id '{student_number}' starts with the reserved prefix '{prefix}'"
+					),
+				})
+				.at(location),
+			);
+			continue;
+		}
 		if student_number.is_empty() {
 			diagnostics.push(
 				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {

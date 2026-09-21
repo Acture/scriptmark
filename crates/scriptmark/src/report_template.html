@@ -109,7 +109,7 @@ REPORTS.forEach(r => {
   r._rate = r._total > 0 ? (r._passed / r._total * 100) : 0;
   r._graded = r.final_grade !== null && r.final_grade !== undefined;
   r._grade = r._graded ? r.final_grade : null;
-  r._status = r._total === 0 ? 'missing' : r._failed > 0 ? 'failed' : 'passed';
+  r._status = r.error ? 'error' : r._total === 0 ? 'missing' : r._failed > 0 ? 'failed' : 'passed';
 });
 
 const el = id => document.getElementById(id);

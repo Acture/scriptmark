@@ -113,10 +113,11 @@ impl Database {
 			 -- `local:` prefix that students.id never does. Match either form. (substr,
 			 -- not ltrim: ltrim strips a character set, so 'local:alice' would become
 			 -- 'ice'.)
-			 LEFT JOIN students s ON s.id IN (
-			     r.student_id,
-			     CASE WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7) END
-			 )
+			 LEFT JOIN students s
+			   ON s.id = CASE
+			       WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7)
+			       ELSE r.student_id
+			   END
 			 WHERE r.session_id = ?1
 			 ORDER BY r.final_grade DESC",
 		)?;
@@ -158,23 +159,30 @@ impl Database {
 	}
 
 	/// Get a student's history across all sessions.
+	/// Accepts the id in whichever form the teacher read off a table: a bare 学号, or the
+	/// `local:`-prefixed form a run made without a roster prints.
 	pub fn get_student_history(
 		&self,
 		student_id: &str,
 	) -> Result<Vec<(Session, ResultRow)>, DbError> {
+		let bare = student_id
+			.strip_prefix("local:")
+			.unwrap_or(student_id)
+			.to_string();
 		let mut stmt = self.conn.prepare(
 			"SELECT s.id, s.assignment, s.spec_title, s.grading_policy, s.student_count, s.avg_grade, s.created_at,
 					r.student_id, st.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
 			 JOIN sessions s ON r.session_id = s.id
-			 LEFT JOIN students st ON st.id IN (
-			     r.student_id,
-			     CASE WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7) END
-			 )
-			 WHERE r.student_id IN (?1, 'local:' || ?1)
+			 LEFT JOIN students st
+			   ON st.id = CASE
+			       WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7)
+			       ELSE r.student_id
+			   END
+			 WHERE r.student_id IN (?1, 'local:' || ?1, ?2)
 			 ORDER BY s.created_at DESC",
 		)?;
-		let rows = stmt.query_map(rusqlite::params![student_id], |row| {
+		let rows = stmt.query_map(rusqlite::params![bare, student_id], |row| {
 			Ok((
 				Session {
 					id: row.get(0)?,

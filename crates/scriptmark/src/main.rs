@@ -507,26 +507,10 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 						.submission_state
 						.map(|s| format!("{s:?}"))
 						.unwrap_or_default();
-					// A student with nothing to run still gets a row, so the CSV covers the
-					// same cohort as the JSON archive rather than quietly dropping every
-					// non-submitter out of the denominator.
-					if report.test_results.is_empty() {
-						wtr.write_record([
-							report.student_name.as_deref().unwrap_or(""),
-							&report.student_id,
-							&state,
-							"",
-							"",
-							&format!("{:?}", report.status()),
-							"",
-							"",
-							report.error.as_deref().unwrap_or(""),
-							"",
-						])?;
-						continue;
-					}
+					let mut rows = 0usize;
 					for test_result in &report.test_results {
 						for case in &test_result.cases {
+							rows += 1;
 							wtr.write_record([
 								report.student_name.as_deref().unwrap_or(""),
 								&report.student_id,
@@ -543,6 +527,28 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 								&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
 							])?;
 						}
+					}
+					// Every student gets at least one row, so the CSV covers the same cohort
+					// as the JSON archive rather than quietly dropping non-submitters — and
+					// a spec that produced no cases at all out of the denominator too.
+					if rows == 0 {
+						wtr.write_record([
+							report.student_name.as_deref().unwrap_or(""),
+							&report.student_id,
+							&state,
+							"",
+							"",
+							if report.error.is_some() {
+								"Error".to_string()
+							} else {
+								format!("{:?}", report.status())
+							}
+							.as_str(),
+							"",
+							"",
+							report.error.as_deref().unwrap_or(""),
+							"",
+						])?;
 					}
 				}
 				wtr.flush()?;

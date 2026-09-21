@@ -162,13 +162,24 @@ pub fn normalize(
 	};
 
 	let mut students: Vec<StudentSubmission> = Vec::new();
-	let mut covered: std::collections::BTreeSet<String> = Default::default();
+	// Keyed on the value, not its rendering — `Display` prefixes are not escaped.
+	let mut covered: std::collections::BTreeSet<StudentKey> = Default::default();
+	let mut covered_canvas_ids: std::collections::BTreeSet<u64> = Default::default();
+	let mut seen_users: std::collections::BTreeSet<u64> = Default::default();
 
 	// Deterministic regardless of payload order.
 	let mut submissions: Vec<&CanvasSubmissionPayload> = payload.submissions.iter().collect();
 	submissions.sort_by_key(|s| s.user_id);
 
 	for submission in submissions {
+		if !seen_users.insert(submission.user_id) {
+			diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::DuplicateSubmissionRow {
+					canvas_user_id: submission.user_id,
+				},
+			));
+			continue;
+		}
 		let user = users.get(&submission.user_id).copied();
 		let mut identity = identity_for(submission.user_id, user, &mut diagnostics);
 
@@ -190,14 +201,16 @@ pub fn normalize(
 
 		let roster_match = match roster.lookup(&identity.key) {
 			RosterLookup::Unique(i) => {
-				covered.insert(identity.key.to_string());
+				covered.insert(identity.key.clone());
+				covered_canvas_ids.extend(identity.canvas_user_id);
 				if identity.name.is_none() {
 					identity.name = roster.entries[i].name.clone();
 				}
 				RosterMatch::Matched(i)
 			}
 			RosterLookup::Ambiguous(hits) => {
-				covered.insert(identity.key.to_string());
+				covered.insert(identity.key.clone());
+				covered_canvas_ids.extend(identity.canvas_user_id);
 				diagnostics.push(InputDiagnostic::warning(
 					DiagnosticKind::AmbiguousRosterMatch {
 						key: identity.key.raw(),
@@ -224,17 +237,29 @@ pub fn normalize(
 
 	// Canvas knows who these people are even though the teacher's CSV only carries a
 	// number, so their Canvas identity is filled in from enrollment rather than lost.
-	let by_number: BTreeMap<String, &CanvasUserPayload> = payload
-		.users
-		.iter()
-		.filter_map(|u| Some((normalize_key(u.sis_user_id.as_deref()?), u)))
-		.collect();
+	let mut by_number: BTreeMap<String, Vec<&CanvasUserPayload>> = BTreeMap::new();
+	for user in &payload.users {
+		if let Some(number) = user.sis_user_id.as_deref().map(normalize_key)
+			&& !number.is_empty()
+		{
+			by_number.entry(number).or_default().push(user);
+		}
+	}
 
 	for entry in &roster.entries {
-		let rendered = entry.key.to_string();
-		if !covered.insert(rendered) {
+		if !covered.insert(entry.key.clone()) {
 			continue;
 		}
+		// A roster that names one person under both a 学号 and a Canvas id must not count
+		// them twice.
+		if entry
+			.canvas_user_id
+			.is_some_and(|id| covered_canvas_ids.contains(&id))
+		{
+			continue;
+		}
+		covered_canvas_ids.extend(entry.canvas_user_id);
+
 		let hits = roster.lookup(&entry.key).hits();
 		let mut identity = match &entry.key {
 			StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
@@ -242,10 +267,23 @@ pub fn normalize(
 		};
 		identity.name = entry.name.clone();
 		identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
-		if let Some(user) = by_number.get(&entry.key.raw()) {
+
+		// Enrich from enrollment, but only from an unambiguous match. A Canvas-keyed row
+		// resolves by Canvas id; a 学号 row resolves by student number — never through
+		// `raw()`, which would compare a Canvas id against other people's SIS ids and
+		// walk straight through the namespace boundary `lookup` exists to hold.
+		let enrolled = match &entry.key {
+			StudentKey::CanvasUser(id) => users.get(id).copied(),
+			_ => entry
+				.student_number()
+				.and_then(|number| by_number.get(number))
+				.filter(|candidates| candidates.len() == 1)
+				.map(|candidates| candidates[0]),
+		};
+		if let Some(user) = enrolled {
 			identity.canvas_user_id = identity.canvas_user_id.or(Some(user.id));
 			identity.sis_user_id = user.sis_user_id.as_deref().map(normalize_key);
-			identity.login_id = identity.login_id.take().or(user.login_id.clone());
+			identity.login_id = user.login_id.clone();
 			identity.sortable_name = user.sortable_name.clone();
 			identity.email = user.email.clone();
 			if identity.name.is_none() {
@@ -730,6 +768,94 @@ mod tests {
 
 		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
 		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+	}
+
+	#[test]
+	fn test_an_ambiguous_sis_id_is_never_used_to_backfill() {
+		// Two accounts share one 学号, so there is no single right answer — and the result
+		// must not depend on which one the payload happens to list last.
+		let users = vec![
+			user(1, Some("2024010001"), "Alice One"),
+			user(2, Some("2024010001"), "Alice Two"),
+		];
+		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
+
+		let forward = normalize(
+			&CanvasPayload {
+				users: users.clone(),
+				..Default::default()
+			},
+			Some(&roster),
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+		);
+		let mut reversed_users = users;
+		reversed_users.reverse();
+		let reversed = normalize(
+			&CanvasPayload {
+				users: reversed_users,
+				..Default::default()
+			},
+			Some(&roster),
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+		);
+
+		assert_eq!(forward.students[0].identity.canvas_user_id, None);
+		assert_eq!(
+			serde_json::to_string(&forward).unwrap(),
+			serde_json::to_string(&reversed).unwrap(),
+			"payload order must not decide an identity"
+		);
+	}
+
+	#[test]
+	fn test_a_canvas_id_never_resolves_against_someone_elses_student_number() {
+		// User 2024010001's Canvas id is the decimal text of another student's 学号.
+		let payload = CanvasPayload {
+			users: vec![
+				user(2024010001, None, "No SIS"),
+				user(7, Some("2024010001"), "Alice"),
+			],
+			submissions: vec![placeholder(2024010001), placeholder(7)],
+			..Default::default()
+		};
+		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+
+		let no_sis = input
+			.students
+			.iter()
+			.find(|s| s.key() == &StudentKey::CanvasUser(2024010001))
+			.expect("the SIS-less enrollee");
+		// Their record must not pick up Alice's identity across the namespace boundary.
+		assert_eq!(no_sis.identity.sis_user_id, None);
+		assert_eq!(no_sis.identity.name.as_deref(), Some("No SIS"));
+	}
+
+	#[test]
+	fn test_a_repeated_submission_row_does_not_become_a_second_student() {
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![
+				submitted(1, 1, vec![attachment(10, "lab1.py")]),
+				submitted(1, 1, vec![attachment(10, "lab1.py")]),
+			],
+			..Default::default()
+		};
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[(10, "/tmp/a.py")]),
+			AttemptPolicy::Latest,
+		);
+
+		assert_eq!(input.student_count(), 1);
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::DuplicateSubmissionRow { .. }))
+		);
 	}
 
 	#[test]

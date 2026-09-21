@@ -517,6 +517,10 @@ pub enum DiagnosticKind {
 	},
 	#[error("'{key}' submitted a text entry with no gradeable file")]
 	TextEntryOnly { key: String },
+	#[error(
+		"Canvas reported more than one submission row for user {canvas_user_id}; kept the first"
+	)]
+	DuplicateSubmissionRow { canvas_user_id: u64 },
 }
 
 /// Where in the source an anomaly was found. `sheet`/`row` are for the spreadsheet
