@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::models::{
-	CaseResult, FailureDetail, StudentFile, StudentReport, StudentSubmission, SubmissionOutcome,
+	CaseResult, FailureDetail, StudentFile, StudentReport, StudentSubmission, SubmissionState,
 	TestResult, TestSpec, TestStatus,
 };
 use tokio::sync::Semaphore;
@@ -12,8 +12,10 @@ use crate::runner::resolve::resolve_args;
 
 /// Run all test specs for all students in parallel.
 ///
-/// Takes `&[StudentSubmission]` rather than the whole `AssignmentInput` so that Canvas-only
-/// material — workflow states, attachment URLs, login ids — never reaches the scoring path.
+/// Takes `&[StudentSubmission]` rather than the whole `AssignmentInput` so that the roster,
+/// the unmatched artifacts and the diagnostics stay out of the runner. Canvas-only material
+/// is kept out of the executor itself by `run_student`, which only ever sees a student id
+/// and a file list.
 ///
 /// Returns one report per student **in input order**, including students with nothing to
 /// run: a roster member who did not submit must not vanish from the results, and a
@@ -38,6 +40,10 @@ pub async fn run_all(
 	for student in students {
 		let identity = student.identity.clone();
 		let outcome = student.outcome();
+		// Gate on the delivery axis, not the collapsed outcome: a submitter who is missing
+		// from the roster still has runnable code, and refusing to run it would hide the
+		// very output a teacher needs to resolve the mismatch.
+		let runnable = student.state == SubmissionState::Executable;
 		let files = student.files().to_vec();
 		let specs = specs.to_vec();
 		let sem = semaphore.clone();
@@ -46,7 +52,7 @@ pub async fn run_all(
 
 		let handle = tokio::spawn(async move {
 			let sid = identity.key.to_string();
-			let mut report = if outcome == SubmissionOutcome::Executable {
+			let mut report = if runnable {
 				let _permit = sem.acquire().await.unwrap();
 				let exec = PythonExecutor::with_python_cmd(&python_cmd);
 				run_student(&exec, &sid, &files, &specs, timeout).await
@@ -70,26 +76,15 @@ pub async fn run_all(
 	for (student, handle) in handles {
 		match handle.await {
 			Ok(report) => reports.push(report),
-			// A panicked task must not make the student disappear either.
+			// A panicked task must not make the student disappear — but it must not look
+			// like a failed test case either. Recorded as an error, so `is_gradeable()`
+			// withholds a grade rather than scoring an infrastructure failure.
 			Err(e) => reports.push(StudentReport {
 				student_id: student.identity.key.to_string(),
 				student_name: student.identity.name.clone(),
 				canvas_user_id: student.identity.canvas_user_id,
 				submission_state: Some(student.outcome()),
-				test_results: vec![TestResult {
-					spec_name: "scriptmark".to_string(),
-					cases: vec![CaseResult {
-						case_name: "run".to_string(),
-						status: TestStatus::Error,
-						actual: None,
-						expected: None,
-						failure: Some(FailureDetail {
-							message: "grading task failed".to_string(),
-							details: e.to_string(),
-						}),
-						elapsed_ms: None,
-					}],
-				}],
+				error: Some(format!("grading task failed: {e}")),
 				..Default::default()
 			}),
 		}

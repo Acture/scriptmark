@@ -173,12 +173,9 @@ fn test_every_roster_member_is_present_on_both_sides() {
 	for input in [local_input(&dir), canvas_input()] {
 		for entry in &roster.entries {
 			assert!(
-				input
-					.students
-					.iter()
-					.any(|s| s.identity.key.raw() == entry.student_number),
+				input.students.iter().any(|s| s.identity.key == entry.key),
 				"roster member {} vanished",
-				entry.student_number
+				entry.key
 			);
 		}
 	}
@@ -275,6 +272,16 @@ fn test_assignment_identity_is_kept_apart_from_student_identity() {
 	assert_eq!(alice.identity.canvas_user_id, Some(101));
 	assert_eq!(alice.identity.sis_user_id.as_deref(), Some("2024010001"));
 	assert_eq!(alice.identity.login_id.as_deref(), Some("awu"));
+
+	// A non-submitter keeps theirs too, although the teacher's CSV has no Canvas column —
+	// it is backfilled from enrollment rather than lost.
+	let dan = canvas
+		.students
+		.iter()
+		.find(|s| s.identity.key.raw() == "2024010004")
+		.unwrap();
+	assert_eq!(dan.outcome(), SubmissionOutcome::NotSubmitted);
+	assert_eq!(dan.identity.canvas_user_id, Some(105));
 }
 
 #[test]

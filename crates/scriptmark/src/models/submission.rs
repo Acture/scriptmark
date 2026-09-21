@@ -60,6 +60,20 @@ impl fmt::Display for StudentKey {
 }
 
 impl StudentKey {
+	/// The inverse of [`fmt::Display`], for reading a key back out of a results file, a
+	/// database row or a CSV column.
+	pub fn parse(rendered: &str) -> Self {
+		if let Some(id) = rendered.strip_prefix("canvas:")
+			&& let Ok(id) = id.parse::<u64>()
+		{
+			return Self::CanvasUser(id);
+		}
+		match rendered.strip_prefix("local:") {
+			Some(token) => Self::Extracted(normalize_key(token)),
+			None => Self::Number(normalize_key(rendered)),
+		}
+	}
+
 	/// The raw text behind the key, without the `Display` prefix.
 	pub fn raw(&self) -> String {
 		match self {
@@ -292,13 +306,20 @@ pub struct StudentSubmission {
 }
 
 impl StudentSubmission {
-	/// A roster student from whom nothing arrived. Always `Matched` — this constructor is
-	/// the only way `NotSubmitted` is produced, which is why `(NotSubmitted, NotInRoster)`
-	/// never occurs.
-	pub fn not_submitted(identity: StudentIdentity, roster_index: usize) -> Self {
+	/// A roster student from whom nothing arrived.
+	///
+	/// `hits` are the roster rows this student matched — several when the roster carries
+	/// duplicate rows for one number, in which case they are all kept rather than one being
+	/// picked. Always `Matched` or `Ambiguous`, never `NotInRoster`: a non-submitter only
+	/// exists because a roster vouches for them.
+	pub fn not_submitted(identity: StudentIdentity, hits: Vec<usize>) -> Self {
+		let roster_match = match hits.len() {
+			1 => RosterMatch::Matched(hits[0]),
+			_ => RosterMatch::Ambiguous(hits),
+		};
 		Self {
 			identity,
-			roster_match: RosterMatch::Matched(roster_index),
+			roster_match,
 			state: SubmissionState::NotSubmitted,
 			attempts: Vec::new(),
 			selected: None,
@@ -313,6 +334,11 @@ impl StudentSubmission {
 		attempts: Vec<SubmissionAttempt>,
 		policy: AttemptPolicy,
 	) -> Self {
+		debug_assert!(
+			!attempts.is_empty(),
+			"received() needs at least one attempt; a student with nothing to show for \
+			 themselves is either not_submitted() or has one empty attempt"
+		);
 		let selected = select_attempt(&attempts, policy);
 		let state = match selected.and_then(|i| attempts.get(i)) {
 			Some(attempt) if !attempt.files.is_empty() => SubmissionState::Executable,
@@ -470,8 +496,10 @@ pub enum DiagnosticKind {
 	NotOnRoster { key: String },
 	#[error("'{key}' matches {count} roster entries")]
 	AmbiguousRosterMatch { key: String, count: usize },
-	#[error("ignored '{path}': not a supported submission file")]
-	IgnoredFile { path: PathBuf },
+	#[error("roster row unusable ({reason}); the student it names is not in the input")]
+	UnusableRosterRow { reason: String },
+	#[error("ignored '{path}' for '{key}': not a supported submission file")]
+	IgnoredFile { key: String, path: PathBuf },
 	#[error("archive '{archive}' entry '{entry}' collides with an already extracted name")]
 	ArchiveNameCollision { archive: PathBuf, entry: String },
 	#[error("archive '{archive}' could not be read: {reason}")]
@@ -756,8 +784,16 @@ mod tests {
 	}
 
 	#[test]
+	fn test_not_submitted_carries_every_matching_roster_row() {
+		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), vec![0, 1]);
+		// Duplicate rows make one student with both candidates, not two students.
+		assert_eq!(s.roster_match, RosterMatch::Ambiguous(vec![0, 1]));
+		assert_eq!(s.outcome(), SubmissionOutcome::NotSubmitted);
+	}
+
+	#[test]
 	fn test_not_submitted_is_always_roster_matched() {
-		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010004"), 3);
+		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010004"), vec![3]);
 		assert_eq!(s.state, SubmissionState::NotSubmitted);
 		assert_eq!(s.roster_match, RosterMatch::Matched(3));
 		assert_eq!(s.outcome(), SubmissionOutcome::NotSubmitted);
@@ -805,7 +841,7 @@ mod tests {
 			SubmissionOutcome::ReceivedUnmatched
 		);
 
-		let absent = StudentSubmission::not_submitted(StudentIdentity::number("4"), 0);
+		let absent = StudentSubmission::not_submitted(StudentIdentity::number("4"), vec![0]);
 		assert_eq!(absent.outcome(), SubmissionOutcome::NotSubmitted);
 	}
 
@@ -894,9 +930,9 @@ mod tests {
 			},
 		);
 		input.students = vec![
-			StudentSubmission::not_submitted(StudentIdentity::number("0024010003"), 0),
-			StudentSubmission::not_submitted(StudentIdentity::number("24010003"), 1),
-			StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), 2),
+			StudentSubmission::not_submitted(StudentIdentity::number("0024010003"), vec![0]),
+			StudentSubmission::not_submitted(StudentIdentity::number("24010003"), vec![1]),
+			StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), vec![2]),
 		];
 
 		let found = input.detect_zero_padded_variants();

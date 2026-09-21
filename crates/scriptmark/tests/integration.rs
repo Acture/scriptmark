@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use scriptmark::grading::apply_grading;
 use scriptmark::models::*;
 use scriptmark::runner::orchestrator;
 use scriptmark::runner::python::PythonExecutor;
@@ -880,4 +881,71 @@ expect = 5
 		TestStatus::Passed,
 		"length should still be 5 because DATA was deepcopied per case"
 	);
+}
+
+/// The seam between the input model and the results: `run_all` is the only place a
+/// student's delivery outcome and Canvas id reach `StudentReport`, and it is what makes
+/// "a non-submitter is never scored zero" work end to end.
+#[tokio::test]
+async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
+	let dir = setup_test_dir();
+	let executor = PythonExecutor::new();
+
+	let mut alice = StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]);
+	alice.roster_match = RosterMatch::Matched(0);
+	alice.identity.canvas_user_id = Some(101);
+	alice.identity.name = Some("Alice".to_string());
+
+	let mut dan_identity = StudentIdentity::number("dan");
+	dan_identity.canvas_user_id = Some(105);
+	let absent = StudentSubmission::not_submitted(dan_identity, vec![1]);
+
+	let students = vec![alice, absent];
+	let results = orchestrator::run_all(&students, &[test_spec()], &executor, 10, Some(2)).await;
+
+	assert_eq!(results.len(), 2, "a non-submitter must still get a row");
+
+	let alice = by_id(&results, "alice");
+	assert_eq!(alice.submission_state, Some(SubmissionOutcome::Executable));
+	assert_eq!(alice.canvas_user_id, Some(101));
+	assert_eq!(alice.student_name.as_deref(), Some("Alice"));
+	assert!(alice.is_gradeable());
+
+	let dan = by_id(&results, "dan");
+	assert_eq!(dan.submission_state, Some(SubmissionOutcome::NotSubmitted));
+	assert_eq!(dan.canvas_user_id, Some(105));
+	assert!(dan.test_results.is_empty());
+	assert!(!dan.is_gradeable());
+
+	// And the consumer honours it: no grade, rather than a zero that would be pushed to
+	// Canvas as if the student had earned it.
+	let mut graded = results;
+	apply_grading(&mut graded, &GradingPolicy::default());
+	assert!(by_id(&graded, "alice").final_grade.is_some());
+	assert_eq!(by_id(&graded, "dan").final_grade, None);
+}
+
+/// A submitter the roster does not list still has runnable code, and a teacher needs that
+/// output to work out why the two disagree.
+#[tokio::test]
+async fn test_a_submitter_absent_from_the_roster_is_still_executed() {
+	let dir = setup_test_dir();
+	let executor = PythonExecutor::new();
+
+	let mut stranger = StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]);
+	stranger.roster_match = RosterMatch::NotInRoster;
+	assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
+
+	let results = orchestrator::run_all(&[stranger], &[test_spec()], &executor, 10, Some(1)).await;
+
+	assert_eq!(results[0].total_cases(), 4, "their tests must still run");
+	assert_eq!(results[0].total_passed(), 4);
+	assert_eq!(
+		results[0].submission_state,
+		Some(SubmissionOutcome::ReceivedUnmatched)
+	);
+	// Run, reported — but not graded until the identity clash is resolved.
+	let mut graded = results;
+	apply_grading(&mut graded, &GradingPolicy::default());
+	assert_eq!(graded[0].final_grade, None);
 }

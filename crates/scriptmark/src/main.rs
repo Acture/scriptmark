@@ -9,7 +9,7 @@ use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::grading::apply_grading;
 use scriptmark::models::{
 	Assignment, AssignmentInput, AttemptPolicy, DiagnosticSeverity, FormulaPolicy, GradingPolicy,
-	SubmissionOutcome, TemplatePolicy,
+	StudentKey, SubmissionOutcome, TemplatePolicy,
 };
 use scriptmark::roster::load_roster;
 use scriptmark::runner::orchestrator;
@@ -493,6 +493,7 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 				wtr.write_record([
 					"student_name",
 					"student_id",
+					"submission_state",
 					"spec_name",
 					"case_name",
 					"status",
@@ -502,11 +503,34 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 					"elapsed_ms",
 				])?;
 				for report in &reports {
+					let state = report
+						.submission_state
+						.map(|s| format!("{s:?}"))
+						.unwrap_or_default();
+					// A student with nothing to run still gets a row, so the CSV covers the
+					// same cohort as the JSON archive rather than quietly dropping every
+					// non-submitter out of the denominator.
+					if report.test_results.is_empty() {
+						wtr.write_record([
+							report.student_name.as_deref().unwrap_or(""),
+							&report.student_id,
+							&state,
+							"",
+							"",
+							&format!("{:?}", report.status()),
+							"",
+							"",
+							report.error.as_deref().unwrap_or(""),
+							"",
+						])?;
+						continue;
+					}
 					for test_result in &report.test_results {
 						for case in &test_result.cases {
 							wtr.write_record([
 								report.student_name.as_deref().unwrap_or(""),
 								&report.student_id,
+								&state,
 								&test_result.spec_name,
 								&case.case_name,
 								&format!("{:?}", case.status),
@@ -596,9 +620,12 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 	if let Some(roster_path) = &args.roster {
 		let roster = load_roster(roster_path).context("Failed to load roster")?;
 		for report in reports.iter_mut() {
-			// `name_of` answers only when the key is unambiguous — with duplicate roster
-			// rows there is no single right name, and guessing one would hide the clash.
-			if let Some(name) = roster.name_of(&report.student_id) {
+			// `student_id` is a rendered key, so it is parsed back rather than compared as
+			// text — otherwise a run made without --roster, whose ids carry a `local:`
+			// prefix, would match nothing. `name_of` answers only when the key is
+			// unambiguous: with duplicate roster rows there is no single right name, and
+			// guessing one would hide the clash.
+			if let Some(name) = roster.name_of(&StudentKey::parse(&report.student_id)) {
 				report.student_name = Some(name.to_string());
 			}
 		}

@@ -68,7 +68,9 @@ for r in results:
     print(f"{r.student_id}: {r.grade:.1f} ({r.passed}/{r.total})")
 
 # Discover student files (convenience view — drops non-submitters and orphan files)
-subs = scriptmark.discover(["submissions/"])  # {'alice': ['path/to/alice_lab5.py'], ...}
+# Keys are rendered student keys: a bare 学号 once a roster confirms it, otherwise
+# `local:<token>` — the prefix means nothing has vouched for that filename token yet.
+subs = scriptmark.discover(["submissions/"])  # {'local:alice': ['path/to/alice_lab5.py'], ...}
 
 # The full input model: every student keeps an outcome, nothing is dropped
 inp = scriptmark.load_input(["submissions/"], roster="roster.csv")

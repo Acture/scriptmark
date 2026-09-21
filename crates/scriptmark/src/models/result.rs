@@ -105,16 +105,23 @@ pub struct StudentReport {
 	/// How the submission arrived. `None` on records written before this field existed.
 	#[serde(default)]
 	pub submission_state: Option<SubmissionOutcome>,
+	/// An infrastructure failure that stopped this student being graded at all — a panicked
+	/// task, not a wrong answer. Kept out of `test_results` so it can never be counted as a
+	/// failed test case and scored.
+	#[serde(default)]
+	pub error: Option<String>,
 }
 
 impl StudentReport {
-	/// True when the student actually had runnable code — the only case a numeric grade
-	/// means anything. Reports from before this field existed are graded as they were.
+	/// True when the student actually had runnable code and nothing went wrong running it —
+	/// the only case a numeric grade means anything. Reports from before these fields
+	/// existed are graded as they were.
 	pub fn is_gradeable(&self) -> bool {
-		matches!(
-			self.submission_state,
-			None | Some(SubmissionOutcome::Executable)
-		)
+		self.error.is_none()
+			&& matches!(
+				self.submission_state,
+				None | Some(SubmissionOutcome::Executable)
+			)
 	}
 }
 

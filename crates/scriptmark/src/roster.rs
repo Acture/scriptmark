@@ -2,13 +2,17 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{DiagnosticKind, InputDiagnostic, SourceLocation, normalize_key};
+use crate::models::{DiagnosticKind, InputDiagnostic, SourceLocation, StudentKey, normalize_key};
 
-/// One roster row. Student numbers are text — leading zeros survive, and nothing is ever
-/// parsed as an integer.
+/// One roster row.
+///
+/// The key is a [`StudentKey`], not a bare string, so a Canvas enrollment carrying no SIS
+/// id is still a roster member — keyed by its Canvas id — rather than being dropped for
+/// want of a student number. Student numbers are text: leading zeros survive, and nothing
+/// is ever parsed as an integer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterEntry {
-	pub student_number: String,
+	pub key: StudentKey,
 	#[serde(default)]
 	pub name: Option<String>,
 	#[serde(default)]
@@ -20,10 +24,18 @@ pub struct RosterEntry {
 impl RosterEntry {
 	pub fn new(student_number: impl Into<String>, name: Option<String>) -> Self {
 		Self {
-			student_number: normalize_key(&student_number.into()),
+			key: StudentKey::Number(normalize_key(&student_number.into())),
 			name,
 			canvas_user_id: None,
 			location: None,
+		}
+	}
+
+	/// The 学号, when this row has one.
+	pub fn student_number(&self) -> Option<&str> {
+		match &self.key {
+			StudentKey::Number(number) => Some(number),
+			_ => None,
 		}
 	}
 }
@@ -48,9 +60,27 @@ pub enum RosterLookup {
 	Missing,
 }
 
+impl RosterLookup {
+	/// Every matching row; empty when there was no match.
+	pub fn hits(&self) -> Vec<usize> {
+		match self {
+			Self::Unique(i) => vec![*i],
+			Self::Ambiguous(hits) => hits.clone(),
+			Self::Missing => Vec::new(),
+		}
+	}
+}
+
 impl Roster {
 	pub fn from_entries(entries: Vec<RosterEntry>) -> Self {
-		let diagnostics = duplicate_diagnostics(&entries);
+		Self::with_diagnostics(entries, Vec::new())
+	}
+
+	pub fn with_diagnostics(
+		entries: Vec<RosterEntry>,
+		mut diagnostics: Vec<InputDiagnostic>,
+	) -> Self {
+		diagnostics.extend(duplicate_diagnostics(&entries));
 		Self {
 			entries,
 			diagnostics,
@@ -75,17 +105,27 @@ impl Roster {
 		self.entries.len()
 	}
 
-	/// Exact-text lookup. The key is compared as written, after the same trim the loader
-	/// applies — never case-folded, never zero-stripped.
-	pub fn lookup(&self, key: &str) -> RosterLookup {
-		let key = normalize_key(key);
+	/// Exact-key lookup.
+	///
+	/// A student number is compared as written, after the same trim the loader applies —
+	/// never case-folded, never zero-stripped. An unconfirmed local token and a confirmed
+	/// 学号 denote the same thing, so they match the same row; a Canvas id is a separate
+	/// namespace and only ever matches a Canvas-keyed row.
+	pub fn lookup(&self, key: &StudentKey) -> RosterLookup {
+		let matches = |entry: &RosterEntry| match (&entry.key, key) {
+			(StudentKey::CanvasUser(a), StudentKey::CanvasUser(b)) => a == b,
+			(StudentKey::CanvasUser(_), _) | (_, StudentKey::CanvasUser(_)) => false,
+			(a, b) => a.raw() == b.raw(),
+		};
+
 		let hits: Vec<usize> = self
 			.entries
 			.iter()
 			.enumerate()
-			.filter(|(_, e)| e.student_number == key)
+			.filter(|(_, entry)| matches(entry))
 			.map(|(i, _)| i)
 			.collect();
+
 		match hits.len() {
 			0 => RosterLookup::Missing,
 			1 => RosterLookup::Unique(hits[0]),
@@ -93,8 +133,13 @@ impl Roster {
 		}
 	}
 
+	/// Look a student number up as written.
+	pub fn lookup_number(&self, number: &str) -> RosterLookup {
+		self.lookup(&StudentKey::Number(normalize_key(number)))
+	}
+
 	/// The name on a row, when there is exactly one row for that key.
-	pub fn name_of(&self, key: &str) -> Option<&str> {
+	pub fn name_of(&self, key: &StudentKey) -> Option<&str> {
 		match self.lookup(key) {
 			RosterLookup::Unique(i) => self.entries[i].name.as_deref(),
 			_ => None,
@@ -103,18 +148,15 @@ impl Roster {
 }
 
 fn duplicate_diagnostics(entries: &[RosterEntry]) -> Vec<InputDiagnostic> {
-	let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+	let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
 	for entry in entries {
-		*counts.entry(entry.student_number.as_str()).or_default() += 1;
+		*counts.entry(entry.key.to_string()).or_default() += 1;
 	}
 	counts
 		.into_iter()
 		.filter(|(_, count)| *count > 1)
 		.map(|(key, count)| {
-			InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry {
-				key: key.to_string(),
-				count,
-			})
+			InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry { key, count })
 		})
 		.collect()
 }
@@ -124,6 +166,10 @@ fn duplicate_diagnostics(entries: &[RosterEntry]) -> Vec<InputDiagnostic> {
 /// Expected format: `name,_,student_id` (header row skipped), or `name,student_id`.
 /// Handles a UTF-8 BOM. Column *mapping* — choosing which column is which — is P-672;
 /// this stays positional on purpose.
+///
+/// A row that parses but carries no usable student number is reported rather than skipped:
+/// dropping it silently would take that student out of the roster of record, and with them
+/// the `NotSubmitted` entry the model exists to preserve.
 pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 	let content =
 		std::fs::read_to_string(path).map_err(|e| RosterError::IoError(path.to_path_buf(), e))?;
@@ -137,9 +183,12 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 		.from_reader(content.as_bytes());
 
 	let mut entries = Vec::new();
+	let mut diagnostics = Vec::new();
 
 	for (row, result) in reader.records().enumerate() {
 		let record = result.map_err(|e| RosterError::CsvError(path.to_path_buf(), e))?;
+		// +2: one for the skipped header, one for 1-based line numbers.
+		let location = SourceLocation::row(path.to_path_buf(), row + 2);
 
 		// Format: name, _, student_id (or name, student_id)
 		let name = record.get(0).unwrap_or("").trim().to_string();
@@ -148,24 +197,39 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 		} else if record.len() >= 2 {
 			record.get(1).unwrap_or("")
 		} else {
+			diagnostics.push(
+				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
+					reason: format!("only {} column(s); need at least 2", record.len()),
+				})
+				.at(location),
+			);
 			continue;
 		};
 
 		let student_number = normalize_key(student_number);
 		if student_number.is_empty() {
+			diagnostics.push(
+				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
+					reason: if name.is_empty() {
+						"blank row".to_string()
+					} else {
+						format!("'{name}' has no student id")
+					},
+				})
+				.at(location),
+			);
 			continue;
 		}
 
 		entries.push(RosterEntry {
-			student_number,
+			key: StudentKey::Number(student_number),
 			name: (!name.is_empty()).then_some(name),
 			canvas_user_id: None,
-			// +2: one for the skipped header, one for 1-based line numbers.
-			location: Some(SourceLocation::row(path.to_path_buf(), row + 2)),
+			location: Some(location),
 		});
 	}
 
-	Ok(Roster::from_entries(entries))
+	Ok(Roster::with_diagnostics(entries, diagnostics))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -196,8 +260,9 @@ mod tests {
 
 		let roster = load_roster(&path).unwrap();
 		assert_eq!(roster.len(), 2);
-		assert_eq!(roster.name_of("alice123"), Some("Alice"));
-		assert_eq!(roster.name_of("bob456"), Some("Bob"));
+		assert_eq!(roster.lookup_number("alice123"), RosterLookup::Unique(0));
+		assert_eq!(roster.entries[0].name.as_deref(), Some("Alice"));
+		assert_eq!(roster.entries[1].name.as_deref(), Some("Bob"));
 		assert!(roster.diagnostics.is_empty());
 	}
 
@@ -207,7 +272,7 @@ mod tests {
 		let path = write(&dir, "\u{feff}name,class,student_id\nAlice,A,alice123\n");
 
 		let roster = load_roster(&path).unwrap();
-		assert_eq!(roster.name_of("alice123"), Some("Alice"));
+		assert_eq!(roster.entries[0].student_number(), Some("alice123"));
 	}
 
 	#[test]
@@ -220,8 +285,8 @@ mod tests {
 
 		let roster = load_roster(&path).unwrap();
 		assert_eq!(roster.len(), 2);
-		assert_eq!(roster.name_of("0024010003"), Some("Carol"));
-		assert_eq!(roster.name_of("24010003"), Some("Dave"));
+		assert_eq!(roster.lookup_number("0024010003"), RosterLookup::Unique(0));
+		assert_eq!(roster.lookup_number("24010003"), RosterLookup::Unique(1));
 		// Exact-text keys cannot collide, so this is not a duplicate.
 		assert!(roster.diagnostics.is_empty());
 	}
@@ -240,24 +305,44 @@ mod tests {
 		assert_eq!(roster.diagnostics.len(), 1);
 		assert!(matches!(
 			&roster.diagnostics[0].kind,
-			DiagnosticKind::DuplicateRosterEntry { key, count } if key == "2024010001" && *count == 2
+			DiagnosticKind::DuplicateRosterEntry { key, count }
+				if key == "2024010001" && *count == 2
 		));
 
-		match roster.lookup("2024010001") {
-			RosterLookup::Ambiguous(hits) => assert_eq!(hits, vec![0, 1]),
-			other => panic!("expected Ambiguous, got {other:?}"),
-		}
+		assert_eq!(
+			roster.lookup_number("2024010001"),
+			RosterLookup::Ambiguous(vec![0, 1])
+		);
 		// An ambiguous key has no single name, and the loader does not invent one.
-		assert_eq!(roster.name_of("2024010001"), None);
+		assert_eq!(
+			roster.name_of(&StudentKey::Number("2024010001".into())),
+			None
+		);
 	}
 
 	#[test]
 	fn test_lookup_trims_but_does_not_otherwise_normalise() {
 		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
-		assert_eq!(roster.lookup(" 2024010001 "), RosterLookup::Unique(0));
-		assert_eq!(roster.lookup("2024010001 "), RosterLookup::Unique(0));
-		assert_eq!(roster.lookup("02024010001"), RosterLookup::Missing);
-		assert_eq!(roster.lookup("missing"), RosterLookup::Missing);
+		assert_eq!(
+			roster.lookup_number(" 2024010001 "),
+			RosterLookup::Unique(0)
+		);
+		assert_eq!(roster.lookup_number("02024010001"), RosterLookup::Missing);
+		assert_eq!(roster.lookup_number("missing"), RosterLookup::Missing);
+	}
+
+	#[test]
+	fn test_an_unconfirmed_local_token_matches_a_student_number_row() {
+		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
+		assert_eq!(
+			roster.lookup(&StudentKey::Extracted("2024010001".into())),
+			RosterLookup::Unique(0)
+		);
+		// A Canvas id is a separate namespace and must not match a 学号 row.
+		assert_eq!(
+			roster.lookup(&StudentKey::CanvasUser(2024010001)),
+			RosterLookup::Missing
+		);
 	}
 
 	#[test]
@@ -269,5 +354,31 @@ mod tests {
 		let location = roster.entries[0].location.as_ref().unwrap();
 		assert_eq!(location.file.as_deref(), Some(path.as_path()));
 		assert_eq!(location.row, Some(2));
+	}
+
+	#[test]
+	fn test_unusable_rows_are_reported_rather_than_dropped_silently() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = write(
+			&dir,
+			"name,class,student_id\nBob Lin,,2024010002\nCarol,,\nsolo\n",
+		);
+
+		let roster = load_roster(&path).unwrap();
+		assert_eq!(roster.len(), 1);
+		// Carol's blank id and the one-column row each leave a trace naming their line.
+		assert_eq!(roster.diagnostics.len(), 2);
+		assert!(
+			roster
+				.diagnostics
+				.iter()
+				.all(|d| matches!(&d.kind, DiagnosticKind::UnusableRosterRow { .. }))
+		);
+		let rows: Vec<Option<usize>> = roster
+			.diagnostics
+			.iter()
+			.map(|d| d.location.as_ref().and_then(|l| l.row))
+			.collect();
+		assert_eq!(rows, vec![Some(3), Some(4)]);
 	}
 }
