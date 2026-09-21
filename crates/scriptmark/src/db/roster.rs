@@ -23,12 +23,13 @@ impl Database {
 		)?;
 		let mut stored = std::collections::BTreeSet::new();
 		for entry in &roster.entries {
+			let id = entry.key.to_string();
 			stmt.execute(rusqlite::params![
-				entry.student_number,
+				id,
 				entry.name,
 				entry.canvas_user_id.map(|id| id as i64),
 			])?;
-			stored.insert(entry.student_number.as_str());
+			stored.insert(id);
 		}
 		Ok(stored.len())
 	}

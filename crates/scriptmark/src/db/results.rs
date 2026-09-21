@@ -109,7 +109,9 @@ impl Database {
 		let mut stmt = self.conn.prepare(
 			"SELECT r.student_id, s.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
-			 LEFT JOIN students s ON r.student_id = s.id
+			 -- A run made without --roster leaves keys unconfirmed, so the id carries a
+			 -- `local:` prefix that students.id never does. Match either form.
+			 LEFT JOIN students s ON s.id IN (r.student_id, ltrim(r.student_id, 'local:'))
 			 WHERE r.session_id = ?1
 			 ORDER BY r.final_grade DESC",
 		)?;
@@ -160,8 +162,8 @@ impl Database {
 					r.student_id, st.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
 			 JOIN sessions s ON r.session_id = s.id
-			 LEFT JOIN students st ON r.student_id = st.id
-			 WHERE r.student_id = ?1
+			 LEFT JOIN students st ON st.id IN (r.student_id, ltrim(r.student_id, 'local:'))
+			 WHERE r.student_id IN (?1, 'local:' || ?1)
 			 ORDER BY s.created_at DESC",
 		)?;
 		let rows = stmt.query_map(rusqlite::params![student_id], |row| {

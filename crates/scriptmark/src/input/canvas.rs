@@ -17,7 +17,7 @@ use crate::discovery::detect_language;
 use crate::models::{
 	Assignment, AssignmentInput, Attachment, AttemptPolicy, DiagnosticKind, FileOrigin,
 	InputDiagnostic, InputSource, RosterMatch, SourceStatus, StudentFile, StudentIdentity,
-	StudentSubmission, SubmissionAttempt, normalize_key,
+	StudentKey, StudentSubmission, SubmissionAttempt, normalize_key,
 };
 use crate::roster::{Roster, RosterEntry, RosterLookup};
 
@@ -188,38 +188,30 @@ pub fn normalize(
 			}));
 		}
 
-		let roster_match = match identity.student_number.as_deref() {
-			None => {
+		let roster_match = match roster.lookup(&identity.key) {
+			RosterLookup::Unique(i) => {
+				covered.insert(identity.key.to_string());
+				if identity.name.is_none() {
+					identity.name = roster.entries[i].name.clone();
+				}
+				RosterMatch::Matched(i)
+			}
+			RosterLookup::Ambiguous(hits) => {
+				covered.insert(identity.key.to_string());
+				diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::AmbiguousRosterMatch {
+						key: identity.key.raw(),
+						count: hits.len(),
+					},
+				));
+				RosterMatch::Ambiguous(hits)
+			}
+			RosterLookup::Missing => {
 				diagnostics.push(InputDiagnostic::warning(DiagnosticKind::NotOnRoster {
 					key: identity.key.raw(),
 				}));
 				RosterMatch::NotInRoster
 			}
-			Some(number) => match roster.lookup(number) {
-				RosterLookup::Unique(i) => {
-					covered.insert(number.to_string());
-					if identity.name.is_none() {
-						identity.name = roster.entries[i].name.clone();
-					}
-					RosterMatch::Matched(i)
-				}
-				RosterLookup::Ambiguous(hits) => {
-					covered.insert(number.to_string());
-					diagnostics.push(InputDiagnostic::warning(
-						DiagnosticKind::AmbiguousRosterMatch {
-							key: number.to_string(),
-							count: hits.len(),
-						},
-					));
-					RosterMatch::Ambiguous(hits)
-				}
-				RosterLookup::Missing => {
-					diagnostics.push(InputDiagnostic::warning(DiagnosticKind::NotOnRoster {
-						key: number.to_string(),
-					}));
-					RosterMatch::NotInRoster
-				}
-			},
 		};
 
 		students.push(StudentSubmission::received(
@@ -230,14 +222,37 @@ pub fn normalize(
 		));
 	}
 
-	for (i, entry) in roster.entries.iter().enumerate() {
-		if covered.contains(&entry.student_number) {
+	// Canvas knows who these people are even though the teacher's CSV only carries a
+	// number, so their Canvas identity is filled in from enrollment rather than lost.
+	let by_number: BTreeMap<String, &CanvasUserPayload> = payload
+		.users
+		.iter()
+		.filter_map(|u| Some((normalize_key(u.sis_user_id.as_deref()?), u)))
+		.collect();
+
+	for entry in &roster.entries {
+		let rendered = entry.key.to_string();
+		if !covered.insert(rendered) {
 			continue;
 		}
-		let mut identity = StudentIdentity::number(&entry.student_number);
+		let hits = roster.lookup(&entry.key).hits();
+		let mut identity = match &entry.key {
+			StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
+			key => StudentIdentity::number(key.raw()),
+		};
 		identity.name = entry.name.clone();
-		identity.canvas_user_id = entry.canvas_user_id;
-		students.push(StudentSubmission::not_submitted(identity, i));
+		identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+		if let Some(user) = by_number.get(&entry.key.raw()) {
+			identity.canvas_user_id = identity.canvas_user_id.or(Some(user.id));
+			identity.sis_user_id = user.sis_user_id.as_deref().map(normalize_key);
+			identity.login_id = identity.login_id.take().or(user.login_id.clone());
+			identity.sortable_name = user.sortable_name.clone();
+			identity.email = user.email.clone();
+			if identity.name.is_none() {
+				identity.name = user.name.clone();
+			}
+		}
+		students.push(StudentSubmission::not_submitted(identity, hits));
 	}
 
 	diagnostics.extend(roster.diagnostics.iter().cloned());
@@ -265,20 +280,31 @@ pub fn normalize(
 }
 
 /// Build a roster from course enrollment, for the case where the teacher supplied none.
+///
+/// An enrollee carrying no SIS id is keyed by its Canvas id rather than dropped: Canvas has
+/// already told us this is a member of the course, and a member who hands nothing in must
+/// still appear.
 fn enrollment_roster(users: &[CanvasUserPayload]) -> Roster {
 	let mut entries: Vec<RosterEntry> = users
 		.iter()
-		.filter_map(|u| {
-			let number = normalize_key(u.sis_user_id.as_deref()?);
-			(!number.is_empty()).then(|| RosterEntry {
-				student_number: number,
+		.map(|u| {
+			let number = u
+				.sis_user_id
+				.as_deref()
+				.map(normalize_key)
+				.filter(|n| !n.is_empty());
+			RosterEntry {
+				key: match number {
+					Some(number) => StudentKey::Number(number),
+					None => StudentKey::CanvasUser(u.id),
+				},
 				name: u.name.clone(),
 				canvas_user_id: Some(u.id),
 				location: None,
-			})
+			}
 		})
 		.collect();
-	entries.sort_by(|a, b| a.student_number.cmp(&b.student_number));
+	entries.sort_by(|a, b| a.key.cmp(&b.key));
 	Roster::from_entries(entries)
 }
 
@@ -365,6 +391,7 @@ fn attempts_of(
 						));
 					} else {
 						diagnostics.push(InputDiagnostic::info(DiagnosticKind::IgnoredFile {
+							key: identity.key.raw(),
 							path: path.clone(),
 						}));
 					}
@@ -392,7 +419,6 @@ fn attempts_of(
 		});
 	}
 
-	let _ = identity;
 	attempts.sort_by_key(|a| a.attempt);
 	attempts
 }
@@ -572,10 +598,10 @@ mod tests {
 			&d.kind,
 			DiagnosticKind::MissingStudentNumber { canvas_user_id } if *canvas_user_id == 4242
 		)));
-		assert_eq!(
-			input.students[0].outcome(),
-			SubmissionOutcome::ReceivedUnmatched
-		);
+		// Enrollment is the roster when none is supplied, and Canvas says this person is
+		// enrolled — so they are a member, not a stranger.
+		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
 	}
 
 	#[test]

@@ -70,10 +70,15 @@ The ticket's four outcomes come out of a method, so the pair can never disagree:
 fn outcome(&self) -> SubmissionOutcome   // NotSubmitted | SubmittedEmpty | ReceivedUnmatched | Executable
 ```
 
-`ReceivedUnmatched` dominates: anything received from someone not on the roster is
-unmatched regardless of whether its files would run. `NotSubmitted` is only ever produced
-by the roster-merge path, which always sets `Matched` — construction goes through
-`StudentSubmission::new`, and a test pins that no other pairing is produced.
+`ReceivedUnmatched` dominates for *reporting*: anything received from someone not on the
+roster is unmatched regardless of whether its files would run. Execution is gated on the
+delivery axis instead, so an unmatched submitter's code still runs — a teacher needs that
+output to resolve the clash — and `apply_grading` withholds the grade.
+
+`NotSubmitted` is produced only by `not_submitted()`, which always sets `Matched` or
+`Ambiguous`, so `(NotSubmitted, NotInRoster)` does not arise in tree. `received()` carries a
+`debug_assert!` against the empty-attempt case that would otherwise let a caller construct
+it.
 
 ### D4 — The runner takes `&[StudentSubmission]`, not `AssignmentInput`
 

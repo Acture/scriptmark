@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::models::{
 	Assignment, AssignmentInput, AttemptPolicy, DiagnosticKind, FileOrigin, InputDiagnostic,
-	InputSource, RosterMatch, SourceLocation, StudentFile, StudentIdentity, StudentSubmission,
-	SubmissionAttempt, UnmatchedArtifact, UnmatchedReason,
+	InputSource, RosterMatch, SourceLocation, StudentFile, StudentIdentity, StudentKey,
+	StudentSubmission, SubmissionAttempt, UnmatchedArtifact, UnmatchedReason, normalize_key,
 };
 use crate::roster::{Roster, RosterLookup};
 
@@ -46,11 +46,14 @@ pub(crate) fn detect_language(ext: &str) -> Option<&'static str> {
 /// for it.
 fn extract_sid(filename: &str) -> Option<String> {
 	let stem = Path::new(filename).file_stem()?.to_str()?;
-	let sid = stem.split('_').next()?;
+	// Normalised here rather than at each use: `seen_keys`, `by_key` and the roster-merge
+	// coverage set are all keyed on this string, and a token with stray whitespace would
+	// otherwise group separately from the identity built out of it.
+	let sid = normalize_key(stem.split('_').next()?);
 	if sid.is_empty() {
 		return None;
 	}
-	Some(sid.to_string())
+	Some(sid)
 }
 
 /// A file that came out of an archive, with the provenance needed to trace it back.
@@ -68,6 +71,14 @@ const MAX_FILE_COUNT: usize = 100;
 
 fn is_noise(name: &str) -> bool {
 	name.starts_with('.') || name.starts_with("__")
+}
+
+fn skipped(archive: &Path, entry: &str, reason: String) -> InputDiagnostic {
+	InputDiagnostic::warning(DiagnosticKind::ArchiveEntrySkipped {
+		archive: archive.to_path_buf(),
+		entry: entry.to_string(),
+		reason,
+	})
 }
 
 /// Extract `.zip` archives in a directory to `{EXTRACT_DIR}/{archive_stem}/`.
@@ -189,6 +200,41 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 				));
 				continue;
 			}
+
+			// Every guard runs before the entry is recorded. Claiming the name first would
+			// let a rejected entry block the real submission from ever being extracted, and
+			// the accounting runs on a cached rerun too so the diagnostics do not vanish
+			// the second time a directory is scanned.
+			if entry.size() > MAX_FILE_SIZE {
+				diagnostics.push(skipped(
+					&archive_path,
+					&entry_name,
+					format!(
+						"{} bytes exceeds the {MAX_FILE_SIZE} byte limit",
+						entry.size()
+					),
+				));
+				continue;
+			}
+			if total_bytes + entry.size() > MAX_TOTAL_SIZE {
+				diagnostics.push(skipped(
+					&archive_path,
+					&entry_name,
+					format!("archive exceeds the {MAX_TOTAL_SIZE} byte total"),
+				));
+				break;
+			}
+			if file_count >= MAX_FILE_COUNT {
+				diagnostics.push(skipped(
+					&archive_path,
+					&entry_name,
+					format!("archive exceeds the {MAX_FILE_COUNT} file limit"),
+				));
+				break;
+			}
+
+			total_bytes += entry.size();
+			file_count += 1;
 			claimed.insert(out_path.clone(), entry_name.clone());
 
 			// Provenance is recorded whether or not the bytes are written this run, so a
@@ -203,67 +249,31 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 				continue;
 			}
 
-			if entry.size() > MAX_FILE_SIZE {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveEntrySkipped {
-						archive: archive_path.clone(),
-						entry: entry_name,
-						reason: format!(
-							"{} bytes exceeds the {MAX_FILE_SIZE} byte limit",
-							entry.size()
-						),
-					},
-				));
-				extracted.pop();
-				continue;
-			}
-			if total_bytes + entry.size() > MAX_TOTAL_SIZE {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveEntrySkipped {
-						archive: archive_path.clone(),
-						entry: entry_name,
-						reason: format!("archive exceeds the {MAX_TOTAL_SIZE} byte total"),
-					},
-				));
-				extracted.pop();
-				break;
-			}
-			if file_count >= MAX_FILE_COUNT {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveEntrySkipped {
-						archive: archive_path.clone(),
-						entry: entry_name,
-						reason: format!("archive exceeds the {MAX_FILE_COUNT} file limit"),
-					},
-				));
-				extracted.pop();
-				break;
-			}
-
 			let mut buf = Vec::new();
-			if entry.read_to_end(&mut buf).is_ok() {
-				if let Err(e) = std::fs::write(&out_path, &buf) {
-					diagnostics.push(InputDiagnostic::warning(
-						DiagnosticKind::ArchiveEntrySkipped {
-							archive: archive_path.clone(),
-							entry: entry_name,
-							reason: e.to_string(),
-						},
+			let written = entry.read_to_end(&mut buf).is_ok()
+				&& match std::fs::write(&out_path, &buf) {
+					Ok(()) => true,
+					Err(e) => {
+						diagnostics.push(skipped(&archive_path, &entry_name, e.to_string()));
+						false
+					}
+				};
+			if !written {
+				if !diagnostics.last().is_some_and(|d| {
+					matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { entry, .. } if entry == &entry_name)
+				}) {
+					diagnostics.push(skipped(
+						&archive_path,
+						&entry_name,
+						"unreadable entry".to_string(),
 					));
-					extracted.pop();
-					continue;
 				}
-				total_bytes += buf.len() as u64;
-				file_count += 1;
-			} else {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveEntrySkipped {
-						archive: archive_path.clone(),
-						entry: entry_name,
-						reason: "unreadable entry".to_string(),
-					},
-				));
+				// Roll the claim and the provenance back together; letting them drift is
+				// what lets a rejected entry block a real one.
 				extracted.pop();
+				claimed.remove(&out_path);
+				total_bytes -= entry.size();
+				file_count -= 1;
 			}
 		}
 	}
@@ -363,8 +373,19 @@ pub fn load_local_input(
 				.and_then(|e| e.to_str())
 				.unwrap_or("")
 				.to_lowercase();
-			// Archives are inputs to extraction, not submissions in their own right.
+			// Archives are inputs to extraction, not submissions in their own right — but
+			// the upload still happened. Registering the owner here is what stops a
+			// truncated or empty archive being reported as 缺交.
 			if !is_extracted && ext == "zip" {
+				match extract_sid(filename) {
+					Some(key) => {
+						seen_keys.insert(key);
+					}
+					None => unmatched.push(UnmatchedArtifact {
+						path: path.clone(),
+						reason: UnmatchedReason::NoStudentKey,
+					}),
+				}
 				continue;
 			}
 
@@ -393,11 +414,14 @@ pub fn load_local_input(
 				}
 				(Some(key), None) => {
 					// Owner known, type unusable: the student submitted, just not code.
-					seen_keys.insert(key);
 					diagnostics.push(
-						InputDiagnostic::info(DiagnosticKind::IgnoredFile { path: path.clone() })
-							.at(SourceLocation::file(path.clone())),
+						InputDiagnostic::info(DiagnosticKind::IgnoredFile {
+							key: key.clone(),
+							path: path.clone(),
+						})
+						.at(SourceLocation::file(path.clone())),
 					);
+					seen_keys.insert(key);
 				}
 				(None, language) => unmatched.push(UnmatchedArtifact {
 					path: path.clone(),
@@ -421,17 +445,17 @@ pub fn load_local_input(
 		let mut identity = StudentIdentity::extracted(key);
 		let roster_match = match options.roster {
 			None => RosterMatch::NoRoster,
-			Some(roster) => match roster.lookup(key) {
+			Some(roster) => match roster.lookup(&identity.key) {
 				RosterLookup::Unique(i) => {
 					identity.confirm_number();
 					identity.name = roster.entries[i].name.clone();
 					identity.canvas_user_id = roster.entries[i].canvas_user_id;
-					covered.insert(key.clone());
+					covered.insert(identity.key.to_string());
 					RosterMatch::Matched(i)
 				}
 				RosterLookup::Ambiguous(hits) => {
 					identity.confirm_number();
-					covered.insert(key.clone());
+					covered.insert(identity.key.to_string());
 					diagnostics.push(InputDiagnostic::warning(
 						DiagnosticKind::AmbiguousRosterMatch {
 							key: key.clone(),
@@ -459,16 +483,22 @@ pub fn load_local_input(
 	}
 
 	// A roster student who sent nothing must still appear — that is the whole point of
-	// having a roster of record.
+	// having a roster of record. Duplicate rows for one number yield one student carrying
+	// every row it matched, not one student per row.
 	if let Some(roster) = options.roster {
-		for (i, entry) in roster.entries.iter().enumerate() {
-			if covered.contains(&entry.student_number) {
+		for entry in &roster.entries {
+			let rendered = entry.key.to_string();
+			if !covered.insert(rendered) {
 				continue;
 			}
-			let mut identity = StudentIdentity::number(&entry.student_number);
+			let hits = roster.lookup(&entry.key).hits();
+			let mut identity = match &entry.key {
+				StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
+				key => StudentIdentity::number(key.raw()),
+			};
 			identity.name = entry.name.clone();
-			identity.canvas_user_id = entry.canvas_user_id;
-			students.push(StudentSubmission::not_submitted(identity, i));
+			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+			students.push(StudentSubmission::not_submitted(identity, hits));
 		}
 	}
 
@@ -747,6 +777,121 @@ mod tests {
 			&d.kind,
 			DiagnosticKind::DuplicateRosterEntry { count, .. } if *count == 2
 		)));
+	}
+
+	#[test]
+	fn test_duplicate_roster_rows_do_not_fan_a_non_submitter_out() {
+		let dir = tempfile::tempdir().unwrap();
+		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024010001", "Alice Chen")]);
+		let input = scan_with(dir.path(), &roster);
+
+		// One student for one number, however many rows name them — two entries would
+		// collide on student_id the moment anything tried to persist them.
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(
+			input.students[0].roster_match,
+			RosterMatch::Ambiguous(vec![0, 1])
+		);
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::NotSubmitted);
+	}
+
+	#[test]
+	fn test_a_token_with_stray_whitespace_does_not_split_a_student_in_two() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("2024010001 _lab1.py"), "pass").unwrap();
+
+		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
+		let input = scan_with(dir.path(), &roster);
+
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
+	}
+
+	#[test]
+	fn test_an_unreadable_archive_is_not_reported_as_a_non_submission() {
+		let dir = tempfile::tempdir().unwrap();
+		// A truncated upload: the name is intact, the bytes are not.
+		std::fs::write(
+			dir.path().join("2024010001_lab1.zip"),
+			b"PK\x03\x04 truncated",
+		)
+		.unwrap();
+
+		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
+		let input = scan_with(dir.path(), &roster);
+
+		assert_eq!(input.student_count(), 1);
+		// Something arrived — it just could not be opened. That is not 缺交.
+		assert_eq!(
+			input.students[0].outcome(),
+			SubmissionOutcome::SubmittedEmpty
+		);
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::ArchiveUnreadable { .. }))
+		);
+	}
+
+	#[test]
+	fn test_a_rejected_archive_entry_does_not_block_the_real_submission() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("2024010001_lab1.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		use std::io::Write;
+		// Oversized junk that flattens onto the same name as the real file.
+		zip.start_file("junk/lab1.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(&vec![b'#'; (MAX_FILE_SIZE + 1) as usize])
+			.unwrap();
+		zip.start_file("src/lab1.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(b"def f(): return 1").unwrap();
+		zip.finish().unwrap();
+
+		let input = scan(dir.path());
+
+		// The rejected entry must not reserve the name the real submission needs.
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+		assert_eq!(
+			input.students[0].files()[0].origin,
+			FileOrigin::Archive {
+				archive: zip_path,
+				entry: "src/lab1.py".to_string(),
+			}
+		);
+	}
+
+	#[test]
+	fn test_skip_diagnostics_survive_a_cached_rerun() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("2024010001_lab1.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		use std::io::Write;
+		zip.start_file("ok.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(b"pass").unwrap();
+		zip.start_file("huge.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(&vec![b'#'; (MAX_FILE_SIZE + 1) as usize])
+			.unwrap();
+		zip.finish().unwrap();
+
+		let skips = |input: &AssignmentInput| {
+			input
+				.diagnostics
+				.iter()
+				.filter(|d| matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { .. }))
+				.count()
+		};
+		// A teacher rerunning the same directory must still be told a file was dropped.
+		assert_eq!(skips(&scan(dir.path())), 1);
+		assert_eq!(skips(&scan(dir.path())), 1);
 	}
 
 	#[test]
