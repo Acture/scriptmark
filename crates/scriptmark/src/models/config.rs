@@ -66,6 +66,17 @@ fn default_language() -> String {
 	"python".to_string()
 }
 
+/// Which submission attempt to grade when a source reports several.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptPolicy {
+	/// Highest attempt number wins.
+	#[default]
+	Latest,
+	/// Lowest attempt number wins.
+	Earliest,
+}
+
 /// Assignment-level configuration (from assignment.toml).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignmentConfig {
@@ -80,6 +91,15 @@ pub struct AssignmentInfo {
 	pub name: String,
 	#[serde(default = "default_tests_dir")]
 	pub tests_dir: String,
+	/// Canvas course id. Kept apart from the assignment id and from any student identity.
+	#[serde(default)]
+	pub canvas_course_id: Option<u64>,
+	/// Canvas assignment id.
+	#[serde(default)]
+	pub canvas_assignment_id: Option<u64>,
+	/// Which attempt to grade when the source reports several.
+	#[serde(default)]
+	pub attempt_policy: AttemptPolicy,
 }
 
 fn default_tests_dir() -> String {

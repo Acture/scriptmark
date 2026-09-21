@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::SubmissionOutcome;
+
 /// Status of a single test case or an overall student report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,11 +79,17 @@ impl TestResult {
 }
 
 /// Complete report for a single student across all test specs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// New fields are `Option` rather than defaulted enums: a results file written before this
+/// model existed must not claim a `submission_state` it never recorded.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StudentReport {
+	/// `StudentKey`'s rendering — a bare 学号, or a `canvas:` / `local:` prefixed form that
+	/// can never be mistaken for one.
 	pub student_id: String,
 	#[serde(default)]
 	pub student_name: Option<String>,
+	#[serde(default)]
 	pub test_results: Vec<TestResult>,
 	#[serde(default)]
 	pub final_grade: Option<f64>,
@@ -90,6 +98,24 @@ pub struct StudentReport {
 	/// Lint-based style score (0-100). Set by linter, used by grading.
 	#[serde(default)]
 	pub lint_score: Option<f64>,
+	/// Canvas user id, kept separate from `student_id` so grade push never has to guess it
+	/// by parsing the student id as an integer.
+	#[serde(default)]
+	pub canvas_user_id: Option<u64>,
+	/// How the submission arrived. `None` on records written before this field existed.
+	#[serde(default)]
+	pub submission_state: Option<SubmissionOutcome>,
+}
+
+impl StudentReport {
+	/// True when the student actually had runnable code — the only case a numeric grade
+	/// means anything. Reports from before this field existed are graded as they were.
+	pub fn is_gradeable(&self) -> bool {
+		matches!(
+			self.submission_state,
+			None | Some(SubmissionOutcome::Executable)
+		)
+	}
 }
 
 impl StudentReport {

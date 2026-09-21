@@ -1,9 +1,17 @@
-use std::collections::HashMap;
 use std::io::Write;
 
 use scriptmark::models::*;
 use scriptmark::runner::orchestrator;
 use scriptmark::runner::python::PythonExecutor;
+
+/// Reports come back as a list in input order, so tests look a student up by the id the
+/// model renders rather than indexing a map.
+fn by_id<'a>(reports: &'a [StudentReport], student_id: &str) -> &'a StudentReport {
+	reports
+		.iter()
+		.find(|r| r.student_id == student_id)
+		.unwrap_or_else(|| panic!("no report for '{student_id}'"))
+}
 
 fn setup_test_dir() -> tempfile::TempDir {
 	let dir = tempfile::tempdir().unwrap();
@@ -73,10 +81,10 @@ async fn test_python_executor_correct_student() {
 	let dir = setup_test_dir();
 	let executor = PythonExecutor::new();
 
-	let files = vec![StudentFile {
-		path: dir.path().join("alice_lab5.py"),
-		language: "python".to_string(),
-	}];
+	let files = vec![StudentFile::direct(
+		dir.path().join("alice_lab5.py"),
+		"python",
+	)];
 
 	let spec = test_spec();
 
@@ -112,10 +120,10 @@ async fn test_python_executor_buggy_student() {
 	let dir = setup_test_dir();
 	let executor = PythonExecutor::new();
 
-	let files = vec![StudentFile {
-		path: dir.path().join("bob_lab5.py"),
-		language: "python".to_string(),
-	}];
+	let files = vec![StudentFile::direct(
+		dir.path().join("bob_lab5.py"),
+		"python",
+	)];
 
 	let spec = test_spec();
 
@@ -155,39 +163,23 @@ async fn test_orchestrator_runs_all_students() {
 	let dir = setup_test_dir();
 	let executor = PythonExecutor::new();
 
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([
-			(
-				"alice".to_string(),
-				vec![StudentFile {
-					path: dir.path().join("alice_lab5.py"),
-					language: "python".to_string(),
-				}],
-			),
-			(
-				"bob".to_string(),
-				vec![StudentFile {
-					path: dir.path().join("bob_lab5.py"),
-					language: "python".to_string(),
-				}],
-			),
-		]),
-	};
+	let students = vec![
+		StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]),
+		StudentSubmission::from_files("bob", &[dir.path().join("bob_lab5.py")]),
+	];
 
 	let specs = vec![test_spec()];
 
-	let results = orchestrator::run_all(&submissions, &specs, &executor, 10, Some(2)).await;
+	let results = orchestrator::run_all(&students, &specs, &executor, 10, Some(2)).await;
 
 	assert_eq!(results.len(), 2);
-	assert!(results.contains_key("alice"));
-	assert!(results.contains_key("bob"));
 
-	let alice = &results["alice"];
+	let alice = by_id(&results, "alice");
 	assert_eq!(alice.status(), TestStatus::Passed);
 	assert_eq!(alice.total_cases(), 4);
 	assert_eq!(alice.total_passed(), 4);
 
-	let bob = &results["bob"];
+	let bob = by_id(&results, "bob");
 	assert_eq!(bob.status(), TestStatus::Failed);
 	assert_eq!(bob.total_cases(), 4);
 	// bob returns min instead of max: fails on "3<5" and "negative", passes "equal zero" and "TypeError"
@@ -250,19 +242,14 @@ expect = 10
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_math.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_math.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
 
-	let alice = &results["alice"];
+	let alice = by_id(&results, "alice");
 	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
@@ -304,18 +291,13 @@ expect = "hello world"
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_echo.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_echo.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 	assert_eq!(alice.test_results[0].cases[0].status, TestStatus::Passed);
 }
 
@@ -353,18 +335,13 @@ expect = 0.001
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_config.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_config.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
 		TestStatus::Passed,
@@ -419,18 +396,13 @@ reference = "{}/solutions/lab5.py"
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_lab5.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_lab5.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 10, "Should have 10 generated cases");
 	assert_eq!(
@@ -476,18 +448,13 @@ rhai = "if a >= b { a } else { b }"
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_lab5.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_lab5.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 5, "Should have 5 generated cases");
 	assert_eq!(
@@ -544,18 +511,13 @@ expect = 60
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_proc.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_proc.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
@@ -634,18 +596,13 @@ expect = 20.0
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 2);
 	assert_eq!(
@@ -711,18 +668,13 @@ expect = [0, 1, 2]
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
@@ -778,18 +730,13 @@ args = []
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
@@ -846,18 +793,13 @@ expect = 10
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
@@ -919,18 +861,13 @@ expect = 5
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	// With copy_refs=true (default), second case should still see original DATA
 	assert_eq!(

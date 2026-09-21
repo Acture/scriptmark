@@ -1,0 +1,33 @@
+[
+  {
+    "student_id": "alice",
+    "student_name": "Alice Wu",
+    "test_results": [
+      {
+        "spec_name": "find_larger_number",
+        "cases": [
+          { "case_name": "3 < 5", "status": "passed", "actual": "5", "expected": "5", "failure": null, "elapsed_ms": 12 }
+        ]
+      }
+    ],
+    "final_grade": 95.0,
+    "backend_name": "python",
+    "lint_score": null
+  },
+  {
+    "student_id": "bob",
+    "student_name": "Bob Lin",
+    "test_results": [
+      {
+        "spec_name": "find_larger_number",
+        "cases": [
+          { "case_name": "3 < 5", "status": "failed", "actual": "3", "expected": "5",
+            "failure": { "message": "expected 5, got 3", "details": "" }, "elapsed_ms": 11 }
+        ]
+      }
+    ],
+    "final_grade": 60.0,
+    "backend_name": "python",
+    "lint_score": null
+  }
+]

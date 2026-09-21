@@ -34,10 +34,23 @@ impl Database {
 		reports: &[StudentReport],
 		grading_policy_json: Option<&str>,
 	) -> Result<i64, DbError> {
-		let avg = if reports.is_empty() {
+		// Two reports for one student would be merged by UNIQUE(session_id, student_id)
+		// while student_count still claimed both — the silent overwrite this model exists
+		// to prevent. Refuse before writing anything.
+		let mut seen = std::collections::BTreeSet::new();
+		for report in reports {
+			if !seen.insert(report.student_id.as_str()) {
+				return Err(DbError::DuplicateStudent(report.student_id.clone()));
+			}
+		}
+
+		// Average over students who actually have a grade: ungraded students would
+		// otherwise drag the mean toward zero.
+		let graded: Vec<f64> = reports.iter().filter_map(|r| r.final_grade).collect();
+		let avg = if graded.is_empty() {
 			0.0
 		} else {
-			reports.iter().filter_map(|r| r.final_grade).sum::<f64>() / reports.len() as f64
+			graded.iter().sum::<f64>() / graded.len() as f64
 		};
 
 		self.conn.execute(
@@ -48,7 +61,7 @@ impl Database {
 		let session_id = self.conn.last_insert_rowid();
 
 		let mut stmt = self.conn.prepare(
-			"INSERT OR REPLACE INTO results
+			"INSERT INTO results
 			 (session_id, student_id, pass_rate, final_grade, lint_score, total_cases, passed_cases, details)
 			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
 		)?;

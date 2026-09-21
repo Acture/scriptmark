@@ -19,6 +19,8 @@ pub enum DbError {
 	Json(#[from] serde_json::Error),
 	#[error("IO error: {0}")]
 	Io(#[from] std::io::Error),
+	#[error("two reports share student id '{0}'; refusing to overwrite one with the other")]
+	DuplicateStudent(String),
 }
 
 pub struct Database {
@@ -52,9 +54,8 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-	use std::collections::HashMap;
-
 	use crate::models::*;
+	use crate::roster::Roster;
 	use crate::similarity::SimilarityPair;
 
 	use super::*;
@@ -68,9 +69,7 @@ mod tests {
 	#[test]
 	fn test_roster_import_and_query() {
 		let db = Database::open_memory().unwrap();
-		let mut roster = HashMap::new();
-		roster.insert("alice".to_string(), "Alice Smith".to_string());
-		roster.insert("bob".to_string(), "Bob Jones".to_string());
+		let roster = Roster::from_pairs(&[("alice", "Alice Smith"), ("bob", "Bob Jones")]);
 
 		let count = db.import_roster(&roster).unwrap();
 		assert_eq!(count, 2);
@@ -101,8 +100,7 @@ mod tests {
 				}],
 			}],
 			final_grade: Some(95.0),
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 
 		let session_id = db.save_session("hw5", &reports, None).unwrap();
@@ -125,19 +123,13 @@ mod tests {
 
 		let report1 = vec![StudentReport {
 			student_id: "alice".to_string(),
-			student_name: None,
-			test_results: vec![],
 			final_grade: Some(80.0),
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 		let report2 = vec![StudentReport {
 			student_id: "alice".to_string(),
-			student_name: None,
-			test_results: vec![],
 			final_grade: Some(95.0),
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 
 		db.save_session("hw5", &report1, None).unwrap();
@@ -171,16 +163,66 @@ mod tests {
 	#[test]
 	fn test_roster_upsert() {
 		let db = Database::open_memory().unwrap();
-		let mut roster = HashMap::new();
-		roster.insert("alice".to_string(), "Alice V1".to_string());
-		db.import_roster(&roster).unwrap();
-
-		roster.insert("alice".to_string(), "Alice V2".to_string());
-		db.import_roster(&roster).unwrap();
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice V1")]))
+			.unwrap();
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice V2")]))
+			.unwrap();
 
 		let alice = db.get_student("alice").unwrap().unwrap();
 		assert_eq!(alice.name.as_deref(), Some("Alice V2"));
 
 		assert_eq!(db.list_students().unwrap().len(), 1);
+	}
+
+	#[test]
+	fn test_import_roster_counts_rows_stored_not_rows_iterated() {
+		let db = Database::open_memory().unwrap();
+		// The roster keeps both rows; the primary key can only hold one.
+		let roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice Chen")]);
+		assert_eq!(roster.len(), 2);
+		assert_eq!(db.import_roster(&roster).unwrap(), 1);
+	}
+
+	#[test]
+	fn test_duplicate_student_ids_are_refused_rather_than_merged() {
+		let db = Database::open_memory().unwrap();
+		let reports = vec![
+			StudentReport {
+				student_id: "alice".to_string(),
+				final_grade: Some(80.0),
+				..Default::default()
+			},
+			StudentReport {
+				student_id: "alice".to_string(),
+				final_grade: Some(95.0),
+				..Default::default()
+			},
+		];
+
+		let err = db.save_session("hw5", &reports, None).unwrap_err();
+		assert!(matches!(err, DbError::DuplicateStudent(id) if id == "alice"));
+	}
+
+	#[test]
+	fn test_average_ignores_ungraded_students() {
+		let db = Database::open_memory().unwrap();
+		let reports = vec![
+			StudentReport {
+				student_id: "alice".to_string(),
+				final_grade: Some(90.0),
+				..Default::default()
+			},
+			StudentReport {
+				student_id: "absent".to_string(),
+				submission_state: Some(SubmissionOutcome::NotSubmitted),
+				..Default::default()
+			},
+		];
+
+		db.save_session("hw5", &reports, None).unwrap();
+		let sessions = db.list_sessions().unwrap();
+		assert_eq!(sessions[0].student_count, 2);
+		// A missing grade is not a zero, so it must not halve the mean.
+		assert!((sessions[0].avg_grade - 90.0).abs() < 0.1);
 	}
 }

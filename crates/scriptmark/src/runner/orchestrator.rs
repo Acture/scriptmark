@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::models::{
-	CaseResult, FailureDetail, StudentFile, StudentReport, SubmissionSet, TestResult, TestSpec,
-	TestStatus,
+	CaseResult, FailureDetail, StudentFile, StudentReport, StudentSubmission, SubmissionOutcome,
+	TestResult, TestSpec, TestStatus,
 };
 use tokio::sync::Semaphore;
 
@@ -12,14 +12,20 @@ use crate::runner::resolve::resolve_args;
 
 /// Run all test specs for all students in parallel.
 ///
+/// Takes `&[StudentSubmission]` rather than the whole `AssignmentInput` so that Canvas-only
+/// material — workflow states, attachment URLs, login ids — never reaches the scoring path.
+///
+/// Returns one report per student **in input order**, including students with nothing to
+/// run: a roster member who did not submit must not vanish from the results, and a
+/// `HashMap` keyed on student id would additionally drop one of two retained duplicates.
 /// Concurrency is bounded by `max_concurrent` (defaults to number of CPUs).
 pub async fn run_all(
-	submissions: &SubmissionSet,
+	students: &[StudentSubmission],
 	specs: &[TestSpec],
 	executor: &PythonExecutor,
 	timeout_secs: u64,
 	max_concurrent: Option<usize>,
-) -> HashMap<String, StudentReport> {
+) -> Vec<StudentReport> {
 	let concurrency = max_concurrent.unwrap_or_else(|| {
 		std::thread::available_parallelism()
 			.map(|n| n.get())
@@ -29,32 +35,67 @@ pub async fn run_all(
 
 	let mut handles = Vec::new();
 
-	for (sid, files) in &submissions.by_student {
-		let sid = sid.clone();
-		let files = files.clone();
+	for student in students {
+		let identity = student.identity.clone();
+		let outcome = student.outcome();
+		let files = student.files().to_vec();
 		let specs = specs.to_vec();
 		let sem = semaphore.clone();
 		let python_cmd = executor.python_cmd().to_string();
 		let timeout = timeout_secs;
 
 		let handle = tokio::spawn(async move {
-			let _permit = sem.acquire().await.unwrap();
-			let exec = PythonExecutor::with_python_cmd(&python_cmd);
-			let report = run_student(&exec, &sid, &files, &specs, timeout).await;
-			(sid, report)
+			let sid = identity.key.to_string();
+			let mut report = if outcome == SubmissionOutcome::Executable {
+				let _permit = sem.acquire().await.unwrap();
+				let exec = PythonExecutor::with_python_cmd(&python_cmd);
+				run_student(&exec, &sid, &files, &specs, timeout).await
+			} else {
+				// Nothing to run, but the student still gets a row.
+				StudentReport {
+					student_id: sid,
+					..Default::default()
+				}
+			};
+			report.student_name = identity.name.clone();
+			report.canvas_user_id = identity.canvas_user_id;
+			report.submission_state = Some(outcome);
+			report
 		});
 
-		handles.push(handle);
+		handles.push((student, handle));
 	}
 
-	let mut results = HashMap::new();
-	for handle in handles {
-		if let Ok((sid, report)) = handle.await {
-			results.insert(sid, report);
+	let mut reports = Vec::with_capacity(handles.len());
+	for (student, handle) in handles {
+		match handle.await {
+			Ok(report) => reports.push(report),
+			// A panicked task must not make the student disappear either.
+			Err(e) => reports.push(StudentReport {
+				student_id: student.identity.key.to_string(),
+				student_name: student.identity.name.clone(),
+				canvas_user_id: student.identity.canvas_user_id,
+				submission_state: Some(student.outcome()),
+				test_results: vec![TestResult {
+					spec_name: "scriptmark".to_string(),
+					cases: vec![CaseResult {
+						case_name: "run".to_string(),
+						status: TestStatus::Error,
+						actual: None,
+						expected: None,
+						failure: Some(FailureDetail {
+							message: "grading task failed".to_string(),
+							details: e.to_string(),
+						}),
+						elapsed_ms: None,
+					}],
+				}],
+				..Default::default()
+			}),
 		}
 	}
 
-	results
+	reports
 }
 
 /// Run all test specs for a single student.
@@ -245,10 +286,9 @@ async fn run_student(
 
 	StudentReport {
 		student_id: sid.to_string(),
-		student_name: None,
 		test_results,
-		final_grade: None,
 		backend_name: Some("python".to_string()),
 		lint_score,
+		..Default::default()
 	}
 }
