@@ -15,10 +15,7 @@ pub async fn resolve_oracle(
 ) {
 	if let Some(ref_path) = &oracle.reference {
 		// Run teacher's reference implementation with same function + args
-		let ref_file = StudentFile {
-			path: Path::new(ref_path).to_path_buf(),
-			language: "python".to_string(),
-		};
+		let ref_file = StudentFile::direct(Path::new(ref_path).to_path_buf(), "python");
 		let ref_spec = TestSpec {
 			meta: spec.meta.clone(),
 			vars: Default::default(),

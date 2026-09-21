@@ -179,3 +179,7 @@ templates
 .remember/
 tests/geec/
 tests_submission/
+
+# P-669 test fixtures — the broad rules above (*.csv, submissions, templates, config.toml)
+# must not swallow committed test data.
+!crates/scriptmark/tests/fixtures/**

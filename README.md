@@ -67,8 +67,14 @@ results = scriptmark.grade(["submissions/"], "tests/")
 for r in results:
     print(f"{r.student_id}: {r.grade:.1f} ({r.passed}/{r.total})")
 
-# Discover student files
+# Discover student files (convenience view — drops non-submitters and orphan files)
 subs = scriptmark.discover(["submissions/"])  # {'alice': ['path/to/alice_lab5.py'], ...}
+
+# The full input model: every student keeps an outcome, nothing is dropped
+inp = scriptmark.load_input(["submissions/"], roster="roster.csv")
+for s in inp["students"]:
+    print(s["identity"]["key"], s["state"])   # not_submitted | submitted_empty | executable
+print(inp["unmatched"], inp["diagnostics"])
 
 # Load and inspect a spec
 spec = scriptmark.load_spec("tests/test_lab5.toml")

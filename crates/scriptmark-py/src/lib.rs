@@ -4,9 +4,9 @@ use std::path::Path;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use scriptmark::discovery::discover_submissions;
+use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::grading::apply_grading;
-use scriptmark::models::{StudentReport, TestSpec};
+use scriptmark::models::{AssignmentInput, StudentReport, TestSpec};
 use scriptmark::runner::orchestrator::run_all;
 use scriptmark::runner::python::PythonExecutor;
 use scriptmark::spec_loader::load_specs_from_dir;
@@ -118,23 +118,63 @@ impl PyStudentResult {
 /// Discover student submission files in the given directories.
 ///
 /// Returns a dict mapping student IDs to lists of file paths.
+///
+/// This is a lossy convenience view: a dict keyed on student id cannot represent duplicate
+/// identities, files with no identifiable owner, or roster members who did not submit. Use
+/// `load_input()` when any of those matter.
 #[pyfunction]
 fn discover(paths: Vec<String>) -> PyResult<HashMap<String, Vec<String>>> {
-	let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
-	let subs = discover_submissions(&path_refs, None)
-		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+	let input = local_input(&paths)?;
 
-	Ok(subs
-		.by_student
-		.into_iter()
-		.map(|(sid, files)| {
-			let paths = files
-				.into_iter()
+	Ok(input
+		.students
+		.iter()
+		.filter(|s| !s.files().is_empty())
+		.map(|student| {
+			let files = student
+				.files()
+				.iter()
 				.map(|f| f.path.to_string_lossy().to_string())
 				.collect();
-			(sid, paths)
+			(student.identity.key.to_string(), files)
 		})
 		.collect())
+}
+
+/// Load the full unified input model as a dict.
+///
+/// Unlike `discover()`, nothing is dropped: every student carries an outcome
+/// (`executable`, `submitted_empty`, `received_unmatched`, `not_submitted`), unattributable
+/// files appear under `unmatched`, and anomalies appear under `diagnostics`.
+#[pyfunction]
+#[pyo3(signature = (paths, *, roster=None))]
+fn load_input(py: Python<'_>, paths: Vec<String>, roster: Option<String>) -> PyResult<PyObject> {
+	let roster = match roster {
+		Some(path) => Some(
+			scriptmark::roster::load_roster(Path::new(&path))
+				.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?,
+		),
+		None => None,
+	};
+	let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
+	let input = load_local_input(
+		&path_refs,
+		LocalInputOptions {
+			roster: roster.as_ref(),
+			..Default::default()
+		},
+	)
+	.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+
+	let json_val = serde_json::to_value(&input)
+		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+	json_to_py(py, &json_val)
+}
+
+fn local_input(paths: &[String]) -> PyResult<AssignmentInput> {
+	let path_refs: Vec<&Path> = paths.iter().map(|p| Path::new(p.as_str())).collect();
+	load_local_input(&path_refs, LocalInputOptions::default())
+		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
 /// Load a test specification from a TOML file.
@@ -147,7 +187,7 @@ fn load_spec(path: String) -> PyResult<PyTestSpec> {
 	Ok(PyTestSpec { inner: spec })
 }
 
-/// Run tests for all students, returning raw results as dicts.
+/// Run tests for all students, returning a list of raw result dicts.
 #[pyfunction]
 #[pyo3(signature = (submissions, tests, *, timeout=10, python="python3"))]
 fn run(
@@ -175,7 +215,7 @@ fn grade(
 	python: &str,
 	policy: &str,
 ) -> PyResult<Vec<PyStudentResult>> {
-	let results = run_grading(&submissions, &tests, timeout, python)?;
+	let mut reports = run_grading(&submissions, &tests, timeout, python)?;
 
 	// Apply grading policy
 	let grading_policy =
@@ -184,7 +224,6 @@ fn grade(
 			lower: 60.0,
 			upper: 100.0,
 		});
-	let mut reports: Vec<StudentReport> = results.into_values().collect();
 	apply_grading(&mut reports, &grading_policy);
 
 	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
@@ -200,10 +239,8 @@ fn run_grading(
 	tests: &str,
 	timeout: u64,
 	python: &str,
-) -> PyResult<HashMap<String, StudentReport>> {
-	let path_refs: Vec<&Path> = submissions.iter().map(|p| Path::new(p.as_str())).collect();
-	let subs = discover_submissions(&path_refs, None)
-		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+) -> PyResult<Vec<StudentReport>> {
+	let input = local_input(submissions)?;
 
 	let specs = load_specs_from_dir(Path::new(tests))
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
@@ -214,8 +251,7 @@ fn run_grading(
 	let rt = tokio::runtime::Runtime::new()
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-	let results = rt.block_on(run_all(&subs, &specs, &executor, timeout, None));
-	Ok(results)
+	Ok(rt.block_on(run_all(&input.students, &specs, &executor, timeout, None)))
 }
 
 /// Convert serde_json::Value to a Python object.
@@ -255,6 +291,7 @@ fn _scriptmark(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_class::<PyTestSpec>()?;
 	m.add_class::<PyStudentResult>()?;
 	m.add_function(wrap_pyfunction!(discover, m)?)?;
+	m.add_function(wrap_pyfunction!(load_input, m)?)?;
 	m.add_function(wrap_pyfunction!(load_spec, m)?)?;
 	m.add_function(wrap_pyfunction!(run, m)?)?;
 	m.add_function(wrap_pyfunction!(grade, m)?)?;
