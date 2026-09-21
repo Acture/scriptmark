@@ -114,11 +114,6 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 			.unwrap_or("unknown");
 		let target = extract_root.join(stem);
 
-		let already_extracted = target.is_dir()
-			&& std::fs::read_dir(&target)
-				.map(|mut d| d.next().is_some())
-				.unwrap_or(false);
-
 		let file = match std::fs::File::open(&archive_path) {
 			Ok(f) => f,
 			Err(e) => {
@@ -144,7 +139,7 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 			}
 		};
 
-		if !already_extracted && let Err(e) = std::fs::create_dir_all(&target) {
+		if let Err(e) = std::fs::create_dir_all(&target) {
 			diagnostics.push(InputDiagnostic::warning(
 				DiagnosticKind::ArchiveUnreadable {
 					archive: archive_path.clone(),
@@ -245,29 +240,20 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 				entry: entry_name.clone(),
 			});
 
-			if already_extracted || out_path.exists() {
+			// Only the bytes are skipped when the file is already there — an entry that
+			// failed last run is retried, so its diagnostic recurs instead of vanishing on
+			// the second scan of a directory.
+			if out_path.exists() {
 				continue;
 			}
 
 			let mut buf = Vec::new();
-			let written = entry.read_to_end(&mut buf).is_ok()
-				&& match std::fs::write(&out_path, &buf) {
-					Ok(()) => true,
-					Err(e) => {
-						diagnostics.push(skipped(&archive_path, &entry_name, e.to_string()));
-						false
-					}
-				};
-			if !written {
-				if !diagnostics.last().is_some_and(|d| {
-					matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { entry, .. } if entry == &entry_name)
-				}) {
-					diagnostics.push(skipped(
-						&archive_path,
-						&entry_name,
-						"unreadable entry".to_string(),
-					));
-				}
+			let failure = match entry.read_to_end(&mut buf) {
+				Err(_) => Some("unreadable entry".to_string()),
+				Ok(_) => std::fs::write(&out_path, &buf).err().map(|e| e.to_string()),
+			};
+			if let Some(reason) = failure {
+				diagnostics.push(skipped(&archive_path, &entry_name, reason));
 				// Roll the claim and the provenance back together; letting them drift is
 				// what lets a rejected entry block a real one.
 				extracted.pop();
@@ -436,7 +422,10 @@ pub fn load_local_input(
 	}
 
 	let mut students: Vec<StudentSubmission> = Vec::new();
-	let mut covered: std::collections::BTreeSet<String> = Default::default();
+	// Keyed on the value, not its rendering: `Display` prefixes are not escaped, so a 学号
+	// that literally reads `canvas:5` would otherwise collide with `CanvasUser(5)`.
+	let mut covered: std::collections::BTreeSet<StudentKey> = Default::default();
+	let mut covered_canvas_ids: std::collections::BTreeSet<u64> = Default::default();
 
 	for key in &seen_keys {
 		let mut files = by_key.remove(key).unwrap_or_default();
@@ -450,12 +439,14 @@ pub fn load_local_input(
 					identity.confirm_number();
 					identity.name = roster.entries[i].name.clone();
 					identity.canvas_user_id = roster.entries[i].canvas_user_id;
-					covered.insert(identity.key.to_string());
+					covered.insert(identity.key.clone());
+					covered_canvas_ids.extend(identity.canvas_user_id);
 					RosterMatch::Matched(i)
 				}
 				RosterLookup::Ambiguous(hits) => {
 					identity.confirm_number();
-					covered.insert(identity.key.to_string());
+					covered.insert(identity.key.clone());
+					covered_canvas_ids.extend(identity.canvas_user_id);
 					diagnostics.push(InputDiagnostic::warning(
 						DiagnosticKind::AmbiguousRosterMatch {
 							key: key.clone(),
@@ -487,10 +478,18 @@ pub fn load_local_input(
 	// every row it matched, not one student per row.
 	if let Some(roster) = options.roster {
 		for entry in &roster.entries {
-			let rendered = entry.key.to_string();
-			if !covered.insert(rendered) {
+			if !covered.insert(entry.key.clone()) {
 				continue;
 			}
+			// A roster that names one person under both a 学号 and a Canvas id must not
+			// count them twice.
+			if entry
+				.canvas_user_id
+				.is_some_and(|id| covered_canvas_ids.contains(&id))
+			{
+				continue;
+			}
+			covered_canvas_ids.extend(entry.canvas_user_id);
 			let hits = roster.lookup(&entry.key).hits();
 			let mut identity = match &entry.key {
 				StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
@@ -892,6 +891,109 @@ mod tests {
 		// A teacher rerunning the same directory must still be told a file was dropped.
 		assert_eq!(skips(&scan(dir.path())), 1);
 		assert_eq!(skips(&scan(dir.path())), 1);
+	}
+
+	/// Builds a zip whose `bad.py` payload fails its CRC check, so `read_to_end` errors.
+	fn zip_with_a_corrupt_entry(path: &std::path::Path) {
+		use std::io::Write;
+		let file = std::fs::File::create(path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		let stored = zip::write::SimpleFileOptions::default()
+			.compression_method(zip::CompressionMethod::Stored);
+		zip.start_file("good.py", stored).unwrap();
+		zip.write_all(b"pass").unwrap();
+		zip.start_file("bad.py", stored).unwrap();
+		zip.write_all(b"PAYLOAD!").unwrap();
+		zip.finish().unwrap();
+
+		// Flip a payload byte after the CRC was computed.
+		let mut bytes = std::fs::read(path).unwrap();
+		let at = bytes
+			.windows(8)
+			.position(|w| w == b"PAYLOAD!")
+			.expect("payload");
+		bytes[at] ^= 0xff;
+		std::fs::write(path, bytes).unwrap();
+	}
+
+	#[test]
+	fn test_an_unreadable_entry_is_reported_on_every_run_not_just_the_first() {
+		let dir = tempfile::tempdir().unwrap();
+		zip_with_a_corrupt_entry(&dir.path().join("2024010001_lab1.zip"));
+
+		let skips = |input: &AssignmentInput| {
+			input
+				.diagnostics
+				.iter()
+				.filter(|d| matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { .. }))
+				.count()
+		};
+		// A teacher rerunning the same directory must still be told the file was dropped.
+		assert_eq!(skips(&scan(dir.path())), 1);
+		assert_eq!(skips(&scan(dir.path())), 1);
+		assert_eq!(
+			serde_json::to_string(&scan(dir.path())).unwrap(),
+			serde_json::to_string(&scan(dir.path())).unwrap()
+		);
+	}
+
+	#[test]
+	fn test_one_students_skip_does_not_swallow_anothers() {
+		let dir = tempfile::tempdir().unwrap();
+		// Students name their files after the assignment, so entry names collide across
+		// archives by construction — the diagnostic must be attributed per archive.
+		zip_with_a_corrupt_entry(&dir.path().join("2024010001_lab1.zip"));
+		zip_with_a_corrupt_entry(&dir.path().join("2024010002_lab1.zip"));
+
+		let input = scan(dir.path());
+		let archives: std::collections::BTreeSet<String> = input
+			.diagnostics
+			.iter()
+			.filter_map(|d| match &d.kind {
+				DiagnosticKind::ArchiveEntrySkipped { archive, .. } => {
+					Some(archive.file_name()?.to_string_lossy().into_owned())
+				}
+				_ => None,
+			})
+			.collect();
+		assert_eq!(
+			archives.len(),
+			2,
+			"both students must be told, got {archives:?}"
+		);
+	}
+
+	#[test]
+	fn test_a_reserved_prefix_in_a_roster_id_does_not_swallow_a_student() {
+		let dir = tempfile::tempdir().unwrap();
+		let roster_path = dir.path().join("roster.csv");
+		std::fs::write(
+			&roster_path,
+			"name,class,student_id\nAlice,A,2024010001\nOdd,B,canvas:5\n",
+		)
+		.unwrap();
+		let roster = crate::roster::load_roster(&roster_path).unwrap();
+
+		let subs = dir.path().join("subs");
+		std::fs::create_dir(&subs).unwrap();
+		let input = load_local_input(
+			&[&subs],
+			LocalInputOptions {
+				roster: Some(&roster),
+				..Default::default()
+			},
+		)
+		.unwrap();
+
+		// The reserved-prefix row is refused at the door and said so, rather than being
+		// silently merged with a Canvas-keyed student later.
+		assert_eq!(input.student_count(), 1);
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::UnusableRosterRow { .. }))
+		);
 	}
 
 	#[test]

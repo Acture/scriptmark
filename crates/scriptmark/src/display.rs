@@ -20,13 +20,18 @@ pub fn display_summary(reports: &[&StudentReport], title: &str) {
 		]);
 
 	for report in reports {
-		let status = report.status();
-		let (status_str, status_color) = match status {
-			TestStatus::Passed => ("PASSED", Color::Green),
-			TestStatus::Failed => ("FAILED", Color::Red),
-			TestStatus::Missing => ("MISSING", Color::DarkGrey),
-			TestStatus::Error => ("ERROR", Color::Red),
-			TestStatus::Timeout => ("TIMEOUT", Color::Yellow),
+		// An infrastructure failure has no test results, so `status()` would call it
+		// MISSING — indistinguishable from a student who simply never submitted.
+		let (status_str, status_color) = if report.error.is_some() {
+			("ERROR", Color::Red)
+		} else {
+			match report.status() {
+				TestStatus::Passed => ("PASSED", Color::Green),
+				TestStatus::Failed => ("FAILED", Color::Red),
+				TestStatus::Missing => ("MISSING", Color::DarkGrey),
+				TestStatus::Error => ("ERROR", Color::Red),
+				TestStatus::Timeout => ("TIMEOUT", Color::Yellow),
+			}
 		};
 
 		let grade_str = report
@@ -60,7 +65,9 @@ pub fn display_summary(reports: &[&StudentReport], title: &str) {
 pub fn display_failures(reports: &[&StudentReport]) {
 	let failed: Vec<_> = reports
 		.iter()
-		.filter(|r| r.status() == TestStatus::Failed || r.status() == TestStatus::Error)
+		.filter(|r| {
+			r.error.is_some() || r.status() == TestStatus::Failed || r.status() == TestStatus::Error
+		})
 		.collect();
 
 	if failed.is_empty() {
@@ -80,6 +87,10 @@ pub fn display_failures(reports: &[&StudentReport]) {
 			)
 			.bold()
 		);
+
+		if let Some(error) = &report.error {
+			println!("  {} {error}", "ERROR".red().bold());
+		}
 
 		for test_result in &report.test_results {
 			for case in &test_result.cases {

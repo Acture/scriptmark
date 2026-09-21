@@ -245,6 +245,81 @@ mod tests {
 	}
 
 	#[test]
+	fn test_a_result_row_never_picks_up_a_second_students_name() {
+		let db = Database::open_memory().unwrap();
+		// Both forms present in the students table: the join must resolve to exactly one.
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
+			.unwrap();
+		db.conn
+			.execute(
+				"INSERT INTO students (id, name) VALUES ('local:alice', 'Someone Else')",
+				[],
+			)
+			.unwrap();
+
+		let reports = vec![StudentReport {
+			student_id: "local:alice".to_string(),
+			final_grade: Some(88.0),
+			..Default::default()
+		}];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+
+		let results = db.get_results(session_id).unwrap();
+		assert_eq!(results.len(), 1, "one stored result must yield one row");
+		assert_eq!(results[0].student_name.as_deref(), Some("Alice Smith"));
+	}
+
+	#[test]
+	fn test_history_accepts_the_id_form_the_tables_print() {
+		let db = Database::open_memory().unwrap();
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
+			.unwrap();
+		db.save_session(
+			"hw5",
+			&[StudentReport {
+				student_id: "local:alice".to_string(),
+				final_grade: Some(70.0),
+				..Default::default()
+			}],
+			None,
+		)
+		.unwrap();
+
+		// Whichever form the teacher copies out of the summary must find the run.
+		for id in ["alice", "local:alice"] {
+			let history = db.get_student_history(id).unwrap();
+			assert_eq!(history.len(), 1, "no history for '{id}'");
+			assert_eq!(history[0].1.student_name.as_deref(), Some("Alice Smith"));
+			assert_eq!(db.get_student_name(id), "Alice Smith");
+		}
+	}
+
+	#[test]
+	fn test_an_ambiguous_roster_key_stores_no_name() {
+		let db = Database::open_memory().unwrap();
+		let roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice Chen")]);
+		db.import_roster(&roster).unwrap();
+
+		// `Roster::name_of` refuses to pick a winner; the database must not either.
+		assert_eq!(db.get_student("alice").unwrap().unwrap().name, None);
+	}
+
+	#[test]
+	fn test_an_errored_report_is_not_graded() {
+		let mut reports = vec![StudentReport {
+			student_id: "alice".to_string(),
+			submission_state: Some(SubmissionOutcome::Executable),
+			error: Some("grading task failed: panicked".to_string()),
+			..Default::default()
+		}];
+		assert!(!reports[0].is_gradeable());
+
+		crate::grading::apply_grading(&mut reports, &GradingPolicy::default());
+		// An infrastructure failure must not become a defensible-looking number.
+		assert_eq!(reports[0].final_grade, None);
+	}
+
+	#[test]
 	fn test_average_ignores_ungraded_students() {
 		let db = Database::open_memory().unwrap();
 		let reports = vec![

@@ -1,5 +1,5 @@
 use super::{Database, DbError};
-use crate::roster::Roster;
+use crate::roster::{Roster, RosterLookup};
 
 /// A student record from the database.
 #[derive(Debug, Clone)]
@@ -24,9 +24,15 @@ impl Database {
 		let mut stored = std::collections::BTreeSet::new();
 		for entry in &roster.entries {
 			let id = entry.key.to_string();
+			// Duplicate rows have no single right name; storing one would quietly pick a
+			// winner where `Roster::name_of` deliberately refuses to.
+			let name = match roster.lookup(&entry.key) {
+				RosterLookup::Unique(_) => entry.name.clone(),
+				_ => None,
+			};
 			stmt.execute(rusqlite::params![
 				id,
-				entry.name,
+				name,
 				entry.canvas_user_id.map(|id| id as i64),
 			])?;
 			stored.insert(id);
@@ -71,8 +77,10 @@ impl Database {
 	}
 
 	/// Get a student name, returning "N/A" if not found.
+	///
+	/// Accepts the `local:`-prefixed form too — `students.id` always holds the bare key.
 	pub fn get_student_name(&self, id: &str) -> String {
-		self.get_student(id)
+		self.get_student(id.strip_prefix("local:").unwrap_or(id))
 			.ok()
 			.flatten()
 			.and_then(|s| s.name)
