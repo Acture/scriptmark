@@ -107,7 +107,8 @@ REPORTS.forEach(r => {
   r._passed = (r.test_results||[]).reduce((s,t) => s + (t.cases||[]).filter(c => c.status==='passed').length, 0);
   r._failed = r._total - r._passed;
   r._rate = r._total > 0 ? (r._passed / r._total * 100) : 0;
-  r._grade = r.final_grade || 0;
+  r._graded = r.final_grade !== null && r.final_grade !== undefined;
+  r._grade = r._graded ? r.final_grade : null;
   r._status = r._total === 0 ? 'missing' : r._failed > 0 ? 'failed' : 'passed';
 });
 
@@ -115,7 +116,8 @@ const el = id => document.getElementById(id);
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const totalStudents = REPORTS.length;
 const passedStudents = REPORTS.filter(r => r._status==='passed').length;
-const avgGrade = REPORTS.reduce((s,r) => s+r._grade, 0) / Math.max(totalStudents,1);
+const gradedReports = REPORTS.filter(r => r._graded);
+const avgGrade = gradedReports.reduce((s,r) => s+r._grade, 0) / Math.max(gradedReports.length,1);
 const totalCases = REPORTS.reduce((s,r) => s+r._total, 0);
 const totalPassed = REPORTS.reduce((s,r) => s+r._passed, 0);
 
@@ -148,7 +150,7 @@ function drawChart(cid, lid, values, bs, mx, colorFn) {
     const sp=document.createElement('span'); sp.textContent=k; l.appendChild(sp);
   });
 }
-drawChart('grade-chart','grade-labels',REPORTS.map(r=>r._grade),5,100,k=>k>=90?'var(--green)':k>=70?'var(--accent)':k>=60?'var(--yellow)':'var(--red)');
+drawChart('grade-chart','grade-labels',gradedReports.map(r=>r._grade),5,100,k=>k>=90?'var(--green)':k>=70?'var(--accent)':k>=60?'var(--yellow)':'var(--red)');
 drawChart('pass-chart','pass-labels',REPORTS.map(r=>r._rate),10,100,k=>k>=80?'var(--green)':k>=50?'var(--yellow)':'var(--red)');
 
 let sortKey='grade', sortDir=-1;
@@ -156,15 +158,15 @@ function renderTable(filter) {
   let d=[...REPORTS];
   if(filter){const f=filter.toLowerCase();d=d.filter(r=>r.student_id.includes(f)||(r.student_name||'').toLowerCase().includes(f));}
   d.sort((a,b)=>{
-    const va=sortKey==='name'?(a.student_name||''):sortKey==='id'?a.student_id:sortKey==='grade'?a._grade:sortKey==='rate'?a._rate:sortKey==='passed'?a._passed:sortKey==='failed'?a._failed:sortKey==='total'?a._total:a._status;
-    const vb=sortKey==='name'?(b.student_name||''):sortKey==='id'?b.student_id:sortKey==='grade'?b._grade:sortKey==='rate'?b._rate:sortKey==='passed'?b._passed:sortKey==='failed'?b._failed:sortKey==='total'?b._total:b._status;
+    const va=sortKey==='name'?(a.student_name||''):sortKey==='id'?a.student_id:sortKey==='grade'?(a._graded?a._grade:-1):sortKey==='rate'?a._rate:sortKey==='passed'?a._passed:sortKey==='failed'?a._failed:sortKey==='total'?a._total:a._status;
+    const vb=sortKey==='name'?(b.student_name||''):sortKey==='id'?b.student_id:sortKey==='grade'?(b._graded?b._grade:-1):sortKey==='rate'?b._rate:sortKey==='passed'?b._passed:sortKey==='failed'?b._failed:sortKey==='total'?b._total:b._status;
     return typeof va==='number'?(va-vb)*sortDir:String(va).localeCompare(String(vb))*sortDir;
   });
   const tbody=el('student-table'); tbody.textContent='';
   d.forEach(r=>{
     const tr=document.createElement('tr'); tr.dataset.sid=r.student_id;
-    const gc=r._grade>=90?'var(--green)':r._grade>=70?'var(--accent)':r._grade>=60?'var(--yellow)':'var(--red)';
-    [{t:r.student_name||'N/A',c:'name-col'},{t:r.student_id},{t:r._status,badge:true},{t:r._passed},{t:r._failed},{t:r._total},{t:r._rate.toFixed(1)+'%'},{t:r._grade.toFixed(1),style:`color:${gc};font-weight:700`}].forEach(col=>{
+    const gc=!r._graded?'var(--text-dim)':r._grade>=90?'var(--green)':r._grade>=70?'var(--accent)':r._grade>=60?'var(--yellow)':'var(--red)';
+    [{t:r.student_name||'N/A',c:'name-col'},{t:r.student_id},{t:r._status,badge:true},{t:r._passed},{t:r._failed},{t:r._total},{t:r._rate.toFixed(1)+'%'},{t:r._graded?r._grade.toFixed(1):'—',style:`color:${gc};font-weight:700`}].forEach(col=>{
       const td=document.createElement('td'); if(col.c)td.className=col.c; if(col.style)td.setAttribute('style',col.style);
       if(col.badge){const sp=document.createElement('span');sp.className=`status-badge status-${col.t}`;sp.textContent=col.t;td.appendChild(sp);}
       else td.textContent=col.t;

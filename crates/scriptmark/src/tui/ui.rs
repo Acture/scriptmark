@@ -103,15 +103,18 @@ fn draw_student_list(f: &mut Frame, area: Rect, app: &App) {
 		.iter()
 		.enumerate()
 		.map(|(i, r)| {
-			let grade_color = if r.final_grade >= 90.0 {
-				Color::Green
-			} else if r.final_grade >= 70.0 {
-				Color::Blue
-			} else if r.final_grade >= 60.0 {
-				Color::Yellow
-			} else {
-				Color::Red
+			let grade_color = match r.final_grade {
+				Some(g) if g >= 90.0 => Color::Green,
+				Some(g) if g >= 70.0 => Color::Blue,
+				Some(g) if g >= 60.0 => Color::Yellow,
+				Some(_) => Color::Red,
+				// Not graded at all — a dash, never a red zero.
+				None => Color::DarkGray,
 			};
+			let grade_text = r
+				.final_grade
+				.map(|g| format!("{g:.1}"))
+				.unwrap_or_else(|| "—".to_string());
 
 			let style = if i == app.selected {
 				Style::default().bg(Color::DarkGray)
@@ -122,7 +125,7 @@ fn draw_student_list(f: &mut Frame, area: Rect, app: &App) {
 			Row::new(vec![
 				Cell::from(r.student_name.as_deref().unwrap_or("N/A")),
 				Cell::from(r.student_id.as_str()),
-				Cell::from(format!("{:.1}", r.final_grade)).style(Style::default().fg(grade_color)),
+				Cell::from(grade_text).style(Style::default().fg(grade_color)),
 				Cell::from(format!("{:.0}%", r.pass_rate)),
 				Cell::from(format!("{}/{}", r.passed_cases, r.total_cases)),
 			])
