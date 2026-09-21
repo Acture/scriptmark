@@ -3,7 +3,9 @@
 Linear: https://linear.app/acturea/issue/P-669
 Parent: P-663 · Milestone: Canvas 与本地提交可统一导入
 
-Revision 2 — rewritten after an adversarial design review (6 blockers, 11 majors).
+Revision 3 — rewritten after an adversarial design review (6 blockers, 11 majors), then
+corrected after an adversarial review of the implementation (3 blockers, 9 majors, 3
+minors). The post-review corrections are listed at the end.
 
 ## Scope
 
@@ -30,7 +32,7 @@ primary key, the CSV column and the TUI search key stay unambiguous. `student_nu
 `canvas_user_id`, `sis_user_id` and `login_id` remain separate optional provenance fields
 on `StudentIdentity`; the key never replaces them.
 
-Ordering is `(StudentKey, source_ordinal, first_path)` — total, and independent of
+Ordering is `(StudentKey, canvas_user_id, first_path)` — total, and independent of
 `read_dir` order, so duplicates sort stably.
 
 ### D2 — Key comparison is exact text after a trim, on every adapter
@@ -307,7 +309,7 @@ produces byte-identical `serde_json::to_string(&input)`.
 | `models/submission.rs` | The model above; delete `SubmissionSet` |
 | `models/config.rs` | `AssignmentInfo` += canvas ids + `attempt_policy` |
 | `models/result.rs` | `StudentReport` += `canvas_user_id`, `submission_state` (both `Option`); `derive(Default)` |
-| `roster.rs` | `Roster { entries, diagnostics }`, `RosterEntry`, `lookup() -> Unique/Ambiguous/Missing` |
+| `roster.rs` | `Roster { entries, diagnostics }`, `RosterEntry { key: StudentKey, … }`, `lookup() -> Unique/Ambiguous/Missing` |
 | `discovery.rs` | Local adapter → `AssignmentInput`; archive manifest for provenance; no silent `continue` |
 | `input/mod.rs`, `input/canvas.rs` | Canvas payload structs + pure `normalize()` |
 | `grading.rs` | Skip non-`Executable`; two `StudentReport` literals |
@@ -348,3 +350,34 @@ cargo test                       # workspace root, all members + doctests
 machine's Python is 3.14 and pyo3 0.24 tops out at 3.13 (pre-existing, unrelated), so the
 local substitute is
 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1 cargo clippy --all-targets -p scriptmark-py -- -D warnings`.
+
+## Post-review corrections
+
+An adversarial review of the first commit found three defects that made a student vanish
+or a whole run fail, and nine narrower gaps. All are fixed; the notes below record the ones
+that changed a decision rather than just the code.
+
+- **A roster number is one student, however many rows name it.** `not_submitted` takes
+  every matching row (`Matched` or `Ambiguous`) instead of one index. Before, a duplicate
+  row for a student who had not submitted produced one student *per row*, two reports
+  sharing a `student_id`, and an aborted `grade --db` after the whole class had run.
+- **`RosterEntry` is keyed by `StudentKey`, not a bare string.** A Canvas enrollee with no
+  SIS id could not be represented as a roster row at all, so a SIS-less non-submitter
+  disappeared while a diagnostic claimed they had been kept.
+- **Execution is gated on `state`, not `outcome()`.** `ReceivedUnmatched` collapses the two
+  axes for *reporting*; gating on it meant an unmatched submitter's runnable code was never
+  executed. They now run and are reported, and `apply_grading` still withholds the grade.
+- **An infrastructure failure is `StudentReport.error`, not a synthetic test case.** The
+  `JoinError` arm used to fabricate a `scriptmark/run` case, which scored like a genuine
+  0% and was pushed to Canvas as a defensible-looking 60.
+- **Archive entries are validated before they are recorded.** A rejected entry used to
+  reserve the flattened output name its owner's real file needed, and skip diagnostics
+  appeared only on a first scan — the "byte-identical across runs" invariant above did not
+  actually hold for a directory containing an archive.
+- **An archive that yields nothing still registers its owner**, so a truncated upload is
+  `SubmittedEmpty` rather than 缺交; and `load_roster` reports the rows it cannot use.
+- **Consumers resolve both id forms.** The db joins use `substr`, not `ltrim` — `ltrim`
+  strips a character *set*, so `local:alice` became `ice` — and `summarize` parses the key
+  back via `StudentKey::parse` rather than comparing text.
+- **The CSV archive emits a row per student**, so it covers the same cohort as the JSON
+  archive instead of dropping every non-submitter.

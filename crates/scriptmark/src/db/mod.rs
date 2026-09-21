@@ -222,6 +222,29 @@ mod tests {
 	}
 
 	#[test]
+	fn test_an_unconfirmed_key_still_joins_to_its_roster_row() {
+		let db = Database::open_memory().unwrap();
+		// A run made without --roster renders ids with a `local:` prefix; the roster
+		// imported afterwards holds the bare token. Both must resolve to one student —
+		// including a non-numeric one, which a character-set trim would have mangled.
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
+			.unwrap();
+		let reports = vec![StudentReport {
+			student_id: "local:alice".to_string(),
+			final_grade: Some(88.0),
+			..Default::default()
+		}];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+
+		let results = db.get_results(session_id).unwrap();
+		assert_eq!(results[0].student_name.as_deref(), Some("Alice Smith"));
+
+		let history = db.get_student_history("alice").unwrap();
+		assert_eq!(history.len(), 1);
+		assert_eq!(history[0].1.student_name.as_deref(), Some("Alice Smith"));
+	}
+
+	#[test]
 	fn test_average_ignores_ungraded_students() {
 		let db = Database::open_memory().unwrap();
 		let reports = vec![

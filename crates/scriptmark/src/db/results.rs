@@ -110,8 +110,13 @@ impl Database {
 			"SELECT r.student_id, s.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
 			 -- A run made without --roster leaves keys unconfirmed, so the id carries a
-			 -- `local:` prefix that students.id never does. Match either form.
-			 LEFT JOIN students s ON s.id IN (r.student_id, ltrim(r.student_id, 'local:'))
+			 -- `local:` prefix that students.id never does. Match either form. (substr,
+			 -- not ltrim: ltrim strips a character set, so 'local:alice' would become
+			 -- 'ice'.)
+			 LEFT JOIN students s ON s.id IN (
+			     r.student_id,
+			     CASE WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7) END
+			 )
 			 WHERE r.session_id = ?1
 			 ORDER BY r.final_grade DESC",
 		)?;
@@ -162,7 +167,10 @@ impl Database {
 					r.student_id, st.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
 			 JOIN sessions s ON r.session_id = s.id
-			 LEFT JOIN students st ON st.id IN (r.student_id, ltrim(r.student_id, 'local:'))
+			 LEFT JOIN students st ON st.id IN (
+			     r.student_id,
+			     CASE WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7) END
+			 )
 			 WHERE r.student_id IN (?1, 'local:' || ?1)
 			 ORDER BY s.created_at DESC",
 		)?;
