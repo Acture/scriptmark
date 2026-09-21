@@ -114,7 +114,7 @@ mod tests {
 		let results = db.get_results(session_id).unwrap();
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0].student_id, "alice");
-		assert!((results[0].final_grade - 95.0).abs() < 0.1);
+		assert_eq!(results[0].final_grade, Some(95.0));
 	}
 
 	#[test]
@@ -201,6 +201,24 @@ mod tests {
 
 		let err = db.save_session("hw5", &reports, None).unwrap_err();
 		assert!(matches!(err, DbError::DuplicateStudent(id) if id == "alice"));
+	}
+
+	#[test]
+	fn test_ungraded_students_read_back_as_none_not_zero() {
+		let db = Database::open_memory().unwrap();
+		let reports = vec![StudentReport {
+			student_id: "absent".to_string(),
+			submission_state: Some(SubmissionOutcome::NotSubmitted),
+			..Default::default()
+		}];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+
+		// A student who was never graded must not come back as a zero.
+		assert_eq!(db.get_results(session_id).unwrap()[0].final_grade, None);
+		assert_eq!(
+			db.get_student_history("absent").unwrap()[0].1.final_grade,
+			None
+		);
 	}
 
 	#[test]

@@ -863,18 +863,21 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 			);
 			println!("{}", "-".repeat(75));
 			for (session, result) in &history {
-				let grade_color = if result.final_grade >= 90.0 {
-					"\x1b[32m"
-				} else if result.final_grade >= 70.0 {
-					"\x1b[34m"
-				} else {
-					"\x1b[31m"
+				let grade_color = match result.final_grade {
+					Some(g) if g >= 90.0 => "\x1b[32m",
+					Some(g) if g >= 70.0 => "\x1b[34m",
+					Some(_) => "\x1b[31m",
+					None => "\x1b[2m",
 				};
+				let grade_text = result
+					.final_grade
+					.map(|g| format!("{g:.1}"))
+					.unwrap_or_else(|| "-".to_string());
 				println!(
-					"{:<15}  {}{:>7.1}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
+					"{:<15}  {}{:>7}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
 					session.assignment,
 					grade_color,
-					result.final_grade,
+					grade_text,
 					result.pass_rate,
 					result.passed_cases,
 					result.total_cases,
