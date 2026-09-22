@@ -214,7 +214,9 @@ async fn test_a_failed_download_writes_no_partial_file() {
 #[tokio::test]
 async fn test_a_bundle_round_trips_a_zip_attachment_and_a_failed_download() {
 	use scriptmark::canvas::bundle;
-	use scriptmark::models::{Assignment, AttemptPolicy, DiagnosticKind, FileOrigin, SubmissionOutcome};
+	use scriptmark::models::{
+		Assignment, AttemptPolicy, DiagnosticKind, FileOrigin, SubmissionOutcome,
+	};
 	use std::sync::Arc;
 
 	let server = MockServer::start().await;
@@ -331,4 +333,160 @@ async fn test_a_bundle_round_trips_a_zip_attachment_and_a_failed_download() {
 		"the failure must name Bob, got {:?}",
 		input.diagnostics
 	);
+}
+
+/// Canvas repeats a carried-forward attachment in every later attempt. Walking attempts
+/// would fetch the same bytes once per attempt and report a file count no teacher would
+/// recognise.
+#[tokio::test]
+async fn test_an_attachment_carried_across_attempts_is_fetched_once() {
+	use scriptmark::canvas::bundle;
+	use std::sync::Arc;
+
+	let server = MockServer::start().await;
+	mount_minimal_course(&server).await;
+
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/assignments/2/submissions"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw(
+			format!(
+				r#"[{{"id":100,"user_id":11,"attempt":2,"workflow_state":"submitted",
+				      "submission_type":"online_upload",
+				      "attachments":[{{"id":700,"display_name":"a.py","url":"{uri}/files/700"}}],
+				      "submission_history":[
+				        {{"id":100,"user_id":11,"attempt":1,"attachments":[{{"id":700,"display_name":"a.py","url":"{uri}/files/700"}}]}},
+				        {{"id":100,"user_id":11,"attempt":2,"attachments":[{{"id":700,"display_name":"a.py","url":"{uri}/files/700"}}]}}
+				      ]}}]"#,
+				uri = server.uri()
+			),
+			"application/json",
+		))
+		.mount(&server)
+		.await;
+
+	// `.expect(1)` is the assertion: three mentions, one GET.
+	Mock::given(method("GET"))
+		.and(path("/files/700"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw("print(1)", "text/x-python"))
+		.expect(1)
+		.mount(&server)
+		.await;
+
+	let dir = tempfile::tempdir().unwrap();
+	let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+	bundle::fetch(client, 1, 2, dir.path(), 1, |_| {})
+		.await
+		.unwrap();
+}
+
+/// Re-fetch must skip what it already has — but only when the size agrees.
+///
+/// The skip direction alone is not worth testing: `if path.exists() { continue }` satisfies
+/// it, and that is precisely the bug. The two cases below discriminate.
+#[tokio::test]
+async fn test_refetch_skips_a_matching_file_but_replaces_a_truncated_one() {
+	use scriptmark::canvas::bundle;
+	use std::sync::Arc;
+
+	let body = "print(42)"; // 9 bytes
+	let dir = tempfile::tempdir().unwrap();
+	let root = dir.path().join("hw");
+
+	// --- (a) size matches: zero GETs on the second fetch ---
+	{
+		let server = MockServer::start().await;
+		mount_minimal_course(&server).await;
+		mount_one_upload(&server, 800, "a.py", Some(body.len() as u64)).await;
+		Mock::given(method("GET"))
+			.and(path("/files/800"))
+			.respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/x-python"))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+		bundle::fetch(Arc::clone(&client), 1, 2, &root, 1, |_| {})
+			.await
+			.unwrap();
+		// Second pass over the same bundle: the mock still expects exactly one GET.
+		bundle::fetch(client, 1, 2, &root, 1, |_| {}).await.unwrap();
+	}
+
+	let stored = root.join("attachments/800/a.py");
+	assert_eq!(std::fs::read_to_string(&stored).unwrap(), body);
+
+	// --- (b) the file on disk is short: it must be replaced, not trusted ---
+	std::fs::write(&stored, "pri").unwrap();
+	{
+		let server = MockServer::start().await;
+		mount_minimal_course(&server).await;
+		mount_one_upload(&server, 800, "a.py", Some(body.len() as u64)).await;
+		Mock::given(method("GET"))
+			.and(path("/files/800"))
+			.respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/x-python"))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+		bundle::fetch(client, 1, 2, &root, 1, |_| {}).await.unwrap();
+	}
+	assert_eq!(
+		std::fs::read_to_string(&stored).unwrap(),
+		body,
+		"a truncated file must be re-downloaded, not mistaken for complete"
+	);
+
+	// --- (c) Canvas reports no size: never assume what is there is whole ---
+	std::fs::write(&stored, "pri").unwrap();
+	{
+		let server = MockServer::start().await;
+		mount_minimal_course(&server).await;
+		mount_one_upload(&server, 800, "a.py", None).await;
+		Mock::given(method("GET"))
+			.and(path("/files/800"))
+			.respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/x-python"))
+			.expect(1)
+			.mount(&server)
+			.await;
+
+		let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+		bundle::fetch(client, 1, 2, &root, 1, |_| {}).await.unwrap();
+	}
+	assert_eq!(std::fs::read_to_string(&stored).unwrap(), body);
+}
+
+async fn mount_minimal_course(server: &MockServer) {
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/users"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw(
+			r#"[{"id":11,"name":"Alice","sis_user_id":"2024010001"}]"#,
+			"application/json",
+		))
+		.mount(server)
+		.await;
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/assignments/2"))
+		.respond_with(
+			ResponseTemplate::new(200).set_body_raw(r#"{"id":2,"name":"Lab"}"#, "application/json"),
+		)
+		.mount(server)
+		.await;
+}
+
+async fn mount_one_upload(server: &MockServer, id: u64, name: &str, size: Option<u64>) {
+	let size_field = size.map(|s| format!(r#","size":{s}"#)).unwrap_or_default();
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/assignments/2/submissions"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw(
+			format!(
+				r#"[{{"id":100,"user_id":11,"attempt":1,"workflow_state":"submitted",
+				      "submission_type":"online_upload",
+				      "attachments":[{{"id":{id},"display_name":"{name}","url":"{uri}/files/{id}"{size_field}}}]}}]"#,
+				uri = server.uri()
+			),
+			"application/json",
+		))
+		.mount(server)
+		.await;
 }
