@@ -10,9 +10,21 @@ use crate::models::{DiagnosticKind, InputDiagnostic, SourceLocation, StudentKey,
 /// id is still a roster member — keyed by its Canvas id — rather than being dropped for
 /// want of a student number. Student numbers are text: leading zeros survive, and nothing
 /// is ever parsed as an integer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RosterSource {
+	/// A row the teacher supplied, from a CSV or an explicit config.
+	#[default]
+	Supplied,
+	/// A course enrollment Canvas reported.
+	CanvasEnrollment,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RosterEntry {
 	pub key: StudentKey,
+	#[serde(default)]
+	pub source: RosterSource,
 	#[serde(default)]
 	pub name: Option<String>,
 	#[serde(default)]
@@ -25,6 +37,7 @@ impl RosterEntry {
 	pub fn new(student_number: impl Into<String>, name: Option<String>) -> Self {
 		Self {
 			key: StudentKey::Number(normalize_key(&student_number.into())),
+			source: RosterSource::Supplied,
 			name,
 			canvas_user_id: None,
 			location: None,
@@ -246,6 +259,7 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 
 		entries.push(RosterEntry {
 			key: StudentKey::Number(student_number),
+			source: RosterSource::Supplied,
 			name: (!name.is_empty()).then_some(name),
 			canvas_user_id: None,
 			location: Some(location),

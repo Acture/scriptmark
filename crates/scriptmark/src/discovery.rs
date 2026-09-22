@@ -490,13 +490,18 @@ pub fn load_local_input(
 				continue;
 			}
 			covered_canvas_ids.extend(entry.canvas_user_id);
-			let hits = roster.lookup(&entry.key).hits();
+			let lookup = roster.lookup(&entry.key);
+			let unambiguous = matches!(lookup, RosterLookup::Unique(_));
+			let hits = lookup.hits();
 			let mut identity = match &entry.key {
 				StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
 				key => StudentIdentity::number(key.raw()),
 			};
 			identity.name = entry.name.clone();
-			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+			// Several rows share this key, so none of their Canvas ids is *the* answer.
+			if unambiguous {
+				identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+			}
 			students.push(StudentSubmission::not_submitted(identity, hits));
 		}
 	}

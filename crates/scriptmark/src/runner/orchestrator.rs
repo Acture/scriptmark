@@ -262,7 +262,7 @@ async fn run_student(
 		};
 
 		test_results.push(TestResult {
-			spec_name: spec.meta.name.clone(),
+			item_id: spec.meta.name.clone(),
 			cases,
 		});
 	}

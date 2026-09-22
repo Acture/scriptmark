@@ -68,7 +68,6 @@ fn canvas_input() -> AssignmentInput {
 		(1003, root.join("files/1003/lab1.py")),
 		(1004, root.join("files/1004/lab1.py")),
 		(1005, root.join("files/1005/lab1.py")),
-		(1006, root.join("files/1006/lab1.py")),
 	]);
 	for path in downloads.values() {
 		assert!(
@@ -96,8 +95,6 @@ fn expected() -> Vec<ProjectedStudent> {
 		("2024010004", NotSubmitted, &[]),
 		// Something arrived, nothing runnable in it.
 		("2024010005", SubmittedEmpty, &[]),
-		// Handed work in, but is not on the roster of record.
-		("9999999999", ReceivedUnmatched, &["lab1.py"]),
 	];
 	let mut expected: Vec<ProjectedStudent> = rows
 		.iter()
@@ -136,7 +133,7 @@ fn test_local_material_matches_the_expected_table() {
 	let dir = tempfile::tempdir().unwrap();
 	let input = local_input(&dir);
 
-	assert_eq!(input.student_count(), 7);
+	assert_eq!(input.student_count(), 6);
 	assert_eq!(canonical(input.projection()), expected());
 }
 
@@ -144,7 +141,7 @@ fn test_local_material_matches_the_expected_table() {
 fn test_canvas_material_matches_the_expected_table() {
 	let input = canvas_input();
 
-	assert_eq!(input.student_count(), 7);
+	assert_eq!(input.student_count(), 6);
 	assert_eq!(canonical(input.projection()), expected());
 }
 
@@ -155,8 +152,8 @@ fn test_both_entry_points_produce_equivalent_input() {
 	let canvas = canvas_input();
 
 	// Neither side may be trivially empty — that is how this assertion goes vacuous.
-	assert_eq!(local.student_count(), 7);
-	assert_eq!(canvas.student_count(), 7);
+	assert_eq!(local.student_count(), 6);
+	assert_eq!(canvas.student_count(), 6);
 	assert_eq!(
 		canonical(local.projection()),
 		canonical(canvas.projection())
@@ -167,7 +164,7 @@ fn test_both_entry_points_produce_equivalent_input() {
 fn test_every_roster_member_is_present_on_both_sides() {
 	let dir = tempfile::tempdir().unwrap();
 	let roster = roster();
-	// Six distinct numbers across seven rows: 2024010001 appears twice.
+	// Seven rows, six distinct numbers: 2024010001 appears twice.
 	assert_eq!(roster.len(), 7);
 
 	for input in [local_input(&dir), canvas_input()] {
@@ -182,7 +179,7 @@ fn test_every_roster_member_is_present_on_both_sides() {
 }
 
 #[test]
-fn test_duplicate_roster_rows_are_reported_and_never_collapsed() {
+fn test_duplicate_roster_rows_are_reported_on_both_sides() {
 	let dir = tempfile::tempdir().unwrap();
 	for input in [local_input(&dir), canvas_input()] {
 		assert!(
@@ -193,14 +190,40 @@ fn test_duplicate_roster_rows_are_reported_and_never_collapsed() {
 			)),
 			"duplicate roster rows must be reported"
 		);
-		let alice = input
+		// Either way it is one student, never one per row.
+		assert_eq!(
+			input
+				.students
+				.iter()
+				.filter(|s| s.identity.key.raw() == "2024010001")
+				.count(),
+			1
+		);
+	}
+}
+
+#[test]
+fn test_the_duplicate_is_ambiguous_locally_and_resolved_by_canvas() {
+	let dir = tempfile::tempdir().unwrap();
+	let alice = |input: &AssignmentInput| {
+		input
 			.students
 			.iter()
 			.find(|s| s.identity.key.raw() == "2024010001")
-			.unwrap();
-		// Both candidate rows are kept — nothing picks one silently.
-		assert_eq!(alice.roster_match, RosterMatch::Ambiguous(vec![0, 1]));
-	}
+			.unwrap()
+			.roster_match
+			.clone()
+	};
+
+	// Locally the CSV is all there is, so both candidate rows are kept and nothing picks
+	// one silently.
+	assert_eq!(
+		alice(&local_input(&dir)),
+		RosterMatch::Ambiguous(vec![0, 1])
+	);
+	// Canvas is authoritative about enrollment and lists this student once, so the CSV's
+	// duplicated row is a data-entry error there — reported, but not the roster of record.
+	assert_eq!(alice(&canvas_input()), RosterMatch::Matched(1));
 }
 
 #[test]
@@ -241,6 +264,35 @@ fn test_resubmission_selects_the_later_attempt_on_the_canvas_side() {
 			.unwrap()
 			.late
 	);
+}
+
+/// Each source reaches "received but unmatchable" by a different route, so it is asserted
+/// per source rather than across them: locally a filename token no roster confirms, and on
+/// Canvas a submission from somebody the course does not list.
+#[test]
+fn test_canvas_material_from_someone_not_enrolled_is_unmatched() {
+	let root = fixture_root().join("canvas");
+	let raw = std::fs::read_to_string(root.join("assignment.json")).unwrap();
+	let mut payload: CanvasPayload = serde_json::from_str(&raw).unwrap();
+
+	// Submitted, then dropped the course — Canvas no longer lists them.
+	payload.submissions.push(
+		serde_json::from_str(
+			r#"{"id": 9107, "user_id": 107, "attempt": 1, "workflow_state": "submitted",
+			    "submitted_at": "2026-03-01T13:00:00Z", "submission_type": "online_upload",
+			    "attachments": [{"id": 1006, "filename": "lab1.py", "display_name": "lab1.py"}]}"#,
+		)
+		.unwrap(),
+	);
+	let downloads: DownloadedAttachments = HashMap::from([(1006, root.join("files/1001/lab1.py"))]);
+
+	let input = normalize(&payload, Some(&roster()), &downloads, AttemptPolicy::Latest);
+	let stranger = input
+		.students
+		.iter()
+		.find(|s| s.identity.canvas_user_id == Some(107))
+		.expect("their work must not be discarded");
+	assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
 }
 
 #[test]

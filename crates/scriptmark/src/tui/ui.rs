@@ -169,7 +169,7 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 	{
 		for tr in &report.test_results {
 			lines.push(Line::from(Span::styled(
-				format!("--- {} ---", tr.spec_name),
+				format!("--- {} ---", tr.item_id),
 				Style::default().fg(Color::Cyan),
 			)));
 			for case in &tr.cases {

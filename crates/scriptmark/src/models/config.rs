@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::models::GradingItem;
+
 /// Grading policy — how to convert pass rate to final grade.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -84,6 +86,10 @@ pub struct AssignmentConfig {
 	/// Expected student files.
 	#[serde(default)]
 	pub files: Vec<FilePattern>,
+	/// The items this assignment is marked on. Each `id` is a test spec's `[meta] name`.
+	/// Left empty, the items are derived from the specs that were loaded.
+	#[serde(default)]
+	pub items: Vec<GradingItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

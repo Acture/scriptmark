@@ -108,7 +108,7 @@ pub fn display_failures(reports: &[&StudentReport]) {
 				println!(
 					"  {} [{}] {}",
 					status_str,
-					test_result.spec_name.dimmed(),
+					test_result.item_id.dimmed(),
 					case.case_name
 				);
 

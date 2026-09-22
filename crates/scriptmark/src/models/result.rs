@@ -36,10 +36,13 @@ pub struct CaseResult {
 	pub elapsed_ms: Option<u64>,
 }
 
-/// Aggregated result for one test spec (one TOML file) for one student.
+/// Aggregated result for one grading item for one student.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
-	pub spec_name: String,
+	/// The [`crate::models::GradingItem`] this evidence belongs to — the test spec's
+	/// `[meta] name`. Read from `spec_name` in results written before items were modelled.
+	#[serde(alias = "spec_name")]
+	pub item_id: String,
 	pub cases: Vec<CaseResult>,
 }
 

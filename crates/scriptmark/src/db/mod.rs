@@ -89,7 +89,7 @@ mod tests {
 			student_id: "alice".to_string(),
 			student_name: Some("Alice".to_string()),
 			test_results: vec![TestResult {
-				spec_name: "test".to_string(),
+				item_id: "test".to_string(),
 				cases: vec![CaseResult {
 					case_name: "case1".to_string(),
 					status: TestStatus::Passed,
