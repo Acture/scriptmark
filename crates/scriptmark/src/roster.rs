@@ -238,6 +238,14 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 		.flexible(true)
 		.from_reader(content.as_bytes());
 
+	// The width the file declares. A row that does not match it has shifted — usually an
+	// unescaped separator in a name — and its columns no longer mean what their position
+	// says, so it must not be read positionally.
+	let header_len = match reader.headers() {
+		Ok(header) => header.len(),
+		Err(e) => return Err(RosterError::CsvError(path.to_path_buf(), e)),
+	};
+
 	let mut entries = Vec::new();
 	let mut diagnostics = Vec::new();
 
@@ -277,11 +285,42 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 			);
 			continue;
 		}
+
+		// Column 3 is the Canvas user id, which `roster-pull` now writes so that grade push
+		// never has to guess it. Read for every row, independently of the key decision
+		// below: a student with both a 学号 and a Canvas id needs both kept.
+		let canvas_user_id = record
+			.get(3)
+			.map(normalize_key)
+			.filter(|value| !value.is_empty())
+			.and_then(|value| value.parse::<u64>().ok());
+
 		if student_number.is_empty() {
+			// A Canvas enrollee with no SIS id is still a member. They are keyed by their
+			// Canvas id — but only from a row whose width matches the header, because a
+			// shifted row puts somebody's 学号 in this column, and keying on it would
+			// invent a Canvas user that does not exist.
+			if let Some(id) = canvas_user_id.filter(|_| record.len() == header_len) {
+				entries.push(RosterEntry {
+					key: StudentKey::CanvasUser(id),
+					source: RosterSource::Supplied,
+					name: (!name.is_empty()).then_some(name),
+					canvas_user_id: Some(id),
+					location: Some(location),
+				});
+				continue;
+			}
+
 			diagnostics.push(
 				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
 					reason: if name.is_empty() {
 						"blank row".to_string()
+					} else if record.len() != header_len {
+						format!(
+							"'{name}' has no student id, and the row has {} column(s) where the \
+							 header declares {header_len} — it has probably shifted",
+							record.len()
+						)
 					} else {
 						format!("'{name}' has no student id")
 					},
@@ -295,7 +334,7 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 			key: StudentKey::Number(student_number),
 			source: RosterSource::Supplied,
 			name: (!name.is_empty()).then_some(name),
-			canvas_user_id: None,
+			canvas_user_id,
 			location: Some(location),
 		});
 	}

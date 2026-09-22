@@ -41,6 +41,36 @@ pub struct CanvasUserPayload {
 	pub email: Option<String>,
 }
 
+/// A course, as `GET /courses` returns it. Used only by `canvas courses`, which exists so a
+/// teacher can find an id without leaving the terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanvasCoursePayload {
+	pub id: u64,
+	#[serde(default)]
+	pub name: Option<String>,
+	#[serde(default)]
+	pub course_code: Option<String>,
+	#[serde(default)]
+	pub term: Option<CanvasTermPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanvasTermPayload {
+	#[serde(default)]
+	pub name: Option<String>,
+}
+
+/// An assignment, as `GET /courses/:c/assignments/:a` returns it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanvasAssignmentPayload {
+	pub id: u64,
+	#[serde(default)]
+	pub name: Option<String>,
+	/// Shown in `canvas assignments` so a teacher can tell two similarly named ones apart.
+	#[serde(default)]
+	pub due_at: Option<String>,
+}
+
 /// An uploaded file, as Canvas reports it on a submission.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CanvasAttachmentPayload {
@@ -63,7 +93,9 @@ pub struct CanvasAttachmentPayload {
 }
 
 impl CanvasAttachmentPayload {
-	fn name(&self) -> String {
+	/// The name Canvas reports. `pub(crate)` because the bundle writer and the offline
+	/// loader both have to derive the same on-disk path from it — see `bundle::disk_name`.
+	pub(crate) fn name(&self) -> String {
 		self.display_name
 			.clone()
 			.or_else(|| self.filename.clone())
