@@ -38,6 +38,54 @@ pub(crate) fn detect_language(ext: &str) -> Option<&'static str> {
 	}
 }
 
+/// The archive format a file appears to be, when it is one we do not expand.
+///
+/// A `.rar` submission is not the same problem as a Word document: the student did hand in
+/// their code, it is just wrapped in something nothing here opens. Saying so lets a teacher
+/// tell the class to use `.zip` instead of hunting for a file that is right there.
+///
+/// `.zip` is deliberately absent — it *is* expanded, so it never reaches this.
+pub(crate) fn unexpandable_archive(path: &Path) -> Option<&'static str> {
+	let name = path.file_name()?.to_str()?.to_lowercase();
+	for (suffix, format) in [
+		(".tar.gz", "tar.gz"),
+		(".tar.bz2", "tar.bz2"),
+		(".tar.xz", "tar.xz"),
+		(".tgz", "tar.gz"),
+		(".rar", "RAR"),
+		(".7z", "7-Zip"),
+		(".tar", "tar"),
+		(".gz", "gzip"),
+		(".bz2", "bzip2"),
+		(".xz", "xz"),
+	] {
+		if name.ends_with(suffix) {
+			return Some(format);
+		}
+	}
+	None
+}
+
+/// Why a file belonging to a known student cannot be graded.
+///
+/// An archive nothing here opens is reported as such, at `Warning`, because the student's
+/// code *is* there and the teacher can act on it — tell the class to use `.zip`. A stray
+/// PDF is an `Info`-level note about something that was never going to be graded.
+pub(crate) fn archive_or_ignored(key: &str, path: &Path) -> InputDiagnostic {
+	match unexpandable_archive(path) {
+		Some(format) => InputDiagnostic::warning(DiagnosticKind::UnsupportedArchive {
+			key: key.to_string(),
+			path: path.to_path_buf(),
+			format: format.to_string(),
+		}),
+		None => InputDiagnostic::info(DiagnosticKind::IgnoredFile {
+			key: key.to_string(),
+			path: path.to_path_buf(),
+		}),
+	}
+	.at(SourceLocation::file(path.to_path_buf()))
+}
+
 /// Extract a student key from a filename.
 ///
 /// Convention: `{key}_{rest}.ext` (e.g. `alice_Lab5_1.py` → `alice`). This split is a
@@ -97,6 +145,7 @@ pub(crate) fn expand_archive(
 	diagnostics: &mut Vec<InputDiagnostic>,
 ) -> Vec<ExtractedFile> {
 	let mut extracted = Vec::new();
+	let before = diagnostics.len();
 
 	let unreadable = |reason: String| {
 		InputDiagnostic::warning(DiagnosticKind::ArchiveUnreadable {
@@ -244,6 +293,15 @@ pub(crate) fn expand_archive(
 			total_bytes -= entry.size();
 			file_count -= 1;
 		}
+	}
+
+	// An archive that opened but produced nothing leaves its owner SubmittedEmpty, which
+	// on its own is indistinguishable from never having submitted. Say why — unless
+	// something above already explained it, in which case this would only add noise.
+	if extracted.is_empty() && diagnostics.len() == before {
+		diagnostics.push(InputDiagnostic::warning(DiagnosticKind::ArchiveEmpty {
+			archive: archive.to_path_buf(),
+		}));
 	}
 
 	extracted
@@ -450,13 +508,7 @@ pub fn load_local_input(
 				}
 				(Some(key), None) => {
 					// Owner known, type unusable: the student submitted, just not code.
-					diagnostics.push(
-						InputDiagnostic::info(DiagnosticKind::IgnoredFile {
-							key: key.clone(),
-							path: path.clone(),
-						})
-						.at(SourceLocation::file(path.clone())),
-					);
+					diagnostics.push(archive_or_ignored(&key, &path));
 					seen_keys.insert(key);
 				}
 				(None, language) => unmatched.push(UnmatchedArtifact {
@@ -580,7 +632,7 @@ pub enum DiscoveryError {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::models::{StudentKey, SubmissionOutcome};
+	use crate::models::{DiagnosticSeverity, StudentKey, SubmissionOutcome};
 
 	fn scan(dir: &Path) -> AssignmentInput {
 		load_local_input(&[dir], LocalInputOptions::default()).unwrap()
@@ -736,6 +788,72 @@ mod tests {
 			.expect("dave");
 		let names: Vec<String> = dave.files().iter().map(|f| f.file_name()).collect();
 		assert_eq!(names, vec!["good.py".to_string()]);
+	}
+
+	/// A `.rar` is not the same problem as a stray PDF: the student's code is there, just
+	/// wrapped in something nothing here opens. Saying so is what lets a teacher tell the
+	/// class to use `.zip` instead of hunting for a file that was submitted all along.
+	#[test]
+	fn test_an_archive_we_cannot_open_says_so_instead_of_ignoring_it() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("dave_hw.rar"), b"Rar!\x1a\x07\x00").unwrap();
+		std::fs::write(dir.path().join("erin_hw.pdf"), b"%PDF-1.4").unwrap();
+
+		let input = scan(dir.path());
+
+		let unsupported: Vec<_> = input
+			.diagnostics
+			.iter()
+			.filter(|d| matches!(&d.kind, DiagnosticKind::UnsupportedArchive { .. }))
+			.collect();
+		assert_eq!(unsupported.len(), 1, "got {:?}", input.diagnostics);
+		assert!(matches!(
+			&unsupported[0].kind,
+			DiagnosticKind::UnsupportedArchive { key, format, .. }
+				if key == "dave" && format == "RAR"
+		));
+		// It is actionable, so it outranks the note a stray file gets.
+		assert_eq!(unsupported[0].severity, DiagnosticSeverity::Warning);
+
+		// The PDF stays an Info-level note: it was never going to be graded.
+		assert!(input.diagnostics.iter().any(|d| matches!(
+			&d.kind,
+			DiagnosticKind::IgnoredFile { key, .. } if key == "erin"
+		)));
+	}
+
+	/// A `.tar.gz` must not be read as an archive called `.gz`, and a nested zip is not
+	/// expanded recursively — both are reported for what they are.
+	#[test]
+	fn test_compound_and_nested_archive_extensions_are_named_correctly() {
+		assert_eq!(unexpandable_archive(Path::new("hw.tar.gz")), Some("tar.gz"));
+		assert_eq!(unexpandable_archive(Path::new("hw.tgz")), Some("tar.gz"));
+		assert_eq!(unexpandable_archive(Path::new("hw.7z")), Some("7-Zip"));
+		assert_eq!(unexpandable_archive(Path::new("HW.RAR")), Some("RAR"));
+		// `.zip` is expanded, so it never reaches this.
+		assert_eq!(unexpandable_archive(Path::new("hw.zip")), None);
+		assert_eq!(unexpandable_archive(Path::new("lab5.py")), None);
+	}
+
+	/// An archive that opens but yields nothing leaves its owner `SubmittedEmpty`, which on
+	/// its own reads exactly like never having submitted.
+	#[test]
+	fn test_an_empty_archive_explains_itself() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("frank_hw.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		zip::ZipWriter::new(file).finish().unwrap();
+
+		let input = scan(dir.path());
+
+		assert!(
+			input.diagnostics.iter().any(|d| matches!(
+				&d.kind,
+				DiagnosticKind::ArchiveEmpty { archive } if archive == &zip_path
+			)),
+			"an empty archive must not be silent, got {:?}",
+			input.diagnostics
+		);
 	}
 
 	#[test]
