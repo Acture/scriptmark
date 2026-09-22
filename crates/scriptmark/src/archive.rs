@@ -44,7 +44,10 @@ pub(crate) enum ArchiveFormat {
 	Zip,
 	Tar,
 	TarGz,
+	TarBz2,
+	TarXz,
 	SevenZ,
+	Rar,
 }
 
 /// What `path` appears to be, by name.
@@ -56,9 +59,14 @@ pub(crate) fn format_of(path: &Path) -> Option<ArchiveFormat> {
 	for (suffix, format) in [
 		(".tar.gz", ArchiveFormat::TarGz),
 		(".tgz", ArchiveFormat::TarGz),
+		(".tar.bz2", ArchiveFormat::TarBz2),
+		(".tbz2", ArchiveFormat::TarBz2),
+		(".tar.xz", ArchiveFormat::TarXz),
+		(".txz", ArchiveFormat::TarXz),
 		(".tar", ArchiveFormat::Tar),
 		(".zip", ArchiveFormat::Zip),
 		(".7z", ArchiveFormat::SevenZ),
+		(".rar", ArchiveFormat::Rar),
 	] {
 		if name.ends_with(suffix) {
 			return Some(format);
@@ -79,14 +87,7 @@ pub(crate) fn unopenable_format(path: &Path) -> Option<&'static str> {
 		return None;
 	}
 	let name = path.file_name()?.to_str()?.to_lowercase();
-	for (suffix, label) in [
-		(".tar.bz2", "tar.bz2"),
-		(".tar.xz", "tar.xz"),
-		(".rar", "RAR"),
-		(".bz2", "bzip2"),
-		(".xz", "xz"),
-		(".gz", "gzip"),
-	] {
+	for (suffix, label) in [(".bz2", "bzip2"), (".xz", "xz"), (".gz", "gzip")] {
 		if name.ends_with(suffix) {
 			return Some(label);
 		}
@@ -155,6 +156,15 @@ fn safe_entry(name: &str) -> Option<PathBuf> {
 		return None;
 	}
 	Some(path.to_path_buf())
+}
+
+/// How a tar's bytes are wrapped.
+#[derive(Debug, Clone, Copy)]
+enum Compression {
+	None,
+	Gzip,
+	Bzip2,
+	Xz,
 }
 
 /// Applies the guards, and is the only thing that decides an entry lands on disk.
@@ -333,9 +343,12 @@ pub(crate) fn expand(
 	let mut sink = Sink::new(archive, target, diagnostics);
 	let outcome = match format {
 		ArchiveFormat::Zip => expand_zip(archive, &mut sink, wanted),
-		ArchiveFormat::Tar => expand_tar(archive, &mut sink, wanted, false),
-		ArchiveFormat::TarGz => expand_tar(archive, &mut sink, wanted, true),
+		ArchiveFormat::Tar => expand_tar(archive, &mut sink, wanted, Compression::None),
+		ArchiveFormat::TarGz => expand_tar(archive, &mut sink, wanted, Compression::Gzip),
+		ArchiveFormat::TarBz2 => expand_tar(archive, &mut sink, wanted, Compression::Bzip2),
+		ArchiveFormat::TarXz => expand_tar(archive, &mut sink, wanted, Compression::Xz),
 		ArchiveFormat::SevenZ => expand_7z(archive, &mut sink, wanted),
+		ArchiveFormat::Rar => expand_rar(archive, &mut sink, wanted),
 	};
 
 	let extracted = std::mem::take(&mut sink.extracted);
@@ -395,13 +408,23 @@ fn expand_tar(
 	archive: &Path,
 	sink: &mut Sink<'_>,
 	wanted: &dyn Fn(&str) -> bool,
-	gzipped: bool,
+	compression: Compression,
 ) -> Result<(), String> {
 	let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-	let reader: Box<dyn Read> = if gzipped {
-		Box::new(flate2::read::GzDecoder::new(file))
-	} else {
-		Box::new(file)
+	let reader: Box<dyn Read> = match compression {
+		Compression::None => Box::new(file),
+		Compression::Gzip => Box::new(flate2::read::GzDecoder::new(file)),
+		Compression::Bzip2 => Box::new(bzip2_rs::DecoderReader::new(file)),
+		// `lzma-rs` decodes into a buffer rather than offering a `Read`, so an `.xz` is
+		// resident in memory for the length of the walk. Bounded by the same archive size
+		// cap as every other format, and xz is rare enough in student work not to justify
+		// a streaming decoder of our own.
+		Compression::Xz => {
+			let mut input = std::io::BufReader::new(file);
+			let mut decoded = Vec::new();
+			lzma_rs::xz_decompress(&mut input, &mut decoded).map_err(|e| e.to_string())?;
+			Box::new(std::io::Cursor::new(decoded))
+		}
 	};
 	let mut tar = tar::Archive::new(reader);
 	let entries = tar.entries().map_err(|e| e.to_string())?;
@@ -427,6 +450,75 @@ fn expand_tar(
 		let size = entry.header().size().unwrap_or(0);
 		match sink.offer(&name, size, wanted) {
 			Verdict::Take(out) => sink.write(&name, &out, size, &mut entry),
+			Verdict::Skip => continue,
+			Verdict::Stop => break,
+		}
+	}
+	Ok(())
+}
+
+/// The largest archive we will hold in memory to read.
+///
+/// `rars` parses from a byte slice rather than a reader, so a RAR is read whole. The cap is
+/// the per-archive extraction budget plus headroom for the container itself: an archive
+/// bigger than everything we would ever extract from it is not worth the RAM.
+const MAX_ARCHIVE_IN_MEMORY: u64 = MAX_TOTAL_SIZE * 2;
+
+/// RAR carries an index, so an unwanted entry is never decompressed.
+///
+/// This uses `rars`, a clean-room pure-Rust implementation under MIT/Apache-2.0 — not the
+/// `unrar` binding. That distinction is not incidental: RARLAB's UnRAR source carries a
+/// field-of-use restriction ("cannot be used to develop RAR (WinRAR) compatible archiver"),
+/// which GPL-3.0 section 10 does not permit us to pass on to anyone we distribute to. An
+/// independent implementation is bound by none of that.
+fn expand_rar(
+	archive: &Path,
+	sink: &mut Sink<'_>,
+	wanted: &dyn Fn(&str) -> bool,
+) -> Result<(), String> {
+	let size = std::fs::metadata(archive).map_err(|e| e.to_string())?.len();
+	if size > MAX_ARCHIVE_IN_MEMORY {
+		return Err(format!(
+			"{size} bytes exceeds the {MAX_ARCHIVE_IN_MEMORY} byte limit for reading an \
+			 archive into memory"
+		));
+	}
+	let bytes = std::fs::read(archive).map_err(|e| e.to_string())?;
+	let parsed = rars::ArchiveReader::read(&bytes).map_err(|e| e.to_string())?;
+
+	// Collected first: `read_member` borrows the archive, so the names cannot be held
+	// across the calls that use them.
+	let members: Vec<(Vec<u8>, u64, bool)> = parsed
+		.members()
+		.map(|m| {
+			(
+				m.meta.name.clone(),
+				m.meta.unpacked_size,
+				m.meta.is_directory || m.meta.is_encrypted,
+			)
+		})
+		.collect();
+
+	for (raw_name, size, skip) in members {
+		let name = String::from_utf8_lossy(&raw_name).replace('\\', "/");
+		if skip {
+			// An encrypted member cannot be read without a password we do not have. Saying
+			// so beats a student looking like they submitted an empty archive.
+			if !name.is_empty() && wanted(&name) {
+				sink.diagnostics.push(skipped(
+					archive,
+					&name,
+					"entry is encrypted or is a directory".to_string(),
+				));
+			}
+			continue;
+		}
+		match sink.offer(&name, size, wanted) {
+			Verdict::Take(out) => match parsed.read_member(&raw_name, None) {
+				Ok(Some(data)) => sink.write(&name, &out, size, &mut data.as_slice()),
+				Ok(None) => sink.rollback(&name, &out, size, "entry vanished".to_string()),
+				Err(e) => sink.rollback(&name, &out, size, e.to_string()),
+			},
 			Verdict::Skip => continue,
 			Verdict::Stop => break,
 		}
@@ -555,7 +647,16 @@ mod tests {
 	/// already been graded.
 	#[test]
 	fn test_an_archive_we_can_open_is_never_also_called_unopenable() {
-		for name in ["h.tar.gz", "h.tgz", "h.tar", "h.zip", "h.7z"] {
+		for name in [
+			"h.tar.gz",
+			"h.tgz",
+			"h.tar",
+			"h.zip",
+			"h.7z",
+			"h.rar",
+			"h.tar.bz2",
+			"h.tar.xz",
+		] {
 			let path = Path::new(name);
 			assert!(format_of(path).is_some(), "{name} should be openable");
 			assert_eq!(
@@ -573,11 +674,18 @@ mod tests {
 		assert_eq!(format_of(Path::new("h.tar")), Some(ArchiveFormat::Tar));
 		assert_eq!(format_of(Path::new("H.ZIP")), Some(ArchiveFormat::Zip));
 		assert_eq!(format_of(Path::new("h.7z")), Some(ArchiveFormat::SevenZ));
+		assert_eq!(format_of(Path::new("h.rar")), Some(ArchiveFormat::Rar));
+		assert_eq!(
+			format_of(Path::new("h.tar.bz2")),
+			Some(ArchiveFormat::TarBz2)
+		);
+		assert_eq!(format_of(Path::new("h.tar.xz")), Some(ArchiveFormat::TarXz));
 		assert_eq!(format_of(Path::new("lab5.py")), None);
 
 		// Recognised, but not openable — a different message from "not an archive".
-		assert_eq!(unopenable_format(Path::new("h.rar")), Some("RAR"));
-		assert_eq!(unopenable_format(Path::new("h.tar.bz2")), Some("tar.bz2"));
+		// RAR, tar.bz2 and tar.xz are opened now, so they are not "unopenable".
+		assert_eq!(unopenable_format(Path::new("h.rar")), None);
+		assert_eq!(unopenable_format(Path::new("h.tar.bz2")), None);
 		assert_eq!(unopenable_format(Path::new("h.zip")), None);
 		// Ends in `.gz`, but we open it — so it is not "unopenable".
 		assert_eq!(unopenable_format(Path::new("h.tar.gz")), None);
@@ -626,6 +734,33 @@ mod tests {
 			diagnostics
 				.iter()
 				.any(|d| matches!(&d.kind, DiagnosticKind::ArchiveNameCollision { .. }))
+		);
+	}
+
+	/// RAR is handled by `rars`, a clean-room pure-Rust implementation, not by the `unrar`
+	/// binding to RARLAB's source — which carries a field-of-use restriction GPL-3.0
+	/// section 10 forbids us from passing on. The fixture is a real WinRAR archive at the
+	/// default compression level, so this fails if the codec ever regresses to stored-only.
+	#[test]
+	fn test_a_real_compressed_rar_expands() {
+		let fixture =
+			Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/archives/m3_default.rar");
+		if !fixture.is_file() {
+			panic!("missing fixture: {}", fixture.display());
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("out");
+		let mut diagnostics = Vec::new();
+
+		// The fixture's single member is a .txt, so grade-only filtering would reject it;
+		// this asserts the codec, not the filter.
+		let files = expand(&fixture, &target, &|_| true, &mut diagnostics);
+
+		assert_eq!(files.len(), 1, "got {diagnostics:?}");
+		let written = std::fs::metadata(&files[0].out_path).unwrap().len();
+		assert_eq!(
+			written, 65536,
+			"real RAR5 compressed data must round-trip, not just stored entries"
 		);
 	}
 
