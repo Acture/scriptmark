@@ -1,11 +1,30 @@
-use std::collections::HashMap;
+//! The local entry point: scan directories of student files and produce an
+//! [`AssignmentInput`].
+//!
+//! Every file that arrives is accounted for. A file whose owner can be identified but
+//! whose type nothing runs becomes an `IgnoredFile` diagnostic against that student; a
+//! file with no identifiable owner becomes an [`UnmatchedArtifact`]. Nothing is dropped on
+//! the floor, and nothing is printed — anomalies are returned as diagnostics for the CLI
+//! to render.
+
+use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use crate::models::{StudentFile, SubmissionSet};
+use crate::models::{
+	Assignment, AssignmentInput, AttemptPolicy, DiagnosticKind, FileOrigin, InputDiagnostic,
+	InputSource, RosterMatch, SourceLocation, StudentFile, StudentIdentity, StudentKey,
+	StudentSubmission, SubmissionAttempt, UnmatchedArtifact, UnmatchedReason, normalize_key,
+};
+use crate::roster::Roster;
+
+/// Directory archives are expanded into, beside the directory being scanned.
+const EXTRACT_DIR: &str = ".scriptmark_extracted";
 
 /// Map file extensions to language identifiers.
-fn detect_language(ext: &str) -> Option<&'static str> {
+///
+/// Shared with the Canvas adapter, which classifies downloaded attachments the same way.
+pub(crate) fn detect_language(ext: &str) -> Option<&'static str> {
 	match ext {
 		"py" => Some("python"),
 		"cpp" | "cc" | "cxx" => Some("cpp"),
@@ -19,231 +38,389 @@ fn detect_language(ext: &str) -> Option<&'static str> {
 	}
 }
 
-/// Extract student ID from a filename.
+/// Extract a student key from a filename.
 ///
-/// Convention: `{student_id}_{rest}.ext` (e.g. `alice_Lab5_1.py` → `alice`)
+/// Convention: `{key}_{rest}.ext` (e.g. `alice_Lab5_1.py` → `alice`). This split is a
+/// placeholder — teacher-configurable matching is P-673 — so the key it yields is only
+/// ever an unconfirmed [`crate::models::StudentKey::Extracted`] until a roster vouches
+/// for it.
 fn extract_sid(filename: &str) -> Option<String> {
 	let stem = Path::new(filename).file_stem()?.to_str()?;
-	let sid = stem.split('_').next()?;
+	// Normalised here rather than at each use: `seen_keys`, `by_key` and the roster-merge
+	// coverage set are all keyed on this string, and a token with stray whitespace would
+	// otherwise group separately from the identity built out of it.
+	let sid = normalize_key(stem.split('_').next()?);
 	if sid.is_empty() {
 		return None;
 	}
-	Some(sid.to_string())
+	Some(sid)
 }
 
-/// Extract .zip archives in a directory to `.scriptmark_extracted/{archive_stem}/`.
-///
-/// Returns list of directories created. Skips archives that have already been extracted
-/// (directory exists and is non-empty). Silently skips corrupt/unreadable archives.
-fn extract_archives(dir: &Path) -> Vec<PathBuf> {
-	let extract_root = dir.join(".scriptmark_extracted");
-	let mut created = Vec::new();
+/// A file that came out of an archive, with the provenance needed to trace it back.
+#[derive(Debug, Clone)]
+struct ExtractedFile {
+	out_path: PathBuf,
+	archive: PathBuf,
+	/// The path *inside* the archive, before flattening.
+	entry: String,
+}
 
-	let entries = match std::fs::read_dir(dir) {
-		Ok(e) => e,
-		Err(_) => return created,
+const MAX_FILE_SIZE: u64 = 5_000_000; // 5 MB per file
+const MAX_TOTAL_SIZE: u64 = 50_000_000; // 50 MB total per archive
+const MAX_FILE_COUNT: usize = 100;
+
+fn is_noise(name: &str) -> bool {
+	name.starts_with('.') || name.starts_with("__")
+}
+
+fn skipped(archive: &Path, entry: &str, reason: String) -> InputDiagnostic {
+	InputDiagnostic::warning(DiagnosticKind::ArchiveEntrySkipped {
+		archive: archive.to_path_buf(),
+		entry: entry.to_string(),
+		reason,
+	})
+}
+
+/// Extract `.zip` archives in a directory to `{EXTRACT_DIR}/{archive_stem}/`.
+///
+/// Archives already extracted are not re-extracted, but their index is re-read so that
+/// provenance survives a second run — otherwise a cached extraction would leave every file
+/// it produced with no traceable origin.
+fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<ExtractedFile> {
+	let extract_root = dir.join(EXTRACT_DIR);
+	let mut extracted = Vec::new();
+
+	let Ok(entries) = std::fs::read_dir(dir) else {
+		return extracted;
 	};
 
-	for entry in entries.flatten() {
-		let path = entry.path();
-		if !path.is_file() {
+	// Sort: read_dir order is not stable across filesystems.
+	let mut archives: Vec<PathBuf> = Vec::new();
+	for entry in entries {
+		let Ok(path) = entry.map(|entry| entry.path()) else {
 			continue;
-		}
-		let ext = path
+		};
+		let is_zip = path
 			.extension()
 			.and_then(|e| e.to_str())
-			.unwrap_or("")
-			.to_lowercase();
-		if ext != "zip" {
+			.is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+		if !is_zip {
 			continue;
 		}
+		match std::fs::metadata(&path) {
+			Ok(meta) if meta.is_file() => archives.push(path),
+			Ok(_) => {}
+			Err(e) => diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::UnreadableDirEntry {
+					dir: dir.to_path_buf(),
+					reason: format!("{}: {e}", path.display()),
+				},
+			)),
+		}
+	}
+	archives.sort();
 
-		let stem = path
+	for archive_path in archives {
+		let stem = archive_path
 			.file_stem()
 			.and_then(|s| s.to_str())
 			.unwrap_or("unknown");
 		let target = extract_root.join(stem);
 
-		// Skip if already extracted
-		if target.is_dir()
-			&& std::fs::read_dir(&target)
-				.map(|mut d| d.next().is_some())
-				.unwrap_or(false)
-		{
-			created.push(target);
-			continue;
-		}
-
-		// Extract
-		let file = match std::fs::File::open(&path) {
+		let file = match std::fs::File::open(&archive_path) {
 			Ok(f) => f,
-			Err(_) => continue,
+			Err(e) => {
+				diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::ArchiveUnreadable {
+						archive: archive_path.clone(),
+						reason: e.to_string(),
+					},
+				));
+				continue;
+			}
 		};
 		let mut archive = match zip::ZipArchive::new(file) {
 			Ok(a) => a,
 			Err(e) => {
-				eprintln!("[WARN] Skipping corrupt archive {}: {e}", path.display());
+				diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::ArchiveUnreadable {
+						archive: archive_path.clone(),
+						reason: e.to_string(),
+					},
+				));
 				continue;
 			}
 		};
 
 		if let Err(e) = std::fs::create_dir_all(&target) {
-			eprintln!("[WARN] Cannot create extract dir {}: {e}", target.display());
+			diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::ArchiveUnreadable {
+					archive: archive_path.clone(),
+					reason: format!("cannot create extraction directory: {e}"),
+				},
+			));
 			continue;
 		}
 
-		const MAX_FILE_SIZE: u64 = 5_000_000; // 5 MB per file
-		const MAX_TOTAL_SIZE: u64 = 50_000_000; // 50 MB total per archive
-		const MAX_FILE_COUNT: usize = 100;
-
 		let mut total_bytes: u64 = 0;
 		let mut file_count: usize = 0;
+		// Flattening can map two in-archive paths onto one output name; remember who got
+		// there first so the loser is reported rather than silently dropped.
+		let mut claimed: BTreeMap<PathBuf, String> = BTreeMap::new();
 
 		for i in 0..archive.len() {
 			let mut entry = match archive.by_index(i) {
 				Ok(e) => e,
-				Err(_) => continue,
+				Err(e) => {
+					// Unreadable metadata is still something that arrived; reporting it is
+					// what keeps "nothing is dropped on the floor" true.
+					diagnostics.push(skipped(
+						&archive_path,
+						&format!("entry #{i}"),
+						e.to_string(),
+					));
+					continue;
+				}
 			};
-
 			if entry.is_dir() {
 				continue;
 			}
 
-			// Check uncompressed size before reading
-			if entry.size() > MAX_FILE_SIZE {
-				eprintln!(
-					"[WARN] Skipping oversized entry in {}: {} ({} bytes)",
-					path.display(),
-					entry.name(),
-					entry.size()
-				);
+			let Some(name) = entry.enclosed_name() else {
+				// Path traversal attempt.
+				diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::ArchiveEntrySkipped {
+						archive: archive_path.clone(),
+						entry: entry.name().to_string(),
+						reason: "unsafe path".to_string(),
+					},
+				));
 				continue;
-			}
-
-			if total_bytes + entry.size() > MAX_TOTAL_SIZE {
-				eprintln!(
-					"[WARN] Archive {} exceeds total extraction limit ({}B), stopping",
-					path.display(),
-					MAX_TOTAL_SIZE
-				);
-				break;
-			}
-
-			if file_count >= MAX_FILE_COUNT {
-				eprintln!(
-					"[WARN] Archive {} exceeds file count limit ({}), stopping",
-					path.display(),
-					MAX_FILE_COUNT
-				);
-				break;
-			}
-
-			let name = match entry.enclosed_name() {
-				Some(n) => n.to_owned(),
-				None => continue, // skip path traversal attempts
 			};
+			let entry_name = name.to_string_lossy().into_owned();
 
-			// Flatten: extract to target/{filename} regardless of subdirectories in archive
-			let filename = match name.file_name() {
-				Some(n) => n.to_owned(),
-				None => continue,
+			let Some(filename) = name.file_name().map(|n| n.to_owned()) else {
+				continue;
 			};
-
-			// Skip __pycache__, .DS_Store, etc.
-			let fname_str = filename.to_string_lossy();
-			if fname_str.starts_with('.') || fname_str.starts_with("__") {
+			if is_noise(&filename.to_string_lossy()) {
 				continue;
 			}
 
 			let out_path = target.join(&filename);
+
+			if let Some(first) = claimed.get(&out_path) {
+				diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::ArchiveNameCollision {
+						archive: archive_path.clone(),
+						entry: format!("{entry_name} (already taken by {first})"),
+					},
+				));
+				continue;
+			}
+
+			// Every guard runs before the entry is recorded. Claiming the name first would
+			// let a rejected entry block the real submission from ever being extracted, and
+			// the accounting runs on a cached rerun too so the diagnostics do not vanish
+			// the second time a directory is scanned.
+			if entry.size() > MAX_FILE_SIZE {
+				diagnostics.push(skipped(
+					&archive_path,
+					&entry_name,
+					format!(
+						"{} bytes exceeds the {MAX_FILE_SIZE} byte limit",
+						entry.size()
+					),
+				));
+				continue;
+			}
+			if total_bytes + entry.size() > MAX_TOTAL_SIZE {
+				diagnostics.push(skipped(
+					&archive_path,
+					&entry_name,
+					format!("archive exceeds the {MAX_TOTAL_SIZE} byte total"),
+				));
+				break;
+			}
+			if file_count >= MAX_FILE_COUNT {
+				diagnostics.push(skipped(
+					&archive_path,
+					&entry_name,
+					format!("archive exceeds the {MAX_FILE_COUNT} file limit"),
+				));
+				break;
+			}
+
+			total_bytes += entry.size();
+			file_count += 1;
+			claimed.insert(out_path.clone(), entry_name.clone());
+
+			// Provenance is recorded whether or not the bytes are written this run, so a
+			// cached extraction still traces back to its archive entry.
+			extracted.push(ExtractedFile {
+				out_path: out_path.clone(),
+				archive: archive_path.clone(),
+				entry: entry_name.clone(),
+			});
+
+			// Only the bytes are skipped when the file is already there — an entry that
+			// failed last run is retried, so its diagnostic recurs instead of vanishing on
+			// the second scan of a directory.
 			if out_path.exists() {
-				continue; // don't overwrite
+				continue;
 			}
 
 			let mut buf = Vec::new();
-			if entry.read_to_end(&mut buf).is_ok() {
-				let _ = std::fs::write(&out_path, &buf);
-				total_bytes += buf.len() as u64;
-				file_count += 1;
+			let failure = match entry.read_to_end(&mut buf) {
+				Err(_) => Some("unreadable entry".to_string()),
+				Ok(_) => std::fs::write(&out_path, &buf).err().map(|e| e.to_string()),
+			};
+			if let Some(reason) = failure {
+				diagnostics.push(skipped(&archive_path, &entry_name, reason));
+				// Roll the claim and the provenance back together; letting them drift is
+				// what lets a rejected entry block a real one.
+				extracted.pop();
+				claimed.remove(&out_path);
+				total_bytes -= entry.size();
+				file_count -= 1;
 			}
 		}
-
-		created.push(target);
 	}
 
-	created
+	extracted
 }
 
-/// Scan directories for student submission files and group by student ID.
-///
-/// Only includes files with recognized language extensions.
-/// If `extensions` is provided, only includes files matching those extensions.
-pub fn discover_submissions(
-	paths: &[impl AsRef<Path>],
-	extensions: Option<&[&str]>,
-) -> Result<SubmissionSet, DiscoveryError> {
-	let mut by_student: HashMap<String, Vec<StudentFile>> = HashMap::new();
+/// How to interpret a set of scanned directories.
+pub struct LocalInputOptions<'a> {
+	pub assignment: Assignment,
+	/// The roster of record. Without one, membership is unknown rather than negative.
+	pub roster: Option<&'a Roster>,
+	pub attempt_policy: AttemptPolicy,
+}
 
-	// Phase 0: Extract archives in each submission directory
-	let mut extra_dirs: Vec<PathBuf> = Vec::new();
-	for dir_path in paths {
-		let extracted = extract_archives(dir_path.as_ref());
-		extra_dirs.extend(extracted);
+impl Default for LocalInputOptions<'_> {
+	fn default() -> Self {
+		Self {
+			assignment: Assignment::default(),
+			roster: None,
+			attempt_policy: AttemptPolicy::Latest,
+		}
+	}
+}
+
+/// Scan directories of student submissions and build the unified input.
+///
+/// Local input has no notion of repeated attempts — inferring them from Canvas download
+/// filename tokens would be a matching rule, which is P-673 — so every student gets
+/// exactly one attempt.
+pub fn load_local_input(
+	paths: &[impl AsRef<Path>],
+	options: LocalInputOptions<'_>,
+) -> Result<AssignmentInput, DiscoveryError> {
+	let mut diagnostics: Vec<InputDiagnostic> = Vec::new();
+	let mut unmatched: Vec<UnmatchedArtifact> = Vec::new();
+	// BTreeMap: iteration order must not depend on hashing.
+	let mut by_key: BTreeMap<String, Vec<StudentFile>> = BTreeMap::new();
+	// A student who sent only unusable files still submitted something.
+	let mut seen_keys: std::collections::BTreeSet<String> = Default::default();
+
+	for path in paths {
+		let path = path.as_ref();
+		if !path.is_dir() {
+			return Err(DiscoveryError::NotADirectory(path.to_path_buf()));
+		}
 	}
 
-	// Combine original paths + extracted subdirectories
-	let all_paths: Vec<&Path> = paths
+	let mut origins: BTreeMap<PathBuf, FileOrigin> = BTreeMap::new();
+	let mut extra_dirs: Vec<PathBuf> = Vec::new();
+	for path in paths {
+		for extracted in extract_archives(path.as_ref(), &mut diagnostics) {
+			if let Some(parent) = extracted.out_path.parent()
+				&& !extra_dirs.contains(&parent.to_path_buf())
+			{
+				extra_dirs.push(parent.to_path_buf());
+			}
+			origins.insert(
+				extracted.out_path,
+				FileOrigin::Archive {
+					archive: extracted.archive,
+					entry: extracted.entry,
+				},
+			);
+		}
+	}
+
+	let all_paths: Vec<PathBuf> = paths
 		.iter()
-		.map(|p| p.as_ref())
-		.chain(extra_dirs.iter().map(|p| p.as_path()))
+		.map(|p| p.as_ref().to_path_buf())
+		.chain(extra_dirs)
 		.collect();
 
 	for dir_path in &all_paths {
-		if !dir_path.is_dir() {
-			return Err(DiscoveryError::NotADirectory(dir_path.to_path_buf()));
-		}
-
 		let entries = std::fs::read_dir(dir_path)
-			.map_err(|e| DiscoveryError::IoError(dir_path.to_path_buf(), e))?;
+			.map_err(|e| DiscoveryError::IoError(dir_path.clone(), e))?;
 
+		let mut files: Vec<PathBuf> = Vec::new();
 		for entry in entries {
-			let entry = entry.map_err(|e| DiscoveryError::IoError(dir_path.to_path_buf(), e))?;
-			let path = entry.path();
+			// Not `path().is_file()`: that turns a metadata failure into "not a file", so
+			// a submission we merely failed to stat would be read as 缺交. `fs::metadata`
+			// follows symlinks exactly as `is_file()` did, but hands back the error.
+			// (`DirEntry::metadata` would not — on Unix it is `symlink_metadata`, which
+			// would silently stop grading symlinked submissions.)
+			match entry.map(|entry| entry.path()) {
+				Ok(path) => match std::fs::metadata(&path) {
+					Ok(meta) if meta.is_file() => files.push(path),
+					Ok(_) => {}
+					Err(e) => diagnostics.push(InputDiagnostic::warning(
+						DiagnosticKind::UnreadableDirEntry {
+							dir: dir_path.clone(),
+							reason: format!("{}: {e}", path.display()),
+						},
+					)),
+				},
+				Err(e) => diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::UnreadableDirEntry {
+						dir: dir_path.clone(),
+						reason: e.to_string(),
+					},
+				)),
+			}
+		}
+		files.sort();
 
-			if !path.is_file() {
+		let is_extracted = dir_path.components().any(|c| c.as_os_str() == EXTRACT_DIR);
+
+		for path in files {
+			let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
+				continue;
+			};
+			if is_noise(filename) {
 				continue;
 			}
 
-			let ext = match path.extension().and_then(|e| e.to_str()) {
-				Some(e) => e,
-				None => continue,
-			};
-
-			// Filter by allowed extensions if specified
-			if let Some(allowed) = extensions
-				&& !allowed.contains(&ext)
-			{
+			let ext = path
+				.extension()
+				.and_then(|e| e.to_str())
+				.unwrap_or("")
+				.to_lowercase();
+			// Archives are inputs to extraction, not submissions in their own right — but
+			// the upload still happened. Registering the owner here is what stops a
+			// truncated or empty archive being reported as 缺交.
+			if !is_extracted && ext == "zip" {
+				match extract_sid(filename) {
+					Some(key) => {
+						seen_keys.insert(key);
+					}
+					None => unmatched.push(UnmatchedArtifact {
+						path: path.clone(),
+						reason: UnmatchedReason::NoStudentKey,
+					}),
+				}
 				continue;
 			}
 
-			let language = match detect_language(ext) {
-				Some(lang) => lang.to_string(),
-				None => continue,
-			};
-
-			let filename = match path.file_name().and_then(|n| n.to_str()) {
-				Some(n) => n,
-				None => continue,
-			};
-
-			// For files inside .scriptmark_extracted/, prefer SID from the parent dir
-			// (which is the archive stem, e.g. "bob_12345_67890_Lab5")
-			let is_extracted = dir_path
-				.components()
-				.any(|c| c.as_os_str() == ".scriptmark_extracted");
-
-			let sid = if is_extracted {
-				// Try parent dir first (archive stem has SID), then file
+			// Inside an extraction directory the archive stem carries the key; the files
+			// within it are named by the student.
+			let key = if is_extracted {
 				dir_path
 					.file_name()
 					.and_then(|n| n.to_str())
@@ -253,24 +430,133 @@ pub fn discover_submissions(
 				extract_sid(filename)
 			};
 
-			let sid = match sid {
-				Some(sid) => sid,
-				None => continue,
-			};
+			let language = detect_language(&ext);
 
-			by_student
-				.entry(sid)
-				.or_default()
-				.push(StudentFile { path, language });
+			match (key, language) {
+				(Some(key), Some(language)) => {
+					seen_keys.insert(key.clone());
+					let origin = origins.get(&path).cloned().unwrap_or(FileOrigin::Direct);
+					by_key
+						.entry(key)
+						.or_default()
+						.push(StudentFile::direct(path.clone(), language).with_origin(origin));
+				}
+				(Some(key), None) => {
+					// Owner known, type unusable: the student submitted, just not code.
+					diagnostics.push(
+						InputDiagnostic::info(DiagnosticKind::IgnoredFile {
+							key: key.clone(),
+							path: path.clone(),
+						})
+						.at(SourceLocation::file(path.clone())),
+					);
+					seen_keys.insert(key);
+				}
+				(None, language) => unmatched.push(UnmatchedArtifact {
+					path: path.clone(),
+					reason: if language.is_some() {
+						UnmatchedReason::NoStudentKey
+					} else {
+						UnmatchedReason::UnsupportedType
+					},
+				}),
+			}
 		}
 	}
 
-	// Sort files within each student for deterministic ordering
-	for files in by_student.values_mut() {
+	let mut students: Vec<StudentSubmission> = Vec::new();
+	// Keyed on the value, not its rendering: `Display` prefixes are not escaped, so a 学号
+	// that literally reads `canvas:5` would otherwise collide with `CanvasUser(5)`.
+	let mut covered: std::collections::BTreeSet<StudentKey> = Default::default();
+	let mut covered_canvas_ids: std::collections::BTreeSet<u64> = Default::default();
+
+	for key in &seen_keys {
+		let mut files = by_key.remove(key).unwrap_or_default();
 		files.sort_by(|a, b| a.path.cmp(&b.path));
+
+		let mut identity = StudentIdentity::extracted(key);
+		let roster_match = match options.roster {
+			None => RosterMatch::NoRoster,
+			Some(roster) => match roster.lookup(&identity.key) {
+				Some(i) => {
+					identity.confirm_number();
+					identity.name = roster.entries[i].name.clone();
+					identity.canvas_user_id = roster.entries[i].canvas_user_id;
+					covered.insert(identity.key.clone());
+					covered_canvas_ids.extend(identity.canvas_user_id);
+					RosterMatch::Matched(i)
+				}
+				None => {
+					diagnostics.push(InputDiagnostic::warning(DiagnosticKind::NotOnRoster {
+						key: key.clone(),
+					}));
+					RosterMatch::NotInRoster
+				}
+			},
+		};
+
+		let attempt = SubmissionAttempt::new(1).with_files(files);
+		students.push(StudentSubmission::received(
+			identity,
+			roster_match,
+			vec![attempt],
+			options.attempt_policy,
+		));
 	}
 
-	Ok(SubmissionSet { by_student })
+	// A roster student who sent nothing must still appear — that is the whole point of
+	// having a roster of record. Duplicate rows for one number yield one student carrying
+	// every row it matched, not one student per row.
+	if let Some(roster) = options.roster {
+		for entry in &roster.entries {
+			if !covered.insert(entry.key.clone()) {
+				continue;
+			}
+			// A roster that names one person under both a 学号 and a Canvas id must not
+			// count them twice.
+			if entry
+				.canvas_user_id
+				.is_some_and(|id| covered_canvas_ids.contains(&id))
+			{
+				continue;
+			}
+			covered_canvas_ids.extend(entry.canvas_user_id);
+			let Some(index) = roster.lookup(&entry.key) else {
+				continue;
+			};
+			let mut identity = match &entry.key {
+				StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
+				key => StudentIdentity::number(key.raw()),
+			};
+			identity.name = entry.name.clone();
+			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+			students.push(StudentSubmission::not_submitted(identity, index));
+		}
+	}
+
+	let mut input = AssignmentInput {
+		assignment: options.assignment,
+		source: InputSource::Local {
+			scanned_dirs: paths.iter().map(|p| p.as_ref().to_path_buf()).collect(),
+			roster_path: options
+				.roster
+				.and_then(|r| r.entries.first())
+				.and_then(|e| e.location.as_ref())
+				.and_then(|l| l.file.clone()),
+		},
+		roster: options.roster.cloned(),
+		students,
+		unmatched,
+		diagnostics,
+	};
+
+	if let Some(roster) = options.roster {
+		input.diagnostics.extend(roster.diagnostics.iter().cloned());
+	}
+	let zero_padded = input.detect_zero_padded_variants();
+	input.diagnostics.extend(zero_padded);
+
+	Ok(input.sorted())
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -284,6 +570,22 @@ pub enum DiscoveryError {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::models::{StudentKey, SubmissionOutcome};
+
+	fn scan(dir: &Path) -> AssignmentInput {
+		load_local_input(&[dir], LocalInputOptions::default()).unwrap()
+	}
+
+	fn scan_with(dir: &Path, roster: &Roster) -> AssignmentInput {
+		load_local_input(
+			&[dir],
+			LocalInputOptions {
+				roster: Some(roster),
+				..Default::default()
+			},
+		)
+		.unwrap()
+	}
 
 	#[test]
 	fn test_extract_sid() {
@@ -305,42 +607,316 @@ mod tests {
 	}
 
 	#[test]
-	fn test_discover_extracts_zip_archives() {
-		let dir = tempfile::tempdir().unwrap();
-
-		// Normal .py file
-		std::fs::write(dir.path().join("alice_Lab5.py"), "pass").unwrap();
-
-		// Create a .zip containing a .py file
-		let zip_path = dir.path().join("bob_12345_67890_Lab5.zip");
-		let file = std::fs::File::create(&zip_path).unwrap();
-		let mut zip = zip::ZipWriter::new(file);
-		zip.start_file("Lab5.py", zip::write::SimpleFileOptions::default())
-			.unwrap();
-		use std::io::Write;
-		zip.write_all(b"def foo(): return 42").unwrap();
-		zip.finish().unwrap();
-
-		let result = discover_submissions(&[dir.path()], None).unwrap();
-
-		// alice from .py, bob from extracted .zip
-		assert_eq!(result.student_count(), 2);
-		assert!(result.by_student.contains_key("alice"));
-		assert!(result.by_student.contains_key("bob"));
-	}
-
-	#[test]
 	fn test_discover_submissions() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("alice_Lab5.py"), "pass").unwrap();
 		std::fs::write(dir.path().join("bob_Lab5.py"), "pass").unwrap();
 		std::fs::write(dir.path().join("alice_Lab6.py"), "pass").unwrap();
-		std::fs::write(dir.path().join("notes.txt"), "ignore me").unwrap();
 
-		let result = discover_submissions(&[dir.path()], None).unwrap();
-		assert_eq!(result.student_count(), 2);
-		assert_eq!(result.by_student["alice"].len(), 2);
-		assert_eq!(result.by_student["bob"].len(), 1);
-		assert_eq!(result.languages(), vec!["python"]);
+		let input = scan(dir.path());
+		assert_eq!(input.student_count(), 2);
+		assert_eq!(input.students[0].files().len(), 2); // alice
+		assert_eq!(input.students[1].files().len(), 1); // bob
+		assert_eq!(input.languages(), vec!["python"]);
+		// With no roster, membership is unknown rather than negative.
+		assert!(
+			input
+				.students
+				.iter()
+				.all(|s| s.roster_match == RosterMatch::NoRoster)
+		);
+		assert_eq!(
+			input.with_outcome(SubmissionOutcome::NotSubmitted).count(),
+			0
+		);
+	}
+
+	#[test]
+	fn test_discover_extracts_zip_archives_and_records_provenance() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("alice_Lab5.py"), "pass").unwrap();
+
+		let zip_path = dir.path().join("bob_12345_67890_Lab5.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		zip.start_file("src/Lab5.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		use std::io::Write;
+		zip.write_all(b"def foo(): return 42").unwrap();
+		zip.finish().unwrap();
+
+		let input = scan(dir.path());
+		assert_eq!(input.student_count(), 2);
+
+		let bob = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "bob")
+			.expect("bob");
+		// The in-archive path survives flattening.
+		assert_eq!(
+			bob.files()[0].origin,
+			FileOrigin::Archive {
+				archive: zip_path.clone(),
+				entry: "src/Lab5.py".to_string(),
+			}
+		);
+
+		// A second run reuses the extraction and must still report where the file came from.
+		let again = scan(dir.path());
+		let bob_again = again
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "bob")
+			.expect("bob");
+		assert_eq!(bob_again.files()[0].origin, bob.files()[0].origin);
+	}
+
+	#[test]
+	fn test_archive_name_collision_is_reported_not_dropped() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("carol_Lab5.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		use std::io::Write;
+		for folder in ["a", "b"] {
+			zip.start_file(
+				format!("{folder}/Lab5.py"),
+				zip::write::SimpleFileOptions::default(),
+			)
+			.unwrap();
+			zip.write_all(b"pass").unwrap();
+		}
+		zip.finish().unwrap();
+
+		let input = scan(dir.path());
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::ArchiveNameCollision { .. })),
+			"expected a collision diagnostic, got {:?}",
+			input.diagnostics
+		);
+	}
+
+	#[test]
+	fn test_unusable_file_makes_the_owner_submitted_empty() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("2024010005_notes.txt"), "hello").unwrap();
+
+		let roster = Roster::from_pairs(&[("2024010005", "Eve")]);
+		let input = scan_with(dir.path(), &roster);
+
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(
+			input.students[0].outcome(),
+			SubmissionOutcome::SubmittedEmpty
+		);
+		assert!(input.unmatched.is_empty());
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::IgnoredFile { .. }))
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_a_file_we_cannot_stat_is_reported_not_treated_as_absent() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("2024010001_lab1.py"), "pass").unwrap();
+		// A dangling symlink: `metadata()` fails on it exactly as it would for a file
+		// whose metadata cannot be read.
+		std::os::unix::fs::symlink(
+			dir.path().join("gone.py"),
+			dir.path().join("2024010002_lab1.py"),
+		)
+		.unwrap();
+
+		let input = scan(dir.path());
+
+		// The healthy submission is unaffected...
+		assert_eq!(input.student_count(), 1);
+		// ...and the one we could not stat leaves a trace rather than vanishing.
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::UnreadableDirEntry { .. })),
+			"expected an UnreadableDirEntry diagnostic, got {:?}",
+			input.diagnostics
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_a_symlinked_submission_is_still_graded() {
+		let dir = tempfile::tempdir().unwrap();
+		// The target lives outside the scanned directory, so only the link is discovered.
+		let elsewhere = tempfile::tempdir().unwrap();
+		let real = elsewhere.path().join("real.py");
+		std::fs::write(&real, "pass").unwrap();
+		std::os::unix::fs::symlink(&real, dir.path().join("2024010001_lab1.py")).unwrap();
+
+		// `is_file()` followed symlinks, so switching to a non-following stat would have
+		// quietly stopped grading these.
+		let input = scan(dir.path());
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+	}
+
+	#[test]
+	fn test_keyless_file_becomes_an_unmatched_artifact() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("_notes_v2.py"), "pass").unwrap();
+
+		let input = scan(dir.path());
+		assert_eq!(input.student_count(), 0);
+		assert_eq!(input.unmatched.len(), 1);
+		assert_eq!(input.unmatched[0].reason, UnmatchedReason::NoStudentKey);
+	}
+
+	#[test]
+	fn test_roster_students_who_did_not_submit_survive() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("2024010001_lab1.py"), "pass").unwrap();
+
+		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024010004", "Dan")]);
+		let input = scan_with(dir.path(), &roster);
+
+		assert_eq!(input.student_count(), 2);
+		let dan = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "2024010004")
+			.expect("the non-submitter must not disappear");
+		assert_eq!(dan.outcome(), SubmissionOutcome::NotSubmitted);
+		assert_eq!(dan.identity.name.as_deref(), Some("Dan"));
+		assert_eq!(dan.roster_match, RosterMatch::Matched(1));
+	}
+
+	#[test]
+	fn test_submitter_absent_from_roster_is_kept_as_unmatched() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("9999999999_lab1.py"), "pass").unwrap();
+
+		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
+		let input = scan_with(dir.path(), &roster);
+
+		let stranger = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "9999999999")
+			.expect("stranger");
+		assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
+		// Unconfirmed by any roster, so the key stays a bare extracted token.
+		assert!(matches!(stranger.key(), StudentKey::Extracted(_)));
+		assert_eq!(stranger.identity.key.to_string(), "local:9999999999");
+	}
+
+	#[test]
+	fn test_leading_zero_pair_stays_distinct_and_is_flagged() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("0024010003_lab1.py"), "pass").unwrap();
+		std::fs::write(dir.path().join("24010003_lab1.py"), "pass").unwrap();
+
+		let roster = Roster::from_pairs(&[("0024010003", "Carol"), ("24010003", "Dave")]);
+		let input = scan_with(dir.path(), &roster);
+
+		assert_eq!(input.student_count(), 2);
+		assert_eq!(input.students[0].identity.name.as_deref(), Some("Carol"));
+		assert_eq!(input.students[1].identity.name.as_deref(), Some("Dave"));
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::SuspectedZeroPaddedVariant { .. }))
+		);
+	}
+
+	#[test]
+	fn test_a_repeated_roster_row_yields_one_student() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("2024010001_lab1.py"), "pass").unwrap();
+
+		// The same person listed twice — merged before the submission ever looks them up.
+		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024010001", "Alice")]);
+		let input = scan_with(dir.path(), &roster);
+
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
+		assert_eq!(input.students[0].identity.name.as_deref(), Some("Alice"));
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+	}
+
+	#[test]
+	fn test_a_repeated_roster_row_does_not_spawn_a_phantom_non_submitter() {
+		let dir = tempfile::tempdir().unwrap();
+		let roster = Roster::from_pairs(&[("2024010004", "Dan"), ("2024010004", "Dan")]);
+		let input = scan_with(dir.path(), &roster);
+
+		// One row per person, whether or not they submitted — two would collide on
+		// student_id the moment anything tried to persist them.
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::NotSubmitted);
+	}
+
+	#[test]
+	fn test_a_contradictory_roster_surfaces_as_an_error_not_a_warning() {
+		let dir = tempfile::tempdir().unwrap();
+		let roster_path = dir.path().join("roster.csv");
+		std::fs::write(
+			&roster_path,
+			"name,class,student_id\nAlice Wu,A,2024010001\nAlice Chen,B,2024010001\n",
+		)
+		.unwrap();
+		let roster = crate::roster::load_roster(&roster_path).unwrap();
+
+		let subs = dir.path().join("subs");
+		std::fs::create_dir(&subs).unwrap();
+		std::fs::write(subs.join("2024010001_lab1.py"), "pass").unwrap();
+		let input = load_local_input(
+			&[&subs],
+			LocalInputOptions {
+				roster: Some(&roster),
+				..Default::default()
+			},
+		)
+		.unwrap();
+
+		// The CLI refuses to grade while this is present — attributing this submission to
+		// either name would be a coin flip.
+		let errors: Vec<_> = input.errors().collect();
+		assert_eq!(errors.len(), 1);
+		assert!(matches!(
+			&errors[0].kind,
+			DiagnosticKind::ConflictingRosterEntry { .. }
+		));
+	}
+
+	#[test]
+	fn test_output_is_byte_identical_across_runs() {
+		let dir = tempfile::tempdir().unwrap();
+		for i in 0..12 {
+			std::fs::write(dir.path().join(format!("s{i:04}_lab1.py")), "pass").unwrap();
+		}
+		std::fs::write(dir.path().join("_orphan.py"), "pass").unwrap();
+		std::fs::write(dir.path().join("s0003_notes.txt"), "hi").unwrap();
+
+		let first = serde_json::to_string(&scan(dir.path())).unwrap();
+		let second = serde_json::to_string(&scan(dir.path())).unwrap();
+		assert_eq!(first, second);
+	}
+
+	#[test]
+	fn test_not_a_directory_is_a_hard_error() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("a.py");
+		std::fs::write(&file, "pass").unwrap();
+
+		let err = load_local_input(&[&file], LocalInputOptions::default()).unwrap_err();
+		assert!(matches!(err, DiscoveryError::NotADirectory(_)));
 	}
 }

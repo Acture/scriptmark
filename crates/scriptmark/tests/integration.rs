@@ -1,9 +1,18 @@
-use std::collections::HashMap;
 use std::io::Write;
 
+use scriptmark::grading::apply_grading;
 use scriptmark::models::*;
 use scriptmark::runner::orchestrator;
 use scriptmark::runner::python::PythonExecutor;
+
+/// Reports come back as a list in input order, so tests look a student up by the id the
+/// model renders rather than indexing a map.
+fn by_id<'a>(reports: &'a [StudentReport], student_id: &str) -> &'a StudentReport {
+	reports
+		.iter()
+		.find(|r| r.student_id == student_id)
+		.unwrap_or_else(|| panic!("no report for '{student_id}'"))
+}
 
 fn setup_test_dir() -> tempfile::TempDir {
 	let dir = tempfile::tempdir().unwrap();
@@ -73,10 +82,10 @@ async fn test_python_executor_correct_student() {
 	let dir = setup_test_dir();
 	let executor = PythonExecutor::new();
 
-	let files = vec![StudentFile {
-		path: dir.path().join("alice_lab5.py"),
-		language: "python".to_string(),
-	}];
+	let files = vec![StudentFile::direct(
+		dir.path().join("alice_lab5.py"),
+		"python",
+	)];
 
 	let spec = test_spec();
 
@@ -112,10 +121,10 @@ async fn test_python_executor_buggy_student() {
 	let dir = setup_test_dir();
 	let executor = PythonExecutor::new();
 
-	let files = vec![StudentFile {
-		path: dir.path().join("bob_lab5.py"),
-		language: "python".to_string(),
-	}];
+	let files = vec![StudentFile::direct(
+		dir.path().join("bob_lab5.py"),
+		"python",
+	)];
 
 	let spec = test_spec();
 
@@ -155,39 +164,23 @@ async fn test_orchestrator_runs_all_students() {
 	let dir = setup_test_dir();
 	let executor = PythonExecutor::new();
 
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([
-			(
-				"alice".to_string(),
-				vec![StudentFile {
-					path: dir.path().join("alice_lab5.py"),
-					language: "python".to_string(),
-				}],
-			),
-			(
-				"bob".to_string(),
-				vec![StudentFile {
-					path: dir.path().join("bob_lab5.py"),
-					language: "python".to_string(),
-				}],
-			),
-		]),
-	};
+	let students = vec![
+		StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]),
+		StudentSubmission::from_files("bob", &[dir.path().join("bob_lab5.py")]),
+	];
 
 	let specs = vec![test_spec()];
 
-	let results = orchestrator::run_all(&submissions, &specs, &executor, 10, Some(2)).await;
+	let results = orchestrator::run_all(&students, &specs, &executor, 10, Some(2)).await;
 
 	assert_eq!(results.len(), 2);
-	assert!(results.contains_key("alice"));
-	assert!(results.contains_key("bob"));
 
-	let alice = &results["alice"];
+	let alice = by_id(&results, "alice");
 	assert_eq!(alice.status(), TestStatus::Passed);
 	assert_eq!(alice.total_cases(), 4);
 	assert_eq!(alice.total_passed(), 4);
 
-	let bob = &results["bob"];
+	let bob = by_id(&results, "bob");
 	assert_eq!(bob.status(), TestStatus::Failed);
 	assert_eq!(bob.total_cases(), 4);
 	// bob returns min instead of max: fails on "3<5" and "negative", passes "equal zero" and "TypeError"
@@ -250,19 +243,14 @@ expect = 10
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_math.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_math.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
 
-	let alice = &results["alice"];
+	let alice = by_id(&results, "alice");
 	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
@@ -304,18 +292,13 @@ expect = "hello world"
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_echo.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_echo.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 	assert_eq!(alice.test_results[0].cases[0].status, TestStatus::Passed);
 }
 
@@ -353,18 +336,13 @@ expect = 0.001
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_config.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_config.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
 		TestStatus::Passed,
@@ -419,18 +397,13 @@ reference = "{}/solutions/lab5.py"
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_lab5.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_lab5.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 10, "Should have 10 generated cases");
 	assert_eq!(
@@ -476,18 +449,13 @@ rhai = "if a >= b { a } else { b }"
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_lab5.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_lab5.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 5, "Should have 5 generated cases");
 	assert_eq!(
@@ -544,18 +512,13 @@ expect = 60
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_proc.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_proc.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
@@ -634,18 +597,13 @@ expect = 20.0
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 2);
 	assert_eq!(
@@ -711,18 +669,13 @@ expect = [0, 1, 2]
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
@@ -778,18 +731,13 @@ args = []
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
@@ -846,18 +794,13 @@ expect = 10
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	assert_eq!(
 		alice.test_results[0].cases[0].status,
@@ -919,18 +862,13 @@ expect = 5
 	.unwrap();
 
 	let executor = PythonExecutor::new();
-	let submissions = SubmissionSet {
-		by_student: HashMap::from([(
-			"alice".to_string(),
-			vec![StudentFile {
-				path: dir.path().join("alice_hw.py"),
-				language: "python".to_string(),
-			}],
-		)]),
-	};
+	let students = vec![StudentSubmission::from_files(
+		"alice",
+		&[dir.path().join("alice_hw.py")],
+	)];
 
-	let results = orchestrator::run_all(&submissions, &[spec], &executor, 10, Some(1)).await;
-	let alice = &results["alice"];
+	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
+	let alice = by_id(&results, "alice");
 
 	// With copy_refs=true (default), second case should still see original DATA
 	assert_eq!(
@@ -943,4 +881,71 @@ expect = 5
 		TestStatus::Passed,
 		"length should still be 5 because DATA was deepcopied per case"
 	);
+}
+
+/// The seam between the input model and the results: `run_all` is the only place a
+/// student's delivery outcome and Canvas id reach `StudentReport`, and it is what makes
+/// "a non-submitter is never scored zero" work end to end.
+#[tokio::test]
+async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
+	let dir = setup_test_dir();
+	let executor = PythonExecutor::new();
+
+	let mut alice = StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]);
+	alice.roster_match = RosterMatch::Matched(0);
+	alice.identity.canvas_user_id = Some(101);
+	alice.identity.name = Some("Alice".to_string());
+
+	let mut dan_identity = StudentIdentity::number("dan");
+	dan_identity.canvas_user_id = Some(105);
+	let absent = StudentSubmission::not_submitted(dan_identity, 1);
+
+	let students = vec![alice, absent];
+	let results = orchestrator::run_all(&students, &[test_spec()], &executor, 10, Some(2)).await;
+
+	assert_eq!(results.len(), 2, "a non-submitter must still get a row");
+
+	let alice = by_id(&results, "alice");
+	assert_eq!(alice.submission_state, Some(SubmissionOutcome::Executable));
+	assert_eq!(alice.canvas_user_id, Some(101));
+	assert_eq!(alice.student_name.as_deref(), Some("Alice"));
+	assert!(alice.is_gradeable());
+
+	let dan = by_id(&results, "dan");
+	assert_eq!(dan.submission_state, Some(SubmissionOutcome::NotSubmitted));
+	assert_eq!(dan.canvas_user_id, Some(105));
+	assert!(dan.test_results.is_empty());
+	assert!(!dan.is_gradeable());
+
+	// And the consumer honours it: no grade, rather than a zero that would be pushed to
+	// Canvas as if the student had earned it.
+	let mut graded = results;
+	apply_grading(&mut graded, &GradingPolicy::default());
+	assert!(by_id(&graded, "alice").final_grade.is_some());
+	assert_eq!(by_id(&graded, "dan").final_grade, None);
+}
+
+/// A submitter the roster does not list still has runnable code, and a teacher needs that
+/// output to work out why the two disagree.
+#[tokio::test]
+async fn test_a_submitter_absent_from_the_roster_is_still_executed() {
+	let dir = setup_test_dir();
+	let executor = PythonExecutor::new();
+
+	let mut stranger = StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]);
+	stranger.roster_match = RosterMatch::NotInRoster;
+	assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
+
+	let results = orchestrator::run_all(&[stranger], &[test_spec()], &executor, 10, Some(1)).await;
+
+	assert_eq!(results[0].total_cases(), 4, "their tests must still run");
+	assert_eq!(results[0].total_passed(), 4);
+	assert_eq!(
+		results[0].submission_state,
+		Some(SubmissionOutcome::ReceivedUnmatched)
+	);
+	// Run, reported — but not graded until the identity clash is resolved.
+	let mut graded = results;
+	apply_grading(&mut graded, &GradingPolicy::default());
+	assert_eq!(graded[0].final_grade, None);
 }

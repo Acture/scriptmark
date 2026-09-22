@@ -179,3 +179,11 @@ templates
 .remember/
 tests/geec/
 tests_submission/
+
+# P-669 test fixtures — the broad rules above (*.csv, submissions, templates, config.toml)
+# must not swallow committed test data.
+!crates/scriptmark/tests/fixtures/**
+# ...but not what running the suite over them produces.
+crates/scriptmark/tests/fixtures/**/__pycache__/
+crates/scriptmark/tests/fixtures/**/.scriptmark_extracted/
+crates/scriptmark/tests/fixtures/**/.DS_Store

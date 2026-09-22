@@ -19,6 +19,8 @@ pub enum DbError {
 	Json(#[from] serde_json::Error),
 	#[error("IO error: {0}")]
 	Io(#[from] std::io::Error),
+	#[error("two reports share student id '{0}'; refusing to overwrite one with the other")]
+	DuplicateStudent(String),
 }
 
 pub struct Database {
@@ -52,9 +54,8 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
-	use std::collections::HashMap;
-
 	use crate::models::*;
+	use crate::roster::Roster;
 	use crate::similarity::SimilarityPair;
 
 	use super::*;
@@ -68,9 +69,7 @@ mod tests {
 	#[test]
 	fn test_roster_import_and_query() {
 		let db = Database::open_memory().unwrap();
-		let mut roster = HashMap::new();
-		roster.insert("alice".to_string(), "Alice Smith".to_string());
-		roster.insert("bob".to_string(), "Bob Jones".to_string());
+		let roster = Roster::from_pairs(&[("alice", "Alice Smith"), ("bob", "Bob Jones")]);
 
 		let count = db.import_roster(&roster).unwrap();
 		assert_eq!(count, 2);
@@ -90,7 +89,7 @@ mod tests {
 			student_id: "alice".to_string(),
 			student_name: Some("Alice".to_string()),
 			test_results: vec![TestResult {
-				spec_name: "test".to_string(),
+				item_id: "test".to_string(),
 				cases: vec![CaseResult {
 					case_name: "case1".to_string(),
 					status: TestStatus::Passed,
@@ -101,8 +100,7 @@ mod tests {
 				}],
 			}],
 			final_grade: Some(95.0),
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 
 		let session_id = db.save_session("hw5", &reports, None).unwrap();
@@ -116,7 +114,7 @@ mod tests {
 		let results = db.get_results(session_id).unwrap();
 		assert_eq!(results.len(), 1);
 		assert_eq!(results[0].student_id, "alice");
-		assert!((results[0].final_grade - 95.0).abs() < 0.1);
+		assert_eq!(results[0].final_grade, Some(95.0));
 	}
 
 	#[test]
@@ -125,19 +123,13 @@ mod tests {
 
 		let report1 = vec![StudentReport {
 			student_id: "alice".to_string(),
-			student_name: None,
-			test_results: vec![],
 			final_grade: Some(80.0),
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 		let report2 = vec![StudentReport {
 			student_id: "alice".to_string(),
-			student_name: None,
-			test_results: vec![],
 			final_grade: Some(95.0),
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 
 		db.save_session("hw5", &report1, None).unwrap();
@@ -171,16 +163,190 @@ mod tests {
 	#[test]
 	fn test_roster_upsert() {
 		let db = Database::open_memory().unwrap();
-		let mut roster = HashMap::new();
-		roster.insert("alice".to_string(), "Alice V1".to_string());
-		db.import_roster(&roster).unwrap();
-
-		roster.insert("alice".to_string(), "Alice V2".to_string());
-		db.import_roster(&roster).unwrap();
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice V1")]))
+			.unwrap();
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice V2")]))
+			.unwrap();
 
 		let alice = db.get_student("alice").unwrap().unwrap();
 		assert_eq!(alice.name.as_deref(), Some("Alice V2"));
 
 		assert_eq!(db.list_students().unwrap().len(), 1);
+	}
+
+	#[test]
+	fn test_import_roster_counts_rows_stored() {
+		let db = Database::open_memory().unwrap();
+		// A repeated row is merged before it ever reaches the database.
+		let roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice")]);
+		assert_eq!(roster.len(), 1);
+		assert_eq!(db.import_roster(&roster).unwrap(), 1);
+	}
+
+	#[test]
+	fn test_duplicate_student_ids_are_refused_rather_than_merged() {
+		let db = Database::open_memory().unwrap();
+		let reports = vec![
+			StudentReport {
+				student_id: "alice".to_string(),
+				final_grade: Some(80.0),
+				..Default::default()
+			},
+			StudentReport {
+				student_id: "alice".to_string(),
+				final_grade: Some(95.0),
+				..Default::default()
+			},
+		];
+
+		let err = db.save_session("hw5", &reports, None).unwrap_err();
+		assert!(matches!(err, DbError::DuplicateStudent(id) if id == "alice"));
+	}
+
+	#[test]
+	fn test_ungraded_students_read_back_as_none_not_zero() {
+		let db = Database::open_memory().unwrap();
+		let reports = vec![StudentReport {
+			student_id: "absent".to_string(),
+			submission_state: Some(SubmissionOutcome::NotSubmitted),
+			..Default::default()
+		}];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+
+		// A student who was never graded must not come back as a zero.
+		assert_eq!(db.get_results(session_id).unwrap()[0].final_grade, None);
+		assert_eq!(
+			db.get_student_history("absent").unwrap()[0].1.final_grade,
+			None
+		);
+	}
+
+	#[test]
+	fn test_an_unconfirmed_key_still_joins_to_its_roster_row() {
+		let db = Database::open_memory().unwrap();
+		// A run made without --roster renders ids with a `local:` prefix; the roster
+		// imported afterwards holds the bare token. Both must resolve to one student —
+		// including a non-numeric one, which a character-set trim would have mangled.
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
+			.unwrap();
+		let reports = vec![StudentReport {
+			student_id: "local:alice".to_string(),
+			final_grade: Some(88.0),
+			..Default::default()
+		}];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+
+		let results = db.get_results(session_id).unwrap();
+		assert_eq!(results[0].student_name.as_deref(), Some("Alice Smith"));
+
+		let history = db.get_student_history("alice").unwrap();
+		assert_eq!(history.len(), 1);
+		assert_eq!(history[0].1.student_name.as_deref(), Some("Alice Smith"));
+	}
+
+	#[test]
+	fn test_a_result_row_never_picks_up_a_second_students_name() {
+		let db = Database::open_memory().unwrap();
+		// Both forms present in the students table: the join must resolve to exactly one.
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
+			.unwrap();
+		db.conn
+			.execute(
+				"INSERT INTO students (id, name) VALUES ('local:alice', 'Someone Else')",
+				[],
+			)
+			.unwrap();
+
+		let reports = vec![StudentReport {
+			student_id: "local:alice".to_string(),
+			final_grade: Some(88.0),
+			..Default::default()
+		}];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+
+		let results = db.get_results(session_id).unwrap();
+		assert_eq!(results.len(), 1, "one stored result must yield one row");
+		assert_eq!(results[0].student_name.as_deref(), Some("Alice Smith"));
+	}
+
+	#[test]
+	fn test_history_accepts_the_id_form_the_tables_print() {
+		let db = Database::open_memory().unwrap();
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
+			.unwrap();
+		db.save_session(
+			"hw5",
+			&[StudentReport {
+				student_id: "local:alice".to_string(),
+				final_grade: Some(70.0),
+				..Default::default()
+			}],
+			None,
+		)
+		.unwrap();
+
+		// Whichever form the teacher copies out of the summary must find the run.
+		for id in ["alice", "local:alice"] {
+			let history = db.get_student_history(id).unwrap();
+			assert_eq!(history.len(), 1, "no history for '{id}'");
+			assert_eq!(history[0].1.student_name.as_deref(), Some("Alice Smith"));
+			assert_eq!(db.get_student_name(id), "Alice Smith");
+		}
+	}
+
+	#[test]
+	fn test_a_csv_import_does_not_erase_a_stored_canvas_id() {
+		let db = Database::open_memory().unwrap();
+		// First a Canvas-sourced import, which knows the Canvas id...
+		let mut from_canvas = Roster::from_pairs(&[("alice", "Alice")]);
+		from_canvas.entries[0].canvas_user_id = Some(4242);
+		db.import_roster(&from_canvas).unwrap();
+
+		// ...then a CSV, which never carries one. It must not null the id out, or grade
+		// push loses the only thing it can key on.
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Wu")]))
+			.unwrap();
+
+		let stored = db.get_student("alice").unwrap().unwrap();
+		assert_eq!(stored.name.as_deref(), Some("Alice Wu"));
+		assert_eq!(stored.canvas_id, Some(4242));
+	}
+
+	#[test]
+	fn test_an_errored_report_is_not_graded() {
+		let mut reports = vec![StudentReport {
+			student_id: "alice".to_string(),
+			submission_state: Some(SubmissionOutcome::Executable),
+			error: Some("grading task failed: panicked".to_string()),
+			..Default::default()
+		}];
+		assert!(!reports[0].is_gradeable());
+
+		crate::grading::apply_grading(&mut reports, &GradingPolicy::default());
+		// An infrastructure failure must not become a defensible-looking number.
+		assert_eq!(reports[0].final_grade, None);
+	}
+
+	#[test]
+	fn test_average_ignores_ungraded_students() {
+		let db = Database::open_memory().unwrap();
+		let reports = vec![
+			StudentReport {
+				student_id: "alice".to_string(),
+				final_grade: Some(90.0),
+				..Default::default()
+			},
+			StudentReport {
+				student_id: "absent".to_string(),
+				submission_state: Some(SubmissionOutcome::NotSubmitted),
+				..Default::default()
+			},
+		];
+
+		db.save_session("hw5", &reports, None).unwrap();
+		let sessions = db.list_sessions().unwrap();
+		assert_eq!(sessions[0].student_count, 2);
+		// A missing grade is not a zero, so it must not halve the mean.
+		assert!((sessions[0].avg_grade - 90.0).abs() < 0.1);
 	}
 }

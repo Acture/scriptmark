@@ -5,9 +5,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use scriptmark::discovery::discover_submissions;
+use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::grading::apply_grading;
-use scriptmark::models::{FormulaPolicy, GradingPolicy, TemplatePolicy};
+use scriptmark::models::{
+	Assignment, AssignmentInput, AttemptPolicy, DiagnosticSeverity, FormulaPolicy, GradingItem,
+	GradingPolicy, StudentKey, SubmissionOutcome, TemplatePolicy, TestSpec,
+};
 use scriptmark::roster::load_roster;
 use scriptmark::runner::orchestrator;
 use scriptmark::runner::python::PythonExecutor;
@@ -67,6 +70,10 @@ struct GradeArgs {
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
 
+	/// Path to assignment.toml. Defaults to one beside the tests directory.
+	#[arg(long)]
+	assignment: Option<PathBuf>,
+
 	/// Grading template: none, linear, sqrt, log, strict (default: sqrt)
 	#[arg(short = 'g', long, default_value = "sqrt")]
 	grading: String,
@@ -118,6 +125,14 @@ struct RunArgs {
 	/// Output file for raw results (JSON)
 	#[arg(short, long, default_value = "output/results.json")]
 	output: PathBuf,
+
+	/// Path to roster CSV (name,_,student_id)
+	#[arg(short, long)]
+	roster: Option<PathBuf>,
+
+	/// Path to assignment.toml. Defaults to one beside the tests directory.
+	#[arg(long)]
+	assignment: Option<PathBuf>,
 
 	/// Per-test timeout in seconds
 	#[arg(long, default_value = "10")]
@@ -281,6 +296,155 @@ fn build_grading_policy(grading: &str, formula: Option<&str>, range: (f64, f64))
 	}
 }
 
+/// Load `assignment.toml`, explicitly or from beside the tests directory.
+///
+/// An explicit path that cannot be read or parsed is an error; an absent default is not.
+fn load_assignment(
+	explicit: Option<&PathBuf>,
+	tests_dir: &std::path::Path,
+) -> Result<(Assignment, AttemptPolicy)> {
+	let path = match explicit {
+		Some(path) => Some(path.clone()),
+		None => [tests_dir.parent(), Some(tests_dir)]
+			.into_iter()
+			.flatten()
+			.map(|dir| dir.join("assignment.toml"))
+			.find(|candidate| candidate.is_file()),
+	};
+
+	let Some(path) = path else {
+		// Fall back to the directory name, which is what the db session has always used.
+		let name = tests_dir
+			.parent()
+			.and_then(|p| p.file_name())
+			.or_else(|| tests_dir.file_name())
+			.and_then(|n| n.to_str())
+			.unwrap_or("unknown");
+		return Ok((Assignment::named(name), AttemptPolicy::default()));
+	};
+
+	let config = scriptmark::spec_loader::load_assignment_config(&path)
+		.with_context(|| format!("Failed to load {}", path.display()))?;
+	Ok((
+		Assignment {
+			name: config.assignment.name,
+			canvas_course_id: config.assignment.canvas_course_id,
+			canvas_assignment_id: config.assignment.canvas_assignment_id,
+			items: config.items,
+		},
+		config.assignment.attempt_policy,
+	))
+}
+
+/// Reconcile the declared grading items against the specs that were actually loaded.
+///
+/// Undeclared items are derived from the specs, so `Assignment.items` is always populated
+/// and every `TestResult.item_id` names one of them. A declared item with no spec, or a
+/// spec naming no declared item, is reported rather than silently ignored.
+fn reconcile_items(assignment: &mut Assignment, specs: &[TestSpec]) {
+	if assignment.items.is_empty() {
+		assignment.items = specs
+			.iter()
+			.map(|spec| GradingItem::new(&spec.meta.name))
+			.collect();
+		return;
+	}
+
+	for spec in specs {
+		if assignment.item(&spec.meta.name).is_none() {
+			eprintln!(
+				"  warning: test spec '{}' is not a declared grading item",
+				spec.meta.name
+			);
+		}
+	}
+	for item in &assignment.items {
+		if !specs.iter().any(|spec| spec.meta.name == item.id) {
+			eprintln!("  warning: grading item '{}' has no test spec", item.id);
+		}
+	}
+}
+
+/// Build the unified input from local directories.
+fn build_local_input(
+	submissions: &[PathBuf],
+	tests_dir: &std::path::Path,
+	assignment_path: Option<&PathBuf>,
+	roster_path: Option<&PathBuf>,
+) -> Result<AssignmentInput> {
+	let (assignment, attempt_policy) = load_assignment(assignment_path, tests_dir)?;
+
+	let roster = match roster_path {
+		Some(path) => Some(load_roster(path).context("Failed to load roster")?),
+		None => None,
+	};
+
+	let input = load_local_input(
+		submissions,
+		LocalInputOptions {
+			assignment,
+			roster: roster.as_ref(),
+			attempt_policy,
+		},
+	)
+	.context("Failed to discover submissions")?;
+
+	report_input(&input);
+
+	// An Error diagnostic means the input cannot be trusted — a roster that disagrees with
+	// itself about who a 学号 belongs to would attribute somebody's work to the wrong name.
+	// Stop before running anything rather than producing results nobody should act on.
+	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
+	if !errors.is_empty() {
+		anyhow::bail!(
+			"refusing to grade: {} problem(s) with the input\n  {}",
+			errors.len(),
+			errors.join("\n  ")
+		);
+	}
+
+	Ok(input)
+}
+
+/// Print the import summary and every anomaly the adapters recorded. Adapters never print
+/// themselves — this is the only place diagnostics reach a terminal.
+fn report_input(input: &AssignmentInput) {
+	use owo_colors::OwoColorize;
+
+	let counts = [
+		(SubmissionOutcome::Executable, "executable"),
+		(SubmissionOutcome::SubmittedEmpty, "submitted but empty"),
+		(SubmissionOutcome::ReceivedUnmatched, "received, unmatched"),
+		(SubmissionOutcome::NotSubmitted, "not submitted"),
+	];
+	println!("Found {} students:", input.student_count());
+	for (outcome, label) in counts {
+		let n = input.with_outcome(outcome).count();
+		if n > 0 {
+			println!("  {n:>4}  {label}");
+		}
+	}
+	if !input.unmatched.is_empty() {
+		println!(
+			"  {:>4}  files with no identifiable owner",
+			input.unmatched.len()
+		);
+	}
+
+	let errors = input.diagnostics_of(DiagnosticSeverity::Error).count();
+	let warnings = input.diagnostics_of(DiagnosticSeverity::Warning).count();
+	for diagnostic in &input.diagnostics {
+		match diagnostic.severity {
+			DiagnosticSeverity::Error => println!("  {} {diagnostic}", "error:".red()),
+			DiagnosticSeverity::Warning => println!("  {} {diagnostic}", "warning:".yellow()),
+			DiagnosticSeverity::Info => println!("  {} {diagnostic}", "note:".dimmed()),
+		}
+	}
+	if errors + warnings > 0 {
+		println!("  ({errors} errors, {warnings} warnings)");
+	}
+}
+
 fn parse_range(s: &str) -> Result<(f64, f64), String> {
 	let parts: Vec<&str> = s.split(',').collect();
 	if parts.len() != 2 {
@@ -309,32 +473,27 @@ async fn main() -> Result<()> {
 }
 
 async fn cmd_grade(args: GradeArgs) -> Result<()> {
-	// 1. Discover submissions
-	let submissions = discover_submissions(
-		&args
-			.submissions
-			.iter()
-			.map(|p| p.as_path())
-			.collect::<Vec<_>>(),
-		None,
-	)
-	.context("Failed to discover submissions")?;
-
-	println!(
-		"Found {} students in {} directories",
-		submissions.student_count(),
-		args.submissions.len()
-	);
+	// 1. Build the unified input — names, roster membership and submission state all come
+	//    from the model, so there is no separate roster merge afterwards.
+	let input = build_local_input(
+		&args.submissions,
+		&args.tests_dir,
+		args.assignment.as_ref(),
+		args.roster.as_ref(),
+	)?;
 
 	// 2. Load test specs
 	let specs =
 		load_specs_from_dir(&args.tests_dir).context("Failed to load test specifications")?;
 	println!("Loaded {} test specs", specs.len());
 
+	let mut input = input;
+	reconcile_items(&mut input.assignment, &specs);
+
 	// 3. Run tests
 	let executor = PythonExecutor::with_python_cmd(&args.python);
-	let mut results = orchestrator::run_all(
-		&submissions,
+	let mut reports = orchestrator::run_all(
+		&input.students,
 		&specs,
 		&executor,
 		args.timeout,
@@ -342,19 +501,8 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	)
 	.await;
 
-	// 4. Load roster and merge names
-	if let Some(roster_path) = &args.roster {
-		let roster = load_roster(roster_path).context("Failed to load roster")?;
-		for (sid, report) in results.iter_mut() {
-			if let Some(name) = roster.get(sid) {
-				report.student_name = Some(name.clone());
-			}
-		}
-	}
-
-	// 5. Apply grading policy
+	// 4. Apply grading policy
 	let policy = build_grading_policy(&args.grading, args.formula.as_deref(), args.range);
-	let mut reports: Vec<_> = results.into_values().collect();
 	apply_grading(&mut reports, &policy);
 	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
 
@@ -391,7 +539,8 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 				wtr.write_record([
 					"student_name",
 					"student_id",
-					"spec_name",
+					"submission_state",
+					"item_id",
 					"case_name",
 					"status",
 					"actual",
@@ -400,12 +549,19 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 					"elapsed_ms",
 				])?;
 				for report in &reports {
+					let state = report
+						.submission_state
+						.map(|s| format!("{s:?}"))
+						.unwrap_or_default();
+					let mut rows = 0usize;
 					for test_result in &report.test_results {
 						for case in &test_result.cases {
+							rows += 1;
 							wtr.write_record([
 								report.student_name.as_deref().unwrap_or(""),
 								&report.student_id,
-								&test_result.spec_name,
+								&state,
+								&test_result.item_id,
 								&case.case_name,
 								&format!("{:?}", case.status),
 								case.actual.as_deref().unwrap_or(""),
@@ -417,6 +573,28 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 								&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
 							])?;
 						}
+					}
+					// Every student gets at least one row, so the CSV covers the same cohort
+					// as the JSON archive rather than quietly dropping non-submitters — and
+					// a spec that produced no cases at all out of the denominator too.
+					if rows == 0 {
+						wtr.write_record([
+							report.student_name.as_deref().unwrap_or(""),
+							&report.student_id,
+							&state,
+							"",
+							"",
+							if report.error.is_some() {
+								"Error".to_string()
+							} else {
+								format!("{:?}", report.status())
+							}
+							.as_str(),
+							"",
+							"",
+							report.error.as_deref().unwrap_or(""),
+							"",
+						])?;
 					}
 				}
 				wtr.flush()?;
@@ -433,25 +611,14 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 		let database =
 			scriptmark::db::Database::open(db_path).context("Failed to open database")?;
 
-		// Import roster if we loaded one
-		if let Some(roster_path) = &args.roster
-			&& let Ok(roster) = scriptmark::roster::load_roster(roster_path)
-		{
-			let _ = database.import_roster(&roster);
+		if let Some(roster) = &input.roster {
+			database
+				.import_roster(roster)
+				.context("Failed to import roster")?;
 		}
 
-		// Derive assignment name: try parent dir name (e.g. "hw5" from "courses/geec/hw5/tests")
-		// then fall back to tests_dir name, then "unknown"
-		let assignment = args
-			.tests_dir
-			.parent()
-			.and_then(|p| p.file_name())
-			.and_then(|n| n.to_str())
-			.or_else(|| args.tests_dir.file_name().and_then(|n| n.to_str()))
-			.unwrap_or("unknown");
-
 		let session_id = database
-			.save_session(assignment, &reports, None)
+			.save_session(&input.assignment.name, &reports, None)
 			.context("Failed to save session to database")?;
 
 		println!(
@@ -465,29 +632,24 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 }
 
 async fn cmd_run(args: RunArgs) -> Result<()> {
-	let submissions = discover_submissions(
-		&args
-			.submissions
-			.iter()
-			.map(|p| p.as_path())
-			.collect::<Vec<_>>(),
-		None,
-	)
-	.context("Failed to discover submissions")?;
-
-	println!(
-		"Found {} students in {} directories",
-		submissions.student_count(),
-		args.submissions.len()
-	);
+	let input = build_local_input(
+		&args.submissions,
+		&args.tests_dir,
+		args.assignment.as_ref(),
+		args.roster.as_ref(),
+	)?;
 
 	let specs =
 		load_specs_from_dir(&args.tests_dir).context("Failed to load test specifications")?;
 	println!("Loaded {} test specs", specs.len());
 
+	let mut input = input;
+	reconcile_items(&mut input.assignment, &specs);
+
 	let executor = PythonExecutor::with_python_cmd(&args.python);
+	// A JSON array, the same shape `grade` writes and `summarize` reads.
 	let results = orchestrator::run_all(
-		&submissions,
+		&input.students,
 		&specs,
 		&executor,
 		args.timeout,
@@ -513,8 +675,13 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 	if let Some(roster_path) = &args.roster {
 		let roster = load_roster(roster_path).context("Failed to load roster")?;
 		for report in reports.iter_mut() {
-			if let Some(name) = roster.get(&report.student_id) {
-				report.student_name = Some(name.clone());
+			// `student_id` is a rendered key, so it is parsed back rather than compared as
+			// text — otherwise a run made without --roster, whose ids carry a `local:`
+			// prefix, would match nothing. `name_of` answers only when the key is
+			// unambiguous: with duplicate roster rows there is no single right name, and
+			// guessing one would hide the clash.
+			if let Some(name) = roster.name_of(&StudentKey::parse(&report.student_id)) {
+				report.student_name = Some(name.to_string());
 			}
 		}
 	}
@@ -558,19 +725,21 @@ async fn cmd_grades_push(args: GradesPushArgs) -> Result<()> {
 	let reports: Vec<scriptmark::models::StudentReport> =
 		serde_json::from_str(&content).context("Failed to parse results JSON")?;
 
-	// Build grades map: try to parse student_id as u64 (Canvas user ID)
+	// Only students who actually ran code get a score pushed. Parsing student_id as an
+	// integer would either fail for every 学号 or, worse, succeed and post to whichever
+	// Canvas user happened to hold that number.
 	let mut grades = std::collections::HashMap::new();
+	let mut skipped = 0usize;
 	for report in &reports {
-		if let Some(grade) = report.final_grade {
-			if let Ok(uid) = report.student_id.parse::<u64>() {
+		match (report.final_grade, report.canvas_user_id) {
+			(Some(grade), Some(uid)) if report.is_gradeable() => {
 				grades.insert(uid, grade);
-			} else {
-				eprintln!(
-					"Warning: cannot push grade for '{}' — student_id is not a Canvas user ID",
-					report.student_id
-				);
 			}
+			_ => skipped += 1,
 		}
+	}
+	if skipped > 0 {
+		println!("Skipping {skipped} students with no grade or no Canvas user id");
 	}
 
 	println!(
@@ -718,10 +887,13 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 		DbAction::ImportRoster { roster, db } => {
 			let database =
 				scriptmark::db::Database::open(&db).context("Failed to open database")?;
-			let roster_map =
+			let roster_csv =
 				scriptmark::roster::load_roster(&roster).context("Failed to load roster CSV")?;
+			for diagnostic in &roster_csv.diagnostics {
+				println!("  warning: {diagnostic}");
+			}
 			let count = database
-				.import_roster(&roster_map)
+				.import_roster(&roster_csv)
 				.context("Failed to import roster")?;
 			println!("Imported {} students into {}", count, db.display());
 			Ok(())
@@ -773,18 +945,21 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 			);
 			println!("{}", "-".repeat(75));
 			for (session, result) in &history {
-				let grade_color = if result.final_grade >= 90.0 {
-					"\x1b[32m"
-				} else if result.final_grade >= 70.0 {
-					"\x1b[34m"
-				} else {
-					"\x1b[31m"
+				let grade_color = match result.final_grade {
+					Some(g) if g >= 90.0 => "\x1b[32m",
+					Some(g) if g >= 70.0 => "\x1b[34m",
+					Some(_) => "\x1b[31m",
+					None => "\x1b[2m",
 				};
+				let grade_text = result
+					.final_grade
+					.map(|g| format!("{g:.1}"))
+					.unwrap_or_else(|| "-".to_string());
 				println!(
-					"{:<15}  {}{:>7.1}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
+					"{:<15}  {}{:>7}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
 					session.assignment,
 					grade_color,
-					result.final_grade,
+					grade_text,
 					result.pass_rate,
 					result.passed_cases,
 					result.total_cases,

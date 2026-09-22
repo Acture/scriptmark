@@ -1,0 +1,181 @@
+{
+  "course_id": 5510,
+  "assignment_id": 88120,
+  "assignment_name": "hw1",
+  "users": [
+    {
+      "id": 101,
+      "name": "Alice Wu",
+      "sortable_name": "Wu, Alice",
+      "sis_user_id": "2024010001",
+      "login_id": "awu"
+    },
+    {
+      "id": 102,
+      "name": "Bob Lin",
+      "sortable_name": "Lin, Bob",
+      "sis_user_id": "2024010002",
+      "login_id": "blin"
+    },
+    {
+      "id": 103,
+      "name": "Carol Zero",
+      "sortable_name": "Zero, Carol",
+      "sis_user_id": "0024010003",
+      "login_id": "czero"
+    },
+    {
+      "id": 104,
+      "name": "Dave Nozero",
+      "sortable_name": "Nozero, Dave",
+      "sis_user_id": "24010003",
+      "login_id": "dnozero"
+    },
+    {
+      "id": 105,
+      "name": "Dan Absent",
+      "sortable_name": "Absent, Dan",
+      "sis_user_id": "2024010004",
+      "login_id": "dabsent"
+    },
+    {
+      "id": 106,
+      "name": "Eve Empty",
+      "sortable_name": "Empty, Eve",
+      "sis_user_id": "2024010005",
+      "login_id": "eempty"
+    }
+  ],
+  "submissions": [
+    {
+      "id": 9101,
+      "user_id": 101,
+      "attempt": 1,
+      "workflow_state": "submitted",
+      "submitted_at": "2026-03-01T09:00:00Z",
+      "submission_type": "online_upload",
+      "attachments": [
+        {
+          "id": 1001,
+          "filename": "lab1.py",
+          "display_name": "lab1.py",
+          "content_type": "text/x-python",
+          "size": 52,
+          "url": "https://canvas.invalid/files/1001/download"
+        }
+      ]
+    },
+    {
+      "id": 9102,
+      "user_id": 102,
+      "attempt": 2,
+      "workflow_state": "submitted",
+      "submitted_at": "2026-03-02T22:10:00Z",
+      "late": true,
+      "submission_type": "online_upload",
+      "attachments": [
+        {
+          "id": 1003,
+          "filename": "lab1.py",
+          "display_name": "lab1.py",
+          "content_type": "text/x-python",
+          "size": 52,
+          "url": "https://canvas.invalid/files/1003/download"
+        }
+      ],
+      "submission_history": [
+        {
+          "id": 9102,
+          "user_id": 102,
+          "attempt": 2,
+          "workflow_state": "submitted",
+          "submitted_at": "2026-03-02T22:10:00Z",
+          "late": true,
+          "submission_type": "online_upload",
+          "attachments": [
+            {
+              "id": 1003,
+              "filename": "lab1.py",
+              "display_name": "lab1.py",
+              "content_type": "text/x-python",
+              "size": 52,
+              "url": "https://canvas.invalid/files/1003/download"
+            }
+          ]
+        },
+        {
+          "id": 9102,
+          "user_id": 102,
+          "attempt": 1,
+          "workflow_state": "submitted",
+          "submitted_at": "2026-03-01T08:00:00Z",
+          "submission_type": "online_upload",
+          "attachments": [
+            {
+              "id": 1002,
+              "filename": "draft.py",
+              "display_name": "draft.py",
+              "content_type": "text/x-python",
+              "size": 52,
+              "url": "https://canvas.invalid/files/1002/download"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 9103,
+      "user_id": 103,
+      "attempt": 1,
+      "workflow_state": "submitted",
+      "submitted_at": "2026-03-01T10:00:00Z",
+      "submission_type": "online_upload",
+      "attachments": [
+        {
+          "id": 1004,
+          "filename": "lab1.py",
+          "display_name": "lab1.py",
+          "content_type": "text/x-python",
+          "size": 52,
+          "url": "https://canvas.invalid/files/1004/download"
+        }
+      ]
+    },
+    {
+      "id": 9104,
+      "user_id": 104,
+      "attempt": 1,
+      "workflow_state": "submitted",
+      "submitted_at": "2026-03-01T11:00:00Z",
+      "submission_type": "online_upload",
+      "attachments": [
+        {
+          "id": 1005,
+          "filename": "lab1.py",
+          "display_name": "lab1.py",
+          "content_type": "text/x-python",
+          "size": 52,
+          "url": "https://canvas.invalid/files/1005/download"
+        }
+      ]
+    },
+    {
+      "id": 0,
+      "user_id": 105,
+      "attempt": null,
+      "workflow_state": "unsubmitted",
+      "submitted_at": null,
+      "missing": true,
+      "attachments": []
+    },
+    {
+      "id": 9106,
+      "user_id": 106,
+      "attempt": 1,
+      "workflow_state": "submitted",
+      "submitted_at": "2026-03-01T12:00:00Z",
+      "submission_type": "online_upload",
+      "attachments": []
+    }
+  ]
+}
