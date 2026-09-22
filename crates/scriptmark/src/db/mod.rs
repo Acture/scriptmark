@@ -311,6 +311,28 @@ mod tests {
 	}
 
 	#[test]
+	fn test_an_ambiguous_key_clears_a_previously_stored_canvas_id() {
+		let db = Database::open_memory().unwrap();
+		let mut from_canvas = Roster::from_pairs(&[("alice", "Alice")]);
+		from_canvas.entries[0].canvas_user_id = Some(4242);
+		db.import_roster(&from_canvas).unwrap();
+		assert_eq!(
+			db.get_student("alice").unwrap().unwrap().canvas_id,
+			Some(4242)
+		);
+
+		// The roster now says this id belongs to two people, so 4242 is attributable to
+		// at most one of them — keeping it would be a silent guess, the same one the name
+		// column already refuses to make.
+		db.import_roster(&Roster::from_pairs(&[
+			("alice", "Alice"),
+			("alice", "Alice Chen"),
+		]))
+		.unwrap();
+		assert_eq!(db.get_student("alice").unwrap().unwrap().canvas_id, None);
+	}
+
+	#[test]
 	fn test_a_csv_import_does_not_erase_a_stored_canvas_id() {
 		let db = Database::open_memory().unwrap();
 		// First a Canvas-sourced import, which knows the Canvas id...

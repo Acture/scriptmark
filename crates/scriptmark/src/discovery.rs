@@ -95,16 +95,29 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 	};
 
 	// Sort: read_dir order is not stable across filesystems.
-	let mut archives: Vec<PathBuf> = entries
-		.flatten()
-		.map(|e| e.path())
-		.filter(|p| {
-			p.is_file()
-				&& p.extension()
-					.and_then(|e| e.to_str())
-					.is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-		})
-		.collect();
+	let mut archives: Vec<PathBuf> = Vec::new();
+	for entry in entries {
+		let Ok(path) = entry.map(|entry| entry.path()) else {
+			continue;
+		};
+		let is_zip = path
+			.extension()
+			.and_then(|e| e.to_str())
+			.is_some_and(|e| e.eq_ignore_ascii_case("zip"));
+		if !is_zip {
+			continue;
+		}
+		match std::fs::metadata(&path) {
+			Ok(meta) if meta.is_file() => archives.push(path),
+			Ok(_) => {}
+			Err(e) => diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::UnreadableDirEntry {
+					dir: dir.to_path_buf(),
+					reason: format!("{}: {e}", path.display()),
+				},
+			)),
+		}
+	}
 	archives.sort();
 
 	for archive_path in archives {
@@ -348,10 +361,22 @@ pub fn load_local_input(
 
 		let mut files: Vec<PathBuf> = Vec::new();
 		for entry in entries {
-			match entry {
-				Ok(entry) if entry.path().is_file() => files.push(entry.path()),
-				Ok(_) => {}
-				// A directory entry we cannot stat may well be a submission.
+			// Not `path().is_file()`: that turns a metadata failure into "not a file", so
+			// a submission we merely failed to stat would be read as 缺交. `fs::metadata`
+			// follows symlinks exactly as `is_file()` did, but hands back the error.
+			// (`DirEntry::metadata` would not — on Unix it is `symlink_metadata`, which
+			// would silently stop grading symlinked submissions.)
+			match entry.map(|entry| entry.path()) {
+				Ok(path) => match std::fs::metadata(&path) {
+					Ok(meta) if meta.is_file() => files.push(path),
+					Ok(_) => {}
+					Err(e) => diagnostics.push(InputDiagnostic::warning(
+						DiagnosticKind::UnreadableDirEntry {
+							dir: dir_path.clone(),
+							reason: format!("{}: {e}", path.display()),
+						},
+					)),
+				},
 				Err(e) => diagnostics.push(InputDiagnostic::warning(
 					DiagnosticKind::UnreadableDirEntry {
 						dir: dir_path.clone(),
@@ -710,6 +735,49 @@ mod tests {
 				.iter()
 				.any(|d| matches!(&d.kind, DiagnosticKind::IgnoredFile { .. }))
 		);
+	}
+
+	#[test]
+	fn test_a_file_we_cannot_stat_is_reported_not_treated_as_absent() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("2024010001_lab1.py"), "pass").unwrap();
+		// A dangling symlink: `metadata()` fails on it exactly as it would for a file
+		// whose metadata cannot be read.
+		std::os::unix::fs::symlink(
+			dir.path().join("gone.py"),
+			dir.path().join("2024010002_lab1.py"),
+		)
+		.unwrap();
+
+		let input = scan(dir.path());
+
+		// The healthy submission is unaffected...
+		assert_eq!(input.student_count(), 1);
+		// ...and the one we could not stat leaves a trace rather than vanishing.
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::UnreadableDirEntry { .. })),
+			"expected an UnreadableDirEntry diagnostic, got {:?}",
+			input.diagnostics
+		);
+	}
+
+	#[test]
+	fn test_a_symlinked_submission_is_still_graded() {
+		let dir = tempfile::tempdir().unwrap();
+		// The target lives outside the scanned directory, so only the link is discovered.
+		let elsewhere = tempfile::tempdir().unwrap();
+		let real = elsewhere.path().join("real.py");
+		std::fs::write(&real, "pass").unwrap();
+		std::os::unix::fs::symlink(&real, dir.path().join("2024010001_lab1.py")).unwrap();
+
+		// `is_file()` followed symlinks, so switching to a non-following stat would have
+		// quietly stopped grading these.
+		let input = scan(dir.path());
+		assert_eq!(input.student_count(), 1);
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
 	}
 
 	#[test]
