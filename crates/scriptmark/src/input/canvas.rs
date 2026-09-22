@@ -49,7 +49,12 @@ pub struct CanvasAttachmentPayload {
 	pub filename: Option<String>,
 	#[serde(default)]
 	pub display_name: Option<String>,
-	#[serde(default)]
+	/// Canvas spells this with a hyphen: its attachment serialiser emits
+	/// `"content-type" => attachment.content_type`. Without the rename this field never
+	/// populated from a real payload — only from our own underscore-spelled fixtures,
+	/// which is why the gap survived P-669. `rename` makes the wire spelling the one we
+	/// write back out, so a saved bundle round-trips; `alias` keeps those fixtures loading.
+	#[serde(default, rename = "content-type", alias = "content_type")]
 	pub content_type: Option<String>,
 	#[serde(default)]
 	pub size: Option<u64>,
@@ -496,6 +501,39 @@ mod tests {
 			login_id: None,
 			email: None,
 		}
+	}
+
+	/// Canvas emits `"content-type"`; P-669's fixtures used `"content_type"`. Both have to
+	/// load, or either the real API or every existing fixture silently yields `None`.
+	#[test]
+	fn test_both_content_type_spellings_deserialise() {
+		let hyphen: CanvasAttachmentPayload =
+			serde_json::from_str(r#"{"id":1,"content-type":"text/x-python"}"#).unwrap();
+		assert_eq!(hyphen.content_type.as_deref(), Some("text/x-python"));
+
+		let underscore: CanvasAttachmentPayload =
+			serde_json::from_str(r#"{"id":1,"content_type":"text/x-python"}"#).unwrap();
+		assert_eq!(underscore.content_type.as_deref(), Some("text/x-python"));
+
+		// A payload that simply omits it is not an error.
+		let absent: CanvasAttachmentPayload = serde_json::from_str(r#"{"id":1}"#).unwrap();
+		assert_eq!(absent.content_type, None);
+	}
+
+	/// A saved bundle is re-read by the same struct, so what we write must be what we can
+	/// read back — the whole point of `rename` over a bare `alias`.
+	#[test]
+	fn test_a_saved_payload_round_trips_its_content_type() {
+		let original = attachment(1, "lab1.py");
+		let json = serde_json::to_string(&original).unwrap();
+		assert!(
+			json.contains(r#""content-type""#),
+			"the wire spelling is what gets written, got {json}"
+		);
+
+		let reloaded: CanvasAttachmentPayload = serde_json::from_str(&json).unwrap();
+		assert_eq!(reloaded, original);
+		assert_eq!(reloaded.content_type.as_deref(), Some("text/x-python"));
 	}
 
 	fn attachment(id: u64, name: &str) -> CanvasAttachmentPayload {
