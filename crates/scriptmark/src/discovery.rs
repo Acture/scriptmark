@@ -672,6 +672,62 @@ mod tests {
 		assert_eq!(bob_again.files()[0].origin, bob.files()[0].origin);
 	}
 
+	/// Characterisation test for the zip-bomb guards, written before P-670 lifts this loop
+	/// into a shared `expand_archive` that Canvas attachments also feed. An oversized entry
+	/// must be reported and skipped *without* taking its archive-mates down with it — the
+	/// rollback of the claim, the provenance and the counters is the part a refactor is
+	/// most likely to break silently.
+	#[test]
+	fn test_an_oversized_archive_entry_is_skipped_without_losing_its_neighbours() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("dave_Lab5.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		use std::io::Write;
+
+		// Zero-filled, so 6 MB of declared size deflates to a few KB on disk.
+		zip.start_file("big.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(&vec![0u8; (MAX_FILE_SIZE + 1_000_000) as usize])
+			.unwrap();
+		zip.start_file("good.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(b"def foo(): return 42").unwrap();
+		zip.finish().unwrap();
+
+		let input = scan(dir.path());
+
+		let skipped: Vec<&InputDiagnostic> = input
+			.diagnostics
+			.iter()
+			.filter(|d| matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { .. }))
+			.collect();
+		assert_eq!(
+			skipped.len(),
+			1,
+			"expected exactly one skipped entry, got {:?}",
+			input.diagnostics
+		);
+		assert!(
+			matches!(
+				&skipped[0].kind,
+				DiagnosticKind::ArchiveEntrySkipped { entry, reason, .. }
+					if entry == "big.py" && reason.contains(&MAX_FILE_SIZE.to_string())
+			),
+			"the diagnostic must name the entry and the limit it broke, got {:?}",
+			skipped[0].kind
+		);
+
+		// The neighbour still arrives, and the oversized entry left nothing behind.
+		let dave = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "dave")
+			.expect("dave");
+		let names: Vec<String> = dave.files().iter().map(|f| f.file_name()).collect();
+		assert_eq!(names, vec!["good.py".to_string()]);
+	}
+
 	#[test]
 	fn test_archive_name_collision_is_reported_not_dropped() {
 		let dir = tempfile::tempdir().unwrap();
