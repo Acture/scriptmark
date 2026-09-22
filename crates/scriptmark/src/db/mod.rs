@@ -175,11 +175,11 @@ mod tests {
 	}
 
 	#[test]
-	fn test_import_roster_counts_rows_stored_not_rows_iterated() {
+	fn test_import_roster_counts_rows_stored() {
 		let db = Database::open_memory().unwrap();
-		// The roster keeps both rows; the primary key can only hold one.
-		let roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice Chen")]);
-		assert_eq!(roster.len(), 2);
+		// A repeated row is merged before it ever reaches the database.
+		let roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice")]);
+		assert_eq!(roster.len(), 1);
 		assert_eq!(db.import_roster(&roster).unwrap(), 1);
 	}
 
@@ -292,44 +292,6 @@ mod tests {
 			assert_eq!(history[0].1.student_name.as_deref(), Some("Alice Smith"));
 			assert_eq!(db.get_student_name(id), "Alice Smith");
 		}
-	}
-
-	#[test]
-	fn test_an_ambiguous_roster_key_stores_neither_name_nor_canvas_id() {
-		let db = Database::open_memory().unwrap();
-		let mut roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice Chen")]);
-		roster.entries[0].canvas_user_id = Some(1);
-		roster.entries[1].canvas_user_id = Some(2);
-		db.import_roster(&roster).unwrap();
-
-		// `Roster::name_of` refuses to pick a winner; the database must not either — and
-		// the same goes for the Canvas id, where taking the last row would silently point
-		// later Canvas operations at one of two different people.
-		let stored = db.get_student("alice").unwrap().unwrap();
-		assert_eq!(stored.name, None);
-		assert_eq!(stored.canvas_id, None);
-	}
-
-	#[test]
-	fn test_an_ambiguous_key_clears_a_previously_stored_canvas_id() {
-		let db = Database::open_memory().unwrap();
-		let mut from_canvas = Roster::from_pairs(&[("alice", "Alice")]);
-		from_canvas.entries[0].canvas_user_id = Some(4242);
-		db.import_roster(&from_canvas).unwrap();
-		assert_eq!(
-			db.get_student("alice").unwrap().unwrap().canvas_id,
-			Some(4242)
-		);
-
-		// The roster now says this id belongs to two people, so 4242 is attributable to
-		// at most one of them — keeping it would be a silent guess, the same one the name
-		// column already refuses to make.
-		db.import_roster(&Roster::from_pairs(&[
-			("alice", "Alice"),
-			("alice", "Alice Chen"),
-		]))
-		.unwrap();
-		assert_eq!(db.get_student("alice").unwrap().unwrap().canvas_id, None);
 	}
 
 	#[test]

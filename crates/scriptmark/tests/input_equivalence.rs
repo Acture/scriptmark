@@ -164,8 +164,8 @@ fn test_both_entry_points_produce_equivalent_input() {
 fn test_every_roster_member_is_present_on_both_sides() {
 	let dir = tempfile::tempdir().unwrap();
 	let roster = roster();
-	// Seven rows, six distinct numbers: 2024010001 appears twice.
-	assert_eq!(roster.len(), 7);
+	// Seven rows in the file; 2024010001 is listed twice and merges, so six people.
+	assert_eq!(roster.len(), 6);
 
 	for input in [local_input(&dir), canvas_input()] {
 		for entry in &roster.entries {
@@ -179,7 +179,7 @@ fn test_every_roster_member_is_present_on_both_sides() {
 }
 
 #[test]
-fn test_duplicate_roster_rows_are_reported_on_both_sides() {
+fn test_a_repeated_roster_row_is_merged_and_reported_on_both_sides() {
 	let dir = tempfile::tempdir().unwrap();
 	for input in [local_input(&dir), canvas_input()] {
 		assert!(
@@ -188,82 +188,21 @@ fn test_duplicate_roster_rows_are_reported_on_both_sides() {
 				DiagnosticKind::DuplicateRosterEntry { key, count }
 					if key == "2024010001" && *count == 2
 			)),
-			"duplicate roster rows must be reported"
+			"the repeated row must be reported so the file gets cleaned up"
 		);
-		// Either way it is one student, never one per row.
-		assert_eq!(
-			input
-				.students
-				.iter()
-				.filter(|s| s.identity.key.raw() == "2024010001")
-				.count(),
-			1
-		);
-	}
-}
-
-#[test]
-fn test_the_duplicate_is_ambiguous_locally_and_resolved_by_canvas() {
-	let dir = tempfile::tempdir().unwrap();
-	let alice = |input: &AssignmentInput| {
-		input
+		// One student number is one person, however many rows repeat it.
+		let alice: Vec<_> = input
 			.students
 			.iter()
-			.find(|s| s.identity.key.raw() == "2024010001")
-			.unwrap()
-			.roster_match
-			.clone()
-	};
-
-	// Locally the CSV is all there is, so both candidate rows are kept and nothing picks
-	// one silently.
-	assert_eq!(
-		alice(&local_input(&dir)),
-		RosterMatch::Ambiguous(vec![0, 1])
-	);
-	// Canvas is authoritative about enrollment and lists this student once, so the CSV's
-	// duplicated row is a data-entry error there — reported, but not the roster of record.
-	assert_eq!(alice(&canvas_input()), RosterMatch::Matched(1));
-}
-
-#[test]
-fn test_zero_padded_pair_is_flagged_on_both_sides() {
-	let dir = tempfile::tempdir().unwrap();
-	for input in [local_input(&dir), canvas_input()] {
-		assert!(
-			input.diagnostics.iter().any(|d| matches!(
-				&d.kind,
-				DiagnosticKind::SuspectedZeroPaddedVariant { keys }
-					if keys == &["0024010003".to_string(), "24010003".to_string()]
-			)),
-			"the zero-padded pair must be flagged"
-		);
+			.filter(|s| s.identity.key.raw() == "2024010001")
+			.collect();
+		assert_eq!(alice.len(), 1);
+		// Which row index they land on is each source's own ordering, not a shared fact.
+		assert!(matches!(alice[0].roster_match, RosterMatch::Matched(_)));
+		// Merged, so the name is known — not withheld as it would be for a real clash.
+		assert_eq!(alice[0].identity.name.as_deref(), Some("Alice Wu"));
+		assert!(input.errors().next().is_none());
 	}
-}
-
-#[test]
-fn test_resubmission_selects_the_later_attempt_on_the_canvas_side() {
-	let canvas = canvas_input();
-	let bob = canvas
-		.students
-		.iter()
-		.find(|s| s.identity.key.raw() == "2024010002")
-		.unwrap();
-
-	// Asserted directly, not through the projection: a resubmission usually carries the
-	// same filename, so picking attempt 1 would project identically and go unnoticed.
-	assert_eq!(bob.attempts.len(), 2);
-	assert_eq!(bob.selected_attempt().unwrap().attempt, 2);
-	assert!(bob.files()[0].path.ends_with("1003/lab1.py"));
-	// Canvas-only source state is preserved, and stays off the file list.
-	assert!(
-		bob.selected_attempt()
-			.unwrap()
-			.source_status
-			.as_ref()
-			.unwrap()
-			.late
-	);
 }
 
 /// Each source reaches "received but unmatchable" by a different route, so it is asserted

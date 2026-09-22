@@ -1,5 +1,5 @@
 use super::{Database, DbError};
-use crate::roster::{Roster, RosterLookup};
+use crate::roster::Roster;
 
 /// A student record from the database.
 #[derive(Debug, Clone)]
@@ -13,9 +13,8 @@ pub struct Student {
 impl Database {
 	/// Import a roster. Upserts.
 	///
-	/// Returns the number of rows actually stored, which is not the number of entries
-	/// iterated: `students.id` is a primary key, so duplicate student numbers — which the
-	/// roster deliberately keeps — collapse into one row here.
+	/// Returns the number of rows actually stored. A [`Roster`] holds at most one row per
+	/// key, so this normally equals `roster.len()`.
 	pub fn import_roster(&self, roster: &Roster) -> Result<usize, DbError> {
 		let mut stmt = self.conn.prepare(
 			"INSERT INTO students (id, name, canvas_id) VALUES (?1, ?2, ?3)
@@ -23,27 +22,16 @@ impl Database {
 			     name = excluded.name,
 			     -- A CSV roster carries no Canvas id, so writing its NULL would erase one
 			     -- an earlier Canvas import had stored, and grade push would lose it.
-			     -- An *ambiguous* key is different: the roster now says this id belongs to
-			     -- two people, so any single stored Canvas id is attributable to at most
-			     -- one of them and keeping it would be a silent guess.
-			     canvas_id = CASE
-			         WHEN ?4 THEN NULL
-			         ELSE COALESCE(excluded.canvas_id, students.canvas_id)
-			     END",
+			     canvas_id = COALESCE(excluded.canvas_id, students.canvas_id)",
 		)?;
 		let mut stored = std::collections::BTreeSet::new();
 		for entry in &roster.entries {
 			let id = entry.key.to_string();
-			// Duplicate rows have no single right name — nor a single right Canvas id.
-			// Storing either would quietly pick a winner where `Roster::name_of` and
-			// `normalize` both deliberately refuse to.
-			let unambiguous = matches!(roster.lookup(&entry.key), RosterLookup::Unique(_));
-			let (name, canvas_id) = if unambiguous {
-				(entry.name.clone(), entry.canvas_user_id.map(|id| id as i64))
-			} else {
-				(None, None)
-			};
-			stmt.execute(rusqlite::params![id, name, canvas_id, !unambiguous])?;
+			stmt.execute(rusqlite::params![
+				id,
+				entry.name,
+				entry.canvas_user_id.map(|id| id as i64),
+			])?;
 			stored.insert(id);
 		}
 		Ok(stored.len())

@@ -898,7 +898,7 @@ async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
 
 	let mut dan_identity = StudentIdentity::number("dan");
 	dan_identity.canvas_user_id = Some(105);
-	let absent = StudentSubmission::not_submitted(dan_identity, vec![1]);
+	let absent = StudentSubmission::not_submitted(dan_identity, 1);
 
 	let students = vec![alice, absent];
 	let results = orchestrator::run_all(&students, &[test_spec()], &executor, 10, Some(2)).await;

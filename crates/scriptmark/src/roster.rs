@@ -2,7 +2,9 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::{DiagnosticKind, InputDiagnostic, SourceLocation, StudentKey, normalize_key};
+use crate::models::{
+	DiagnosticKind, DiagnosticSeverity, InputDiagnostic, SourceLocation, StudentKey, normalize_key,
+};
 
 /// One roster row.
 ///
@@ -64,26 +66,6 @@ pub struct Roster {
 	pub diagnostics: Vec<InputDiagnostic>,
 }
 
-/// What a key lookup found. Duplicates make "the" matching entry a question with no single
-/// answer, so the caller is forced to decide rather than silently taking the first.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RosterLookup {
-	Unique(usize),
-	Ambiguous(Vec<usize>),
-	Missing,
-}
-
-impl RosterLookup {
-	/// Every matching row; empty when there was no match.
-	pub fn hits(&self) -> Vec<usize> {
-		match self {
-			Self::Unique(i) => vec![*i],
-			Self::Ambiguous(hits) => hits.clone(),
-			Self::Missing => Vec::new(),
-		}
-	}
-}
-
 impl Roster {
 	pub fn from_entries(entries: Vec<RosterEntry>) -> Self {
 		Self::with_diagnostics(entries, Vec::new())
@@ -93,7 +75,8 @@ impl Roster {
 		entries: Vec<RosterEntry>,
 		mut diagnostics: Vec<InputDiagnostic>,
 	) -> Self {
-		diagnostics.extend(duplicate_diagnostics(&entries));
+		let (entries, merge_diagnostics) = merge_by_key(entries);
+		diagnostics.extend(merge_diagnostics);
 		Self {
 			entries,
 			diagnostics,
@@ -118,65 +101,120 @@ impl Roster {
 		self.entries.len()
 	}
 
-	/// Exact-key lookup.
+	/// Exact-key lookup, returning the one row for that key.
 	///
 	/// A student number is compared as written, after the same trim the loader applies —
 	/// never case-folded, never zero-stripped. An unconfirmed local token and a confirmed
 	/// 学号 denote the same thing, so they match the same row; a Canvas id is a separate
 	/// namespace and only ever matches a Canvas-keyed row.
-	pub fn lookup(&self, key: &StudentKey) -> RosterLookup {
+	///
+	/// There is at most one row per key: a student number identifies one person, so rows
+	/// that merely repeat are merged on construction and rows that contradict each other
+	/// are refused.
+	pub fn lookup(&self, key: &StudentKey) -> Option<usize> {
 		let matches = |entry: &RosterEntry| match (&entry.key, key) {
 			(StudentKey::CanvasUser(a), StudentKey::CanvasUser(b)) => a == b,
 			(StudentKey::CanvasUser(_), _) | (_, StudentKey::CanvasUser(_)) => false,
 			(a, b) => a.raw() == b.raw(),
 		};
-
-		let hits: Vec<usize> = self
-			.entries
-			.iter()
-			.enumerate()
-			.filter(|(_, entry)| matches(entry))
-			.map(|(i, _)| i)
-			.collect();
-
-		match hits.len() {
-			0 => RosterLookup::Missing,
-			1 => RosterLookup::Unique(hits[0]),
-			_ => RosterLookup::Ambiguous(hits),
-		}
+		self.entries.iter().position(matches)
 	}
 
 	/// Look a student number up as written.
-	pub fn lookup_number(&self, number: &str) -> RosterLookup {
+	pub fn lookup_number(&self, number: &str) -> Option<usize> {
 		self.lookup(&StudentKey::Number(normalize_key(number)))
 	}
 
-	/// The name on a row, when there is exactly one row for that key.
+	/// Anything that makes this roster untrustworthy to grade from.
+	pub fn errors(&self) -> impl Iterator<Item = &InputDiagnostic> {
+		self.diagnostics
+			.iter()
+			.filter(|d| d.severity == DiagnosticSeverity::Error)
+	}
+
 	pub fn name_of(&self, key: &StudentKey) -> Option<&str> {
-		match self.lookup(key) {
-			RosterLookup::Unique(i) => self.entries[i].name.as_deref(),
-			_ => None,
-		}
+		self.lookup(key)
+			.and_then(|i| self.entries[i].name.as_deref())
 	}
 }
 
-fn duplicate_diagnostics(entries: &[RosterEntry]) -> Vec<InputDiagnostic> {
-	// Counted by key value rather than by its rendering: the `Display` prefixes are not
-	// escaped, so two different keys can render alike.
-	let mut counts: std::collections::BTreeMap<&StudentKey, usize> = Default::default();
-	for entry in entries {
-		*counts.entry(&entry.key).or_default() += 1;
+/// What makes two rows for one key irreconcilable, if anything.
+///
+/// Only non-empty values count: a row that simply does not know someone's name does not
+/// contradict one that does.
+fn contradiction(kept: &RosterEntry, other: &RosterEntry) -> Option<String> {
+	match (kept.name.as_deref(), other.name.as_deref()) {
+		(Some(a), Some(b)) if a != b => return Some(format!("named '{a}' and '{b}'")),
+		_ => {}
 	}
-	counts
-		.into_iter()
-		.filter(|(_, count)| *count > 1)
-		.map(|(key, count)| {
-			InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry {
+	match (kept.canvas_user_id, other.canvas_user_id) {
+		(Some(a), Some(b)) if a != b => Some(format!("Canvas ids {a} and {b}")),
+		_ => None,
+	}
+}
+
+/// Collapse rows that share a key.
+///
+/// A student number identifies one person, so repeated rows are the same person listed
+/// twice — merged, and reported so the file gets cleaned up. Rows that disagree about who
+/// that person is are a different matter: there is no answer to pick, so they are an
+/// `Error` and the run stops rather than attributing someone's work to the wrong name.
+///
+/// Rows from *different* sources are never in conflict: Canvas spelling a name differently
+/// from the teacher's spreadsheet is ordinary, and enrollment wins because it comes first.
+fn merge_by_key(entries: Vec<RosterEntry>) -> (Vec<RosterEntry>, Vec<InputDiagnostic>) {
+	let mut merged: Vec<RosterEntry> = Vec::new();
+	let mut first_seen: std::collections::BTreeMap<StudentKey, usize> = Default::default();
+	let mut repeats: std::collections::BTreeMap<StudentKey, usize> = Default::default();
+	let mut conflicted: std::collections::BTreeSet<StudentKey> = Default::default();
+	let mut diagnostics = Vec::new();
+
+	for entry in entries {
+		let Some(&i) = first_seen.get(&entry.key) else {
+			first_seen.insert(entry.key.clone(), merged.len());
+			merged.push(entry);
+			continue;
+		};
+
+		let kept = &mut merged[i];
+		if kept.source == entry.source
+			&& let Some(detail) = contradiction(kept, &entry)
+		{
+			if conflicted.insert(entry.key.clone()) {
+				let mut diagnostic =
+					InputDiagnostic::error(DiagnosticKind::ConflictingRosterEntry {
+						key: entry.key.to_string(),
+						detail,
+					});
+				diagnostic.location = entry.location.clone();
+				diagnostics.push(diagnostic);
+			}
+			continue;
+		}
+
+		*repeats.entry(entry.key.clone()).or_insert(1) += 1;
+		// Fill in only what the kept row does not already know.
+		if kept.name.is_none() {
+			kept.name = entry.name;
+		}
+		if kept.canvas_user_id.is_none() {
+			kept.canvas_user_id = entry.canvas_user_id;
+		}
+	}
+
+	for (key, count) in repeats {
+		if conflicted.contains(&key) {
+			continue;
+		}
+		diagnostics.push(InputDiagnostic::warning(
+			DiagnosticKind::DuplicateRosterEntry {
 				key: key.to_string(),
 				count,
-			})
-		})
-		.collect()
+			},
+		));
+	}
+
+	(merged, diagnostics)
 }
 
 /// Load a roster CSV.
@@ -293,7 +331,7 @@ mod tests {
 
 		let roster = load_roster(&path).unwrap();
 		assert_eq!(roster.len(), 2);
-		assert_eq!(roster.lookup_number("alice123"), RosterLookup::Unique(0));
+		assert_eq!(roster.lookup_number("alice123"), Some(0));
 		assert_eq!(roster.entries[0].name.as_deref(), Some("Alice"));
 		assert_eq!(roster.entries[1].name.as_deref(), Some("Bob"));
 		assert!(roster.diagnostics.is_empty());
@@ -318,50 +356,75 @@ mod tests {
 
 		let roster = load_roster(&path).unwrap();
 		assert_eq!(roster.len(), 2);
-		assert_eq!(roster.lookup_number("0024010003"), RosterLookup::Unique(0));
-		assert_eq!(roster.lookup_number("24010003"), RosterLookup::Unique(1));
+		assert_eq!(roster.lookup_number("0024010003"), Some(0));
+		assert_eq!(roster.lookup_number("24010003"), Some(1));
 		// Exact-text keys cannot collide, so this is not a duplicate.
 		assert!(roster.diagnostics.is_empty());
 	}
 
 	#[test]
-	fn test_duplicate_rows_are_retained_and_reported() {
+	fn test_repeated_identical_rows_are_merged_and_reported() {
 		let dir = tempfile::tempdir().unwrap();
 		let path = write(
 			&dir,
-			"name,class,student_id\nAlice,A,2024010001\nAlice Chen,B,2024010001\n",
+			"name,class,student_id\nAlice,A,2024010001\nAlice,B,2024010001\n",
 		);
 
 		let roster = load_roster(&path).unwrap();
-		// Both rows survive — a HashMap would have kept one.
-		assert_eq!(roster.len(), 2);
+		// One student number is one person, so a repeated row is that person listed twice.
+		assert_eq!(roster.len(), 1);
+		assert_eq!(roster.entries[0].name.as_deref(), Some("Alice"));
 		assert_eq!(roster.diagnostics.len(), 1);
+		assert_eq!(roster.diagnostics[0].severity, DiagnosticSeverity::Warning);
 		assert!(matches!(
 			&roster.diagnostics[0].kind,
 			DiagnosticKind::DuplicateRosterEntry { key, count }
 				if key == "2024010001" && *count == 2
 		));
+	}
 
-		assert_eq!(
-			roster.lookup_number("2024010001"),
-			RosterLookup::Ambiguous(vec![0, 1])
+	#[test]
+	fn test_a_row_that_only_knows_less_is_not_a_conflict() {
+		let dir = tempfile::tempdir().unwrap();
+		// The second row has no name — it does not contradict the first, it just knows
+		// less, so the two merge.
+		let path = write(
+			&dir,
+			"name,class,student_id\n,A,2024010001\nAlice,B,2024010001\n",
 		);
-		// An ambiguous key has no single name, and the loader does not invent one.
-		assert_eq!(
-			roster.name_of(&StudentKey::Number("2024010001".into())),
-			None
+
+		let roster = load_roster(&path).unwrap();
+		assert_eq!(roster.len(), 1);
+		assert_eq!(roster.entries[0].name.as_deref(), Some("Alice"));
+		assert!(roster.errors().next().is_none());
+	}
+
+	#[test]
+	fn test_rows_that_disagree_about_who_a_number_is_are_an_error() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = write(
+			&dir,
+			"name,class,student_id\nAlice Wu,A,2024010001\nAlice Chen,B,2024010001\n",
 		);
+
+		let roster = load_roster(&path).unwrap();
+		// There is no answer to pick between them, so this is not a warning to skim past.
+		let errors: Vec<_> = roster.errors().collect();
+		assert_eq!(errors.len(), 1);
+		assert!(matches!(
+			&errors[0].kind,
+			DiagnosticKind::ConflictingRosterEntry { key, .. } if key == "2024010001"
+		));
+		// The line the clash was spotted on is named, so the file can be fixed.
+		assert_eq!(errors[0].location.as_ref().and_then(|l| l.row), Some(3));
 	}
 
 	#[test]
 	fn test_lookup_trims_but_does_not_otherwise_normalise() {
 		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
-		assert_eq!(
-			roster.lookup_number(" 2024010001 "),
-			RosterLookup::Unique(0)
-		);
-		assert_eq!(roster.lookup_number("02024010001"), RosterLookup::Missing);
-		assert_eq!(roster.lookup_number("missing"), RosterLookup::Missing);
+		assert_eq!(roster.lookup_number(" 2024010001 "), Some(0));
+		assert_eq!(roster.lookup_number("02024010001"), None);
+		assert_eq!(roster.lookup_number("missing"), None);
 	}
 
 	#[test]
@@ -369,13 +432,10 @@ mod tests {
 		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
 		assert_eq!(
 			roster.lookup(&StudentKey::Extracted("2024010001".into())),
-			RosterLookup::Unique(0)
+			Some(0)
 		);
 		// A Canvas id is a separate namespace and must not match a 学号 row.
-		assert_eq!(
-			roster.lookup(&StudentKey::CanvasUser(2024010001)),
-			RosterLookup::Missing
-		);
+		assert_eq!(roster.lookup(&StudentKey::CanvasUser(2024010001)), None);
 	}
 
 	#[test]

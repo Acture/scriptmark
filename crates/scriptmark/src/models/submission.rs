@@ -287,8 +287,6 @@ pub enum SubmissionState {
 pub enum RosterMatch {
 	/// Index into [`Roster::entries`].
 	Matched(usize),
-	/// The key matched more than one roster entry; every candidate is kept.
-	Ambiguous(Vec<usize>),
 	NotInRoster,
 	/// No roster was supplied at all, so membership is simply unknown.
 	NoRoster,
@@ -319,18 +317,12 @@ pub struct StudentSubmission {
 impl StudentSubmission {
 	/// A roster student from whom nothing arrived.
 	///
-	/// `hits` are the roster rows this student matched — several when the roster carries
-	/// duplicate rows for one number, in which case they are all kept rather than one being
-	/// picked. Always `Matched` or `Ambiguous`, never `NotInRoster`: a non-submitter only
-	/// exists because a roster vouches for them.
-	pub fn not_submitted(identity: StudentIdentity, hits: Vec<usize>) -> Self {
-		let roster_match = match hits.len() {
-			1 => RosterMatch::Matched(hits[0]),
-			_ => RosterMatch::Ambiguous(hits),
-		};
+	/// Always `Matched`, never `NotInRoster`: a non-submitter only exists because a roster
+	/// vouches for them.
+	pub fn not_submitted(identity: StudentIdentity, roster_index: usize) -> Self {
 		Self {
 			identity,
-			roster_match,
+			roster_match: RosterMatch::Matched(roster_index),
 			state: SubmissionState::NotSubmitted,
 			attempts: Vec::new(),
 			selected: None,
@@ -497,16 +489,16 @@ pub enum DiagnosticSeverity {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticKind {
-	#[error("roster lists '{key}' in {count} rows; all are kept")]
+	#[error("roster lists '{key}' in {count} identical rows; merged into one")]
 	DuplicateRosterEntry { key: String, count: usize },
+	#[error("roster rows disagree about who '{key}' is: {detail}")]
+	ConflictingRosterEntry { key: String, detail: String },
 	#[error("student numbers differ only by zero padding: {keys:?}; kept distinct")]
 	SuspectedZeroPaddedVariant { keys: Vec<String> },
 	#[error("Canvas user {canvas_user_id} has no sis_user_id; keyed by Canvas id")]
 	MissingStudentNumber { canvas_user_id: u64 },
 	#[error("'{key}' submitted but is not on the roster")]
 	NotOnRoster { key: String },
-	#[error("'{key}' matches {count} roster entries")]
-	AmbiguousRosterMatch { key: String, count: usize },
 	#[error("roster row unusable ({reason}); the student it names is not in the input")]
 	UnusableRosterRow { reason: String },
 	#[error("ignored '{path}' for '{key}': not a supported submission file")]
@@ -587,6 +579,16 @@ impl InputDiagnostic {
 	pub fn info(kind: DiagnosticKind) -> Self {
 		Self {
 			severity: DiagnosticSeverity::Info,
+			kind,
+			location: None,
+		}
+	}
+
+	/// Something the run cannot sensibly continue past. The CLI refuses to grade while any
+	/// of these is present rather than producing results nobody should trust.
+	pub fn error(kind: DiagnosticKind) -> Self {
+		Self {
+			severity: DiagnosticSeverity::Error,
 			kind,
 			location: None,
 		}
@@ -782,6 +784,11 @@ impl AssignmentInput {
 			.filter(move |d| d.severity == severity)
 	}
 
+	/// Anything that makes the input untrustworthy to grade from.
+	pub fn errors(&self) -> impl Iterator<Item = &InputDiagnostic> {
+		self.diagnostics_of(DiagnosticSeverity::Error)
+	}
+
 	/// One `SuspectedZeroPaddedVariant` per group of keys that differ only by zero
 	/// padding. Keys are never merged — this only flags that an upstream export may have
 	/// stripped the padding.
@@ -847,16 +854,8 @@ mod tests {
 	}
 
 	#[test]
-	fn test_not_submitted_carries_every_matching_roster_row() {
-		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), vec![0, 1]);
-		// Duplicate rows make one student with both candidates, not two students.
-		assert_eq!(s.roster_match, RosterMatch::Ambiguous(vec![0, 1]));
-		assert_eq!(s.outcome(), SubmissionOutcome::NotSubmitted);
-	}
-
-	#[test]
 	fn test_not_submitted_is_always_roster_matched() {
-		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010004"), vec![3]);
+		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010004"), 3);
 		assert_eq!(s.state, SubmissionState::NotSubmitted);
 		assert_eq!(s.roster_match, RosterMatch::Matched(3));
 		assert_eq!(s.outcome(), SubmissionOutcome::NotSubmitted);
@@ -904,7 +903,7 @@ mod tests {
 			SubmissionOutcome::ReceivedUnmatched
 		);
 
-		let absent = StudentSubmission::not_submitted(StudentIdentity::number("4"), vec![0]);
+		let absent = StudentSubmission::not_submitted(StudentIdentity::number("4"), 0);
 		assert_eq!(absent.outcome(), SubmissionOutcome::NotSubmitted);
 	}
 
@@ -993,9 +992,9 @@ mod tests {
 			},
 		);
 		input.students = vec![
-			StudentSubmission::not_submitted(StudentIdentity::number("0024010003"), vec![0]),
-			StudentSubmission::not_submitted(StudentIdentity::number("24010003"), vec![1]),
-			StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), vec![2]),
+			StudentSubmission::not_submitted(StudentIdentity::number("0024010003"), 0),
+			StudentSubmission::not_submitted(StudentIdentity::number("24010003"), 1),
+			StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), 2),
 		];
 
 		let found = input.detect_zero_padded_variants();
@@ -1018,8 +1017,8 @@ mod tests {
 			},
 		);
 		input.students = vec![
-			StudentSubmission::not_submitted(StudentIdentity::number("00123"), vec![0]),
-			StudentSubmission::not_submitted(StudentIdentity::canvas_user(123), vec![1]),
+			StudentSubmission::not_submitted(StudentIdentity::number("00123"), 0),
+			StudentSubmission::not_submitted(StudentIdentity::canvas_user(123), 1),
 		];
 
 		// Separate namespaces — comparing their padding would be a false positive.
