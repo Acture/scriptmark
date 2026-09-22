@@ -295,13 +295,37 @@ mod tests {
 	}
 
 	#[test]
-	fn test_an_ambiguous_roster_key_stores_no_name() {
+	fn test_an_ambiguous_roster_key_stores_neither_name_nor_canvas_id() {
 		let db = Database::open_memory().unwrap();
-		let roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice Chen")]);
+		let mut roster = Roster::from_pairs(&[("alice", "Alice"), ("alice", "Alice Chen")]);
+		roster.entries[0].canvas_user_id = Some(1);
+		roster.entries[1].canvas_user_id = Some(2);
 		db.import_roster(&roster).unwrap();
 
-		// `Roster::name_of` refuses to pick a winner; the database must not either.
-		assert_eq!(db.get_student("alice").unwrap().unwrap().name, None);
+		// `Roster::name_of` refuses to pick a winner; the database must not either — and
+		// the same goes for the Canvas id, where taking the last row would silently point
+		// later Canvas operations at one of two different people.
+		let stored = db.get_student("alice").unwrap().unwrap();
+		assert_eq!(stored.name, None);
+		assert_eq!(stored.canvas_id, None);
+	}
+
+	#[test]
+	fn test_a_csv_import_does_not_erase_a_stored_canvas_id() {
+		let db = Database::open_memory().unwrap();
+		// First a Canvas-sourced import, which knows the Canvas id...
+		let mut from_canvas = Roster::from_pairs(&[("alice", "Alice")]);
+		from_canvas.entries[0].canvas_user_id = Some(4242);
+		db.import_roster(&from_canvas).unwrap();
+
+		// ...then a CSV, which never carries one. It must not null the id out, or grade
+		// push loses the only thing it can key on.
+		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Wu")]))
+			.unwrap();
+
+		let stored = db.get_student("alice").unwrap().unwrap();
+		assert_eq!(stored.name.as_deref(), Some("Alice Wu"));
+		assert_eq!(stored.canvas_id, Some(4242));
 	}
 
 	#[test]
