@@ -490,3 +490,58 @@ async fn mount_one_upload(server: &MockServer, id: u64, name: &str, size: Option
 		.mount(server)
 		.await;
 }
+
+/// A listing that fails is fatal — but it must not take the previous bundle with it.
+///
+/// The two JSON files are written last, so a run that dies during fetching leaves the last
+/// good manifest and the files it described exactly where they were. Without that, a
+/// transient 500 would cost a teacher the download they already had.
+#[tokio::test]
+async fn test_a_failed_refetch_leaves_the_previous_bundle_intact() {
+	use scriptmark::canvas::bundle;
+	use std::sync::Arc;
+
+	let dir = tempfile::tempdir().unwrap();
+	let root = dir.path().join("hw");
+
+	// A good fetch first.
+	{
+		let server = MockServer::start().await;
+		mount_minimal_course(&server).await;
+		mount_one_upload(&server, 900, "a.py", Some(8)).await;
+		Mock::given(method("GET"))
+			.and(path("/files/900"))
+			.respond_with(ResponseTemplate::new(200).set_body_raw("print(1)", "text/x-python"))
+			.mount(&server)
+			.await;
+
+		let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+		bundle::fetch(client, 1, 2, &root, 1, |_| {}).await.unwrap();
+	}
+
+	let (payload, downloads, _) = bundle::load(&root).unwrap();
+	assert_eq!(payload.submissions.len(), 1);
+	assert!(downloads.get(&900).unwrap().is_ok());
+
+	// Now the submissions listing fails.
+	{
+		let server = MockServer::start().await;
+		mount_minimal_course(&server).await;
+		Mock::given(method("GET"))
+			.and(path("/api/v1/courses/1/assignments/2/submissions"))
+			.respond_with(ResponseTemplate::new(500).set_body_raw("boom", "text/plain"))
+			.mount(&server)
+			.await;
+
+		let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+		bundle::fetch(client, 1, 2, &root, 1, |_| {})
+			.await
+			.expect_err("a failed listing must be fatal, not a short list");
+	}
+
+	// The bundle still reads, and still holds what the good fetch downloaded.
+	let (payload, downloads, _) = bundle::load(&root).unwrap();
+	assert_eq!(payload.submissions.len(), 1);
+	let stored = downloads.get(&900).unwrap().as_ref().unwrap();
+	assert_eq!(std::fs::read_to_string(&stored.path).unwrap(), "print(1)");
+}
