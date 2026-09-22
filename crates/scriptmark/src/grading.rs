@@ -17,6 +17,13 @@ fn apply_template(reports: &mut [StudentReport], config: &TemplatePolicy) {
 	let upper = config.upper;
 
 	for report in reports.iter_mut() {
+		// A student who never submitted has no grade — not a zero. Turning any
+		// non-executable outcome into a number is P-677's decision to make, and a
+		// fabricated 0.0 here would be pushed straight to Canvas.
+		if !report.is_gradeable() {
+			report.final_grade = None;
+			continue;
+		}
 		if report.status() == TestStatus::Missing {
 			report.final_grade = Some(0.0);
 			continue;
@@ -60,6 +67,10 @@ fn apply_formula(reports: &mut [StudentReport], config: &FormulaPolicy) {
 	let engine = Engine::new();
 
 	for report in reports.iter_mut() {
+		if !report.is_gradeable() {
+			report.final_grade = None;
+			continue;
+		}
 		if report.status() == TestStatus::Missing {
 			report.final_grade = Some(0.0);
 			continue;
@@ -115,14 +126,11 @@ mod tests {
 
 		StudentReport {
 			student_id: "test".to_string(),
-			student_name: None,
 			test_results: vec![TestResult {
-				spec_name: "test".to_string(),
+				item_id: "test".to_string(),
 				cases,
 			}],
-			final_grade: None,
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}
 	}
 
@@ -189,14 +197,40 @@ mod tests {
 	fn test_missing_student_gets_zero() {
 		let mut reports = vec![StudentReport {
 			student_id: "missing".to_string(),
-			student_name: None,
-			test_results: vec![],
-			final_grade: None,
-			backend_name: None,
-			lint_score: None,
+			..Default::default()
 		}];
 		apply_grading(&mut reports, &GradingPolicy::default());
 		assert_eq!(reports[0].final_grade, Some(0.0));
+	}
+
+	#[test]
+	fn test_non_submitter_is_left_ungraded_not_zeroed() {
+		use crate::models::SubmissionOutcome;
+
+		for outcome in [
+			SubmissionOutcome::NotSubmitted,
+			SubmissionOutcome::SubmittedEmpty,
+			SubmissionOutcome::ReceivedUnmatched,
+		] {
+			let mut reports = vec![StudentReport {
+				student_id: "absent".to_string(),
+				submission_state: Some(outcome),
+				..Default::default()
+			}];
+			apply_grading(&mut reports, &GradingPolicy::default());
+			assert_eq!(
+				reports[0].final_grade, None,
+				"{outcome:?} must not be turned into a number"
+			);
+		}
+
+		// Someone who did submit runnable code is graded as before.
+		let mut graded = vec![StudentReport {
+			submission_state: Some(SubmissionOutcome::Executable),
+			..make_report(100)
+		}];
+		apply_grading(&mut graded, &GradingPolicy::default());
+		assert!(graded[0].final_grade.is_some());
 	}
 
 	#[test]

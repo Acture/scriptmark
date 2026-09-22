@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "scriptmark"
-version = "0.2.0"
+version = "0.3.0"
 description = "Automated grading CLI for student programming assignments"
 readme = "README.md"
 license = { text = "GPL-3.0-or-later" }

@@ -3,6 +3,7 @@
 from scriptmark._scriptmark import (
 	discover,
 	grade,
+	load_input,
 	load_spec,
 	run,
 	StudentResult,
@@ -12,6 +13,7 @@ from scriptmark._scriptmark import (
 __all__ = [
 	"discover",
 	"grade",
+	"load_input",
 	"load_spec",
 	"run",
 	"StudentResult",

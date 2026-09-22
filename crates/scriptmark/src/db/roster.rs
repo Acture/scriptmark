@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use super::{Database, DbError};
+use crate::roster::Roster;
 
 /// A student record from the database.
 #[derive(Debug, Clone)]
@@ -12,18 +11,30 @@ pub struct Student {
 }
 
 impl Database {
-	/// Import a roster (student_id -> name mapping). Upserts.
-	pub fn import_roster(&self, roster: &HashMap<String, String>) -> Result<usize, DbError> {
-		let mut count = 0;
+	/// Import a roster. Upserts.
+	///
+	/// Returns the number of rows actually stored. A [`Roster`] holds at most one row per
+	/// key, so this normally equals `roster.len()`.
+	pub fn import_roster(&self, roster: &Roster) -> Result<usize, DbError> {
 		let mut stmt = self.conn.prepare(
-			"INSERT INTO students (id, name) VALUES (?1, ?2)
-			 ON CONFLICT(id) DO UPDATE SET name = excluded.name",
+			"INSERT INTO students (id, name, canvas_id) VALUES (?1, ?2, ?3)
+			 ON CONFLICT(id) DO UPDATE SET
+			     name = excluded.name,
+			     -- A CSV roster carries no Canvas id, so writing its NULL would erase one
+			     -- an earlier Canvas import had stored, and grade push would lose it.
+			     canvas_id = COALESCE(excluded.canvas_id, students.canvas_id)",
 		)?;
-		for (id, name) in roster {
-			stmt.execute(rusqlite::params![id, name])?;
-			count += 1;
+		let mut stored = std::collections::BTreeSet::new();
+		for entry in &roster.entries {
+			let id = entry.key.to_string();
+			stmt.execute(rusqlite::params![
+				id,
+				entry.name,
+				entry.canvas_user_id.map(|id| id as i64),
+			])?;
+			stored.insert(id);
 		}
-		Ok(count)
+		Ok(stored.len())
 	}
 
 	/// Get a single student by ID.
@@ -63,8 +74,10 @@ impl Database {
 	}
 
 	/// Get a student name, returning "N/A" if not found.
+	///
+	/// Accepts the `local:`-prefixed form too — `students.id` always holds the bare key.
 	pub fn get_student_name(&self, id: &str) -> String {
-		self.get_student(id)
+		self.get_student(id.strip_prefix("local:").unwrap_or(id))
 			.ok()
 			.flatten()
 			.and_then(|s| s.name)

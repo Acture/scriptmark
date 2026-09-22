@@ -20,7 +20,8 @@ pub struct ResultRow {
 	pub student_id: String,
 	pub student_name: Option<String>,
 	pub pass_rate: f64,
-	pub final_grade: f64,
+	/// `None` when the student has no grade — which is not the same as a zero.
+	pub final_grade: Option<f64>,
 	pub lint_score: Option<f64>,
 	pub total_cases: i64,
 	pub passed_cases: i64,
@@ -34,10 +35,23 @@ impl Database {
 		reports: &[StudentReport],
 		grading_policy_json: Option<&str>,
 	) -> Result<i64, DbError> {
-		let avg = if reports.is_empty() {
+		// Two reports for one student would be merged by UNIQUE(session_id, student_id)
+		// while student_count still claimed both — the silent overwrite this model exists
+		// to prevent. Refuse before writing anything.
+		let mut seen = std::collections::BTreeSet::new();
+		for report in reports {
+			if !seen.insert(report.student_id.as_str()) {
+				return Err(DbError::DuplicateStudent(report.student_id.clone()));
+			}
+		}
+
+		// Average over students who actually have a grade: ungraded students would
+		// otherwise drag the mean toward zero.
+		let graded: Vec<f64> = reports.iter().filter_map(|r| r.final_grade).collect();
+		let avg = if graded.is_empty() {
 			0.0
 		} else {
-			reports.iter().filter_map(|r| r.final_grade).sum::<f64>() / reports.len() as f64
+			graded.iter().sum::<f64>() / graded.len() as f64
 		};
 
 		self.conn.execute(
@@ -48,7 +62,7 @@ impl Database {
 		let session_id = self.conn.last_insert_rowid();
 
 		let mut stmt = self.conn.prepare(
-			"INSERT OR REPLACE INTO results
+			"INSERT INTO results
 			 (session_id, student_id, pass_rate, final_grade, lint_score, total_cases, passed_cases, details)
 			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
 		)?;
@@ -95,7 +109,15 @@ impl Database {
 		let mut stmt = self.conn.prepare(
 			"SELECT r.student_id, s.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
-			 LEFT JOIN students s ON r.student_id = s.id
+			 -- A run made without --roster leaves keys unconfirmed, so the id carries a
+			 -- `local:` prefix that students.id never does. Match either form. (substr,
+			 -- not ltrim: ltrim strips a character set, so 'local:alice' would become
+			 -- 'ice'.)
+			 LEFT JOIN students s
+			   ON s.id = CASE
+			       WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7)
+			       ELSE r.student_id
+			   END
 			 WHERE r.session_id = ?1
 			 ORDER BY r.final_grade DESC",
 		)?;
@@ -104,7 +126,7 @@ impl Database {
 				student_id: row.get(0)?,
 				student_name: row.get(1)?,
 				pass_rate: row.get::<_, f64>(2).unwrap_or(0.0),
-				final_grade: row.get::<_, f64>(3).unwrap_or(0.0),
+				final_grade: row.get(3)?,
 				lint_score: row.get(4)?,
 				total_cases: row.get::<_, i64>(5).unwrap_or(0),
 				passed_cases: row.get::<_, i64>(6).unwrap_or(0),
@@ -137,20 +159,30 @@ impl Database {
 	}
 
 	/// Get a student's history across all sessions.
+	/// Accepts the id in whichever form the teacher read off a table: a bare 学号, or the
+	/// `local:`-prefixed form a run made without a roster prints.
 	pub fn get_student_history(
 		&self,
 		student_id: &str,
 	) -> Result<Vec<(Session, ResultRow)>, DbError> {
+		let bare = student_id
+			.strip_prefix("local:")
+			.unwrap_or(student_id)
+			.to_string();
 		let mut stmt = self.conn.prepare(
 			"SELECT s.id, s.assignment, s.spec_title, s.grading_policy, s.student_count, s.avg_grade, s.created_at,
 					r.student_id, st.name, r.pass_rate, r.final_grade, r.lint_score, r.total_cases, r.passed_cases
 			 FROM results r
 			 JOIN sessions s ON r.session_id = s.id
-			 LEFT JOIN students st ON r.student_id = st.id
-			 WHERE r.student_id = ?1
+			 LEFT JOIN students st
+			   ON st.id = CASE
+			       WHEN r.student_id LIKE 'local:%' THEN substr(r.student_id, 7)
+			       ELSE r.student_id
+			   END
+			 WHERE r.student_id IN (?1, 'local:' || ?1, ?2)
 			 ORDER BY s.created_at DESC",
 		)?;
-		let rows = stmt.query_map(rusqlite::params![student_id], |row| {
+		let rows = stmt.query_map(rusqlite::params![bare, student_id], |row| {
 			Ok((
 				Session {
 					id: row.get(0)?,
@@ -165,7 +197,7 @@ impl Database {
 					student_id: row.get(7)?,
 					student_name: row.get(8)?,
 					pass_rate: row.get::<_, f64>(9).unwrap_or(0.0),
-					final_grade: row.get::<_, f64>(10).unwrap_or(0.0),
+					final_grade: row.get(10)?,
 					lint_score: row.get(11)?,
 					total_cases: row.get::<_, i64>(12).unwrap_or(0),
 					passed_cases: row.get::<_, i64>(13).unwrap_or(0),
