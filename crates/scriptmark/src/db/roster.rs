@@ -23,7 +23,13 @@ impl Database {
 			     name = excluded.name,
 			     -- A CSV roster carries no Canvas id, so writing its NULL would erase one
 			     -- an earlier Canvas import had stored, and grade push would lose it.
-			     canvas_id = COALESCE(excluded.canvas_id, students.canvas_id)",
+			     -- An *ambiguous* key is different: the roster now says this id belongs to
+			     -- two people, so any single stored Canvas id is attributable to at most
+			     -- one of them and keeping it would be a silent guess.
+			     canvas_id = CASE
+			         WHEN ?4 THEN NULL
+			         ELSE COALESCE(excluded.canvas_id, students.canvas_id)
+			     END",
 		)?;
 		let mut stored = std::collections::BTreeSet::new();
 		for entry in &roster.entries {
@@ -37,7 +43,7 @@ impl Database {
 			} else {
 				(None, None)
 			};
-			stmt.execute(rusqlite::params![id, name, canvas_id])?;
+			stmt.execute(rusqlite::params![id, name, canvas_id, !unambiguous])?;
 			stored.insert(id);
 		}
 		Ok(stored.len())
