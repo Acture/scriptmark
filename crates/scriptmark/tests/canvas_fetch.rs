@@ -200,3 +200,135 @@ async fn test_a_failed_download_writes_no_partial_file() {
 	assert!(!dest.exists());
 	assert!(!dest.with_file_name("lab1.py.part").exists());
 }
+
+/// The whole bundle round-trip: fetch writes it, a later offline run reads it back and
+/// normalises to the same thing.
+///
+/// The fixture carries a **zip** attachment on purpose. `attachments.json` records only
+/// delivery, so if the loader did not re-expand archives from disk, this student would come
+/// back with the `.zip` as their only candidate file, `detect_language` would refuse it, and
+/// they would be reported `SubmittedEmpty` — while the bundle the fetch wrote said
+/// `Executable`. Asserting the in-archive `entry` survives is what additionally rejects a
+/// directory-scan implementation, which cannot recover it: expansion flattens
+/// `src/Lab5.py` to `Lab5.py`.
+#[tokio::test]
+async fn test_a_bundle_round_trips_a_zip_attachment_and_a_failed_download() {
+	use scriptmark::canvas::bundle;
+	use scriptmark::models::{Assignment, AttemptPolicy, DiagnosticKind, FileOrigin, SubmissionOutcome};
+	use std::sync::Arc;
+
+	let server = MockServer::start().await;
+
+	// A zip holding one nested python file.
+	let mut zip_bytes = Vec::new();
+	{
+		use std::io::Write as _;
+		let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_bytes));
+		zip.start_file("src/Lab5.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(b"def foo(): return 42").unwrap();
+		zip.finish().unwrap();
+	}
+
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/users"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw(
+			r#"[{"id":11,"name":"Alice","sis_user_id":"2024010001"},
+			    {"id":12,"name":"Bob","sis_user_id":"2024010002"}]"#,
+			"application/json",
+		))
+		.mount(&server)
+		.await;
+
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/assignments/2"))
+		.respond_with(
+			ResponseTemplate::new(200)
+				.set_body_raw(r#"{"id":2,"name":"Lab 5"}"#, "application/json"),
+		)
+		.mount(&server)
+		.await;
+
+	Mock::given(method("GET"))
+		.and(path("/api/v1/courses/1/assignments/2/submissions"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw(
+			format!(
+				r#"[{{"id":100,"user_id":11,"attempt":1,"workflow_state":"submitted",
+				      "submission_type":"online_upload","submitted_at":"2026-03-01T00:00:00Z",
+				      "attachments":[{{"id":501,"display_name":"work.zip","content-type":"application/zip","url":"{uri}/files/501"}}]}},
+				    {{"id":101,"user_id":12,"attempt":1,"workflow_state":"submitted",
+				      "submission_type":"online_upload","submitted_at":"2026-03-01T00:00:00Z",
+				      "attachments":[{{"id":502,"display_name":"lab5.py","content-type":"text/x-python","url":"{uri}/files/502"}}]}}]"#,
+				uri = server.uri()
+			),
+			"application/json",
+		))
+		.mount(&server)
+		.await;
+
+	Mock::given(method("GET"))
+		.and(path("/files/501"))
+		.respond_with(ResponseTemplate::new(200).set_body_raw(zip_bytes, "application/zip"))
+		.mount(&server)
+		.await;
+
+	// Bob's file is refused. He must keep his identity and not become 缺交.
+	Mock::given(method("GET"))
+		.and(path("/files/502"))
+		.respond_with(ResponseTemplate::new(502).set_body_raw("bad gateway", "text/plain"))
+		.mount(&server)
+		.await;
+
+	let dir = tempfile::tempdir().unwrap();
+	let root = dir.path().join("hw5");
+
+	let client = Arc::new(CanvasClient::with_token(&server.uri(), "t"));
+	bundle::fetch(client, 1, 2, &root, 1, |_| {}).await.unwrap();
+
+	// Everything below is offline — this is what `grade --canvas` does.
+	let (payload, downloads, extra) = bundle::load(&root).unwrap();
+	assert_eq!(payload.assignment_name.as_deref(), Some("Lab 5"));
+
+	let input = scriptmark::input::canvas::normalize(
+		&payload,
+		None,
+		&downloads,
+		AttemptPolicy::Latest,
+		Assignment::default(),
+	);
+	let input = bundle::merge_diagnostics(input, extra);
+
+	let alice = input
+		.students
+		.iter()
+		.find(|s| s.key().raw() == "2024010001")
+		.expect("alice");
+	assert_eq!(alice.outcome(), SubmissionOutcome::Executable);
+	assert_eq!(alice.files().len(), 1, "the zip's contents, not the zip");
+	assert_eq!(
+		alice.files()[0].origin,
+		FileOrigin::Attachment {
+			attempt: 1,
+			attachment_id: 501,
+			entry: Some("src/Lab5.py".to_string()),
+		},
+		"the in-archive path must survive the reload"
+	);
+
+	let bob = input
+		.students
+		.iter()
+		.find(|s| s.key().raw() == "2024010002")
+		.expect("bob");
+	// Attempted and refused is not 缺交.
+	assert_ne!(bob.outcome(), SubmissionOutcome::NotSubmitted);
+	assert!(
+		input.diagnostics.iter().any(|d| matches!(
+			&d.kind,
+			DiagnosticKind::AttachmentUnavailable { key, attachment_id, .. }
+				if key == "2024010002" && *attachment_id == 502
+		)),
+		"the failure must name Bob, got {:?}",
+		input.diagnostics
+	);
+}

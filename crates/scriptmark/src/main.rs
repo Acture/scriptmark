@@ -34,6 +34,9 @@ enum Commands {
 	Run(RunArgs),
 	/// Summarize existing results (re-analyze without re-running)
 	Summarize(SummarizeArgs),
+	/// Canvas LMS: browse courses, and fetch an assignment for grading
+	#[command(subcommand)]
+	Canvas(CanvasCommand),
 	/// Pull student roster from Canvas LMS
 	RosterPull(RosterPullArgs),
 	/// Push grades to Canvas LMS
@@ -55,8 +58,14 @@ enum Commands {
 #[derive(Parser)]
 struct GradeArgs {
 	/// Directories containing student submissions
-	#[arg(required = true)]
+	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
+
+	/// Grade from a Canvas bundle written by `scriptmark canvas fetch`.
+	///
+	/// Offline: re-grading does not re-download a class's work.
+	#[arg(long)]
+	canvas: Option<PathBuf>,
 
 	/// Directory containing TOML test spec files
 	#[arg(short = 't', long = "tests")]
@@ -115,8 +124,14 @@ struct GradeArgs {
 #[derive(Parser)]
 struct RunArgs {
 	/// Directories containing student submissions
-	#[arg(required = true)]
+	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
+
+	/// Grade from a Canvas bundle written by `scriptmark canvas fetch`.
+	///
+	/// Offline: re-grading does not re-download a class's work.
+	#[arg(long)]
+	canvas: Option<PathBuf>,
 
 	/// Directory containing TOML test spec files
 	#[arg(short = 't', long = "tests")]
@@ -168,6 +183,64 @@ struct SummarizeArgs {
 	/// Grade range: lower,upper
 	#[arg(long, default_value = "60,100", value_parser = parse_range)]
 	range: (f64, f64),
+}
+
+#[derive(Subcommand)]
+enum CanvasCommand {
+	/// List the courses this token can see
+	Courses(CanvasListArgs),
+	/// List a course's assignments
+	Assignments(CanvasAssignmentsArgs),
+	/// Fetch an assignment's roster, submissions and attachments into a bundle
+	Fetch(CanvasFetchArgs),
+}
+
+#[derive(Parser)]
+struct CanvasListArgs {
+	/// Canvas API base URL. Defaults to $CANVAS_URL.
+	#[arg(long, env = "CANVAS_URL")]
+	canvas_url: String,
+}
+
+#[derive(Parser)]
+struct CanvasAssignmentsArgs {
+	#[arg(long, env = "CANVAS_URL")]
+	canvas_url: String,
+
+	#[arg(long)]
+	course_id: u64,
+}
+
+#[derive(Parser)]
+struct CanvasFetchArgs {
+	#[arg(long, env = "CANVAS_URL")]
+	canvas_url: String,
+
+	/// Canvas course id. Taken from --assignment's toml when omitted.
+	#[arg(long)]
+	course_id: Option<u64>,
+
+	/// Canvas assignment id. Taken from --assignment's toml when omitted.
+	#[arg(long)]
+	assignment_id: Option<u64>,
+
+	/// An assignment.toml supplying the course and assignment ids.
+	///
+	/// Named explicitly rather than searched for: the implicit search resolves relative to
+	/// a tests directory, and fetching has none.
+	#[arg(long)]
+	assignment: Option<PathBuf>,
+
+	/// Where to write the bundle
+	#[arg(short, long)]
+	output: PathBuf,
+
+	/// How many attachments to download at once.
+	///
+	/// One by default. Canvas throttles on a per-token cost bucket with no published rate,
+	/// so raising this is the teacher's call about their own instance.
+	#[arg(long, default_value = "1")]
+	download_concurrency: usize,
 }
 
 #[derive(Parser)]
@@ -431,6 +504,43 @@ fn report_input(input: &AssignmentInput) {
 		);
 	}
 
+	// 免交 is not 缺交, and the difference matters to whoever reads this.
+	let excused = input.students.iter().filter(|s| s.is_excused()).count();
+	if excused > 0 {
+		println!("  {excused:>4}  excused by the teacher");
+	}
+
+	// 明确使用哪次提交: say so wherever a student is not being graded on their first try.
+	let later: Vec<&scriptmark::models::StudentSubmission> = input
+		.students
+		.iter()
+		.filter(|s| s.selected_attempt().is_some_and(|a| a.attempt > 1))
+		.collect();
+	if !later.is_empty() {
+		println!(
+			"  {:>4}  graded on a later attempt ({} policy)",
+			later.len(),
+			match input.attempt_policy {
+				scriptmark::models::AttemptPolicy::Latest => "latest",
+				scriptmark::models::AttemptPolicy::Earliest => "earliest",
+			}
+		);
+		for student in later {
+			if let Some(attempt) = student.selected_attempt() {
+				println!(
+					"        {} -> attempt {}{}",
+					student.key(),
+					attempt.attempt,
+					attempt
+						.submitted_at
+						.as_deref()
+						.map(|t| format!(" ({t})"))
+						.unwrap_or_default()
+				);
+			}
+		}
+	}
+
 	let errors = input.diagnostics_of(DiagnosticSeverity::Error).count();
 	let warnings = input.diagnostics_of(DiagnosticSeverity::Warning).count();
 	for diagnostic in &input.diagnostics {
@@ -463,6 +573,7 @@ async fn main() -> Result<()> {
 		Commands::Grade(args) => cmd_grade(args).await,
 		Commands::Run(args) => cmd_run(args).await,
 		Commands::Summarize(args) => cmd_summarize(args),
+		Commands::Canvas(cmd) => cmd_canvas(cmd).await,
 		Commands::RosterPull(args) => cmd_roster_pull(args).await,
 		Commands::GradesPush(args) => cmd_grades_push(args).await,
 		Commands::Similarity(args) => cmd_similarity(args),
@@ -475,12 +586,15 @@ async fn main() -> Result<()> {
 async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	// 1. Build the unified input — names, roster membership and submission state all come
 	//    from the model, so there is no separate roster merge afterwards.
-	let input = build_local_input(
-		&args.submissions,
-		&args.tests_dir,
-		args.assignment.as_ref(),
-		args.roster.as_ref(),
-	)?;
+	let input = match &args.canvas {
+		Some(bundle) => build_canvas_input(bundle, &args.tests_dir, args.assignment.as_ref())?,
+		None => build_local_input(
+			&args.submissions,
+			&args.tests_dir,
+			args.assignment.as_ref(),
+			args.roster.as_ref(),
+		)?,
+	};
 
 	// 2. Load test specs
 	let specs =
@@ -632,12 +746,15 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 }
 
 async fn cmd_run(args: RunArgs) -> Result<()> {
-	let input = build_local_input(
-		&args.submissions,
-		&args.tests_dir,
-		args.assignment.as_ref(),
-		args.roster.as_ref(),
-	)?;
+	let input = match &args.canvas {
+		Some(bundle) => build_canvas_input(bundle, &args.tests_dir, args.assignment.as_ref())?,
+		None => build_local_input(
+			&args.submissions,
+			&args.tests_dir,
+			args.assignment.as_ref(),
+			args.roster.as_ref(),
+		)?,
+	};
 
 	let specs =
 		load_specs_from_dir(&args.tests_dir).context("Failed to load test specifications")?;
@@ -695,6 +812,158 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 	display::display_failures(&report_refs);
 	display::display_stats(&report_refs);
 
+	Ok(())
+}
+
+/// Build the input for a `--canvas <bundle>` run.
+///
+/// The declared `assignment.toml` is loaded and handed to `normalize`: it carries the
+/// attempt policy, and dropping it would grade every student on their latest attempt while
+/// a course that asked for the earliest looked no different. The bundle supplies the Canvas
+/// ids only where the toml left them unset, and a genuine disagreement is refused rather
+/// than resolved — grading one assignment's submissions against another's declaration is
+/// not something a warning covers.
+fn build_canvas_input(
+	bundle: &std::path::Path,
+	tests_dir: &std::path::Path,
+	assignment_path: Option<&PathBuf>,
+) -> Result<AssignmentInput> {
+	use scriptmark::canvas::bundle;
+
+	let (assignment, attempt_policy) = load_assignment(assignment_path, tests_dir)?;
+	let (payload, downloads, diagnostics) = bundle::load(bundle)
+		.with_context(|| format!("failed to read the Canvas bundle at {}", bundle.display()))?;
+
+	for (declared, found, what) in [
+		(assignment.canvas_course_id, payload.course_id, "course"),
+		(
+			assignment.canvas_assignment_id,
+			payload.assignment_id,
+			"assignment",
+		),
+	] {
+		if let (Some(declared), Some(found)) = (declared, found)
+			&& declared != found
+		{
+			anyhow::bail!(
+				"refusing to grade: assignment.toml declares Canvas {what} {declared}, but the \
+				 bundle was fetched for {what} {found}"
+			);
+		}
+	}
+
+	let input = scriptmark::input::canvas::normalize(
+		&payload,
+		None,
+		&downloads,
+		attempt_policy,
+		assignment,
+	);
+	let input = bundle::merge_diagnostics(input, diagnostics);
+
+	report_input(&input);
+
+	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
+	if !errors.is_empty() {
+		anyhow::bail!(
+			"refusing to grade: {} problem(s) with the input\n  {}",
+			errors.len(),
+			errors.join("\n  ")
+		);
+	}
+
+	// The record of which attempt was graded, and of every file's provenance, outlives the
+	// process that produced it.
+	bundle::save_input(bundle, &input)
+		.with_context(|| format!("failed to write {}", bundle::input_path(bundle).display()))?;
+
+	Ok(input)
+}
+
+async fn cmd_canvas(cmd: CanvasCommand) -> Result<()> {
+	use scriptmark::canvas::bundle;
+	use std::sync::Arc;
+
+	match cmd {
+		CanvasCommand::Courses(args) => {
+			let client = scriptmark::canvas::CanvasClient::new(&args.canvas_url)
+				.context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?;
+			for course in client.list_courses().await? {
+				let term = course
+					.term
+					.as_ref()
+					.and_then(|t| t.name.as_deref())
+					.unwrap_or("");
+				println!(
+					"{:>10}  {}  {}",
+					course.id,
+					course.name.as_deref().unwrap_or("(unnamed)"),
+					term
+				);
+			}
+		}
+		CanvasCommand::Assignments(args) => {
+			let client = scriptmark::canvas::CanvasClient::new(&args.canvas_url)
+				.context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?;
+			for assignment in client.list_assignments(args.course_id).await? {
+				println!(
+					"{:>10}  {}  {}",
+					assignment.id,
+					assignment.name.as_deref().unwrap_or("(unnamed)"),
+					assignment.due_at.as_deref().unwrap_or("")
+				);
+			}
+		}
+		CanvasCommand::Fetch(args) => {
+			// The ids come from the flags, or from a toml named explicitly. Nothing is
+			// searched for implicitly, and neither source means the run stops rather than
+			// guessing at a course.
+			let declared = match &args.assignment {
+				Some(path) => Some(load_assignment(Some(path), path.parent().unwrap_or(path))?.0),
+				None => None,
+			};
+			let course_id = args
+				.course_id
+				.or_else(|| declared.as_ref().and_then(|a| a.canvas_course_id))
+				.context("no --course-id, and no canvas_course_id in --assignment")?;
+			let assignment_id = args
+				.assignment_id
+				.or_else(|| declared.as_ref().and_then(|a| a.canvas_assignment_id))
+				.context("no --assignment-id, and no canvas_assignment_id in --assignment")?;
+
+			let client = Arc::new(
+				scriptmark::canvas::CanvasClient::new(&args.canvas_url)
+					.context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?,
+			);
+
+			println!(
+				"Fetching course {course_id}, assignment {assignment_id} into {}...",
+				args.output.display()
+			);
+			let payload = bundle::fetch(
+				client,
+				course_id,
+				assignment_id,
+				&args.output,
+				args.download_concurrency,
+				|p| {
+					let note = if p.skipped { " (already had it)" } else { "" };
+					println!("  [{}/{}] {}{note}", p.done, p.total, p.filename);
+				},
+			)
+			.await?;
+
+			println!(
+				"Fetched {} enrolled students and {} submission rows.",
+				payload.users.len(),
+				payload.submissions.len()
+			);
+			println!(
+				"Grade it with: scriptmark grade --canvas {} -t tests/",
+				args.output.display()
+			);
+		}
+	}
 	Ok(())
 }
 

@@ -28,7 +28,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 tokio = { version = "1", features = ["full"] }
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Scripting
 rhai = "1"
