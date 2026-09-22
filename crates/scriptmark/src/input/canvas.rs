@@ -19,7 +19,7 @@ use crate::models::{
 	InputDiagnostic, InputSource, RosterMatch, SourceStatus, StudentFile, StudentIdentity,
 	StudentKey, StudentSubmission, SubmissionAttempt, is_reserved_key, normalize_key,
 };
-use crate::roster::{Roster, RosterEntry, RosterLookup, RosterSource};
+use crate::roster::{Roster, RosterEntry, RosterSource};
 
 /// A course user, as `GET /courses/:id/users` returns it.
 ///
@@ -198,7 +198,7 @@ pub fn normalize(
 		}
 
 		let roster_match = match roster.lookup(&identity.key) {
-			RosterLookup::Unique(i) => {
+			Some(i) => {
 				covered.insert(identity.key.clone());
 				covered_canvas_ids.extend(identity.canvas_user_id);
 				if identity.name.is_none() {
@@ -206,18 +206,7 @@ pub fn normalize(
 				}
 				RosterMatch::Matched(i)
 			}
-			RosterLookup::Ambiguous(hits) => {
-				covered.insert(identity.key.clone());
-				covered_canvas_ids.extend(identity.canvas_user_id);
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::AmbiguousRosterMatch {
-						key: identity.key.raw(),
-						count: hits.len(),
-					},
-				));
-				RosterMatch::Ambiguous(hits)
-			}
-			RosterLookup::Missing => {
+			None => {
 				diagnostics.push(InputDiagnostic::warning(DiagnosticKind::NotOnRoster {
 					key: identity.key.raw(),
 				}));
@@ -259,26 +248,22 @@ pub fn normalize(
 		}
 		covered_canvas_ids.extend(entry.canvas_user_id);
 
-		let lookup = roster.lookup(&entry.key);
-		let unambiguous = matches!(lookup, RosterLookup::Unique(_));
-		let hits = lookup.hits();
+		let Some(index) = roster.lookup(&entry.key) else {
+			continue;
+		};
 		let mut identity = match &entry.key {
 			StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
 			key => StudentIdentity::number(key.raw()),
 		};
 		identity.name = entry.name.clone();
-		// Several rows share this key, so none of their Canvas ids is *the* answer.
-		if unambiguous {
-			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
-		}
+		identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
 
-		// Enrich from enrollment, but only from an unambiguous match. A Canvas-keyed row
-		// resolves by Canvas id; a 学号 row resolves by student number — never through
-		// `raw()`, which would compare a Canvas id against other people's SIS ids and
-		// walk straight through the namespace boundary `lookup` exists to hold.
+		// Enrich from enrollment. A Canvas-keyed row resolves by Canvas id; a 学号 row
+		// resolves by student number — never through `raw()`, which would compare a Canvas
+		// id against other people's SIS ids and walk straight through the namespace
+		// boundary `lookup` exists to hold.
 		let enrolled = match &entry.key {
 			StudentKey::CanvasUser(id) => users.get(id).copied(),
-			_ if !unambiguous => None,
 			_ => entry
 				.student_number()
 				.and_then(|number| by_number.get(number))
@@ -295,7 +280,7 @@ pub fn normalize(
 				identity.name = user.name.clone();
 			}
 		}
-		students.push(StudentSubmission::not_submitted(identity, hits));
+		students.push(StudentSubmission::not_submitted(identity, index));
 	}
 
 	diagnostics.extend(roster.diagnostics.iter().cloned());
@@ -803,7 +788,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_two_users_sharing_a_sis_id_are_both_retained() {
+	fn test_two_accounts_claiming_one_student_number_is_a_hard_error() {
 		let payload = CanvasPayload {
 			users: vec![
 				user(1, Some("2024010001"), "Alice"),
@@ -822,18 +807,14 @@ mod tests {
 			AttemptPolicy::Latest,
 		);
 
-		// A map keyed on the student number would have kept one of these.
-		assert_eq!(input.student_count(), 2);
-		let canvas_ids: Vec<Option<u64>> = input
-			.students
-			.iter()
-			.map(|s| s.identity.canvas_user_id)
-			.collect();
-		assert_eq!(canvas_ids, vec![Some(1), Some(2)]);
-		assert!(input.diagnostics.iter().any(|d| matches!(
-			&d.kind,
-			DiagnosticKind::DuplicateRosterEntry { count, .. } if *count == 2
-		)));
+		// A student number identifies one person, so two enrolments claiming it cannot
+		// both be right — and picking one would grade somebody's work under another name.
+		let errors: Vec<_> = input.errors().collect();
+		assert_eq!(errors.len(), 1);
+		assert!(matches!(
+			&errors[0].kind,
+			DiagnosticKind::ConflictingRosterEntry { key, .. } if key == "2024010001"
+		));
 	}
 
 	#[test]
@@ -856,43 +837,30 @@ mod tests {
 	}
 
 	#[test]
-	fn test_an_ambiguous_sis_id_is_never_used_to_backfill() {
-		// Two accounts share one 学号, so there is no single right answer — and the result
-		// must not depend on which one the payload happens to list last.
+	fn test_a_contradictory_roster_is_reported_the_same_whatever_the_payload_order() {
 		let users = vec![
 			user(1, Some("2024010001"), "Alice One"),
 			user(2, Some("2024010001"), "Alice Two"),
 		];
 		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
 
-		let forward = normalize(
-			&CanvasPayload {
-				users: users.clone(),
-				..Default::default()
-			},
-			Some(&roster),
-			&downloads(&[]),
-			AttemptPolicy::Latest,
-		);
-		let mut reversed_users = users;
-		reversed_users.reverse();
-		let reversed = normalize(
-			&CanvasPayload {
-				users: reversed_users,
-				..Default::default()
-			},
-			Some(&roster),
-			&downloads(&[]),
-			AttemptPolicy::Latest,
-		);
+		let run = |users: Vec<CanvasUserPayload>| {
+			serde_json::to_string(&normalize(
+				&CanvasPayload {
+					users,
+					..Default::default()
+				},
+				Some(&roster),
+				&downloads(&[]),
+				AttemptPolicy::Latest,
+			))
+			.unwrap()
+		};
 
-		// Two accounts claim this 学号, so no single Canvas id is the right one.
-		assert_eq!(forward.students[0].identity.canvas_user_id, None);
-		assert_eq!(
-			serde_json::to_string(&forward).unwrap(),
-			serde_json::to_string(&reversed).unwrap(),
-			"payload order must not decide an identity"
-		);
+		let mut reversed = users.clone();
+		reversed.reverse();
+		// Which account the payload happened to list first must not decide anything.
+		assert_eq!(run(users), run(reversed));
 	}
 
 	#[test]

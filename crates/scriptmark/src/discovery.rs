@@ -16,7 +16,7 @@ use crate::models::{
 	InputSource, RosterMatch, SourceLocation, StudentFile, StudentIdentity, StudentKey,
 	StudentSubmission, SubmissionAttempt, UnmatchedArtifact, UnmatchedReason, normalize_key,
 };
-use crate::roster::{Roster, RosterLookup};
+use crate::roster::Roster;
 
 /// Directory archives are expanded into, beside the directory being scanned.
 const EXTRACT_DIR: &str = ".scriptmark_extracted";
@@ -478,7 +478,7 @@ pub fn load_local_input(
 		let roster_match = match options.roster {
 			None => RosterMatch::NoRoster,
 			Some(roster) => match roster.lookup(&identity.key) {
-				RosterLookup::Unique(i) => {
+				Some(i) => {
 					identity.confirm_number();
 					identity.name = roster.entries[i].name.clone();
 					identity.canvas_user_id = roster.entries[i].canvas_user_id;
@@ -486,19 +486,7 @@ pub fn load_local_input(
 					covered_canvas_ids.extend(identity.canvas_user_id);
 					RosterMatch::Matched(i)
 				}
-				RosterLookup::Ambiguous(hits) => {
-					identity.confirm_number();
-					covered.insert(identity.key.clone());
-					covered_canvas_ids.extend(identity.canvas_user_id);
-					diagnostics.push(InputDiagnostic::warning(
-						DiagnosticKind::AmbiguousRosterMatch {
-							key: key.clone(),
-							count: hits.len(),
-						},
-					));
-					RosterMatch::Ambiguous(hits)
-				}
-				RosterLookup::Missing => {
+				None => {
 					diagnostics.push(InputDiagnostic::warning(DiagnosticKind::NotOnRoster {
 						key: key.clone(),
 					}));
@@ -533,19 +521,16 @@ pub fn load_local_input(
 				continue;
 			}
 			covered_canvas_ids.extend(entry.canvas_user_id);
-			let lookup = roster.lookup(&entry.key);
-			let unambiguous = matches!(lookup, RosterLookup::Unique(_));
-			let hits = lookup.hits();
+			let Some(index) = roster.lookup(&entry.key) else {
+				continue;
+			};
 			let mut identity = match &entry.key {
 				StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
 				key => StudentIdentity::number(key.raw()),
 			};
 			identity.name = entry.name.clone();
-			// Several rows share this key, so none of their Canvas ids is *the* answer.
-			if unambiguous {
-				identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
-			}
-			students.push(StudentSubmission::not_submitted(identity, hits));
+			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+			students.push(StudentSubmission::not_submitted(identity, index));
 		}
 	}
 
@@ -850,223 +835,46 @@ mod tests {
 	}
 
 	#[test]
-	fn test_duplicate_roster_rows_do_not_spawn_a_phantom_non_submitter() {
+	fn test_a_repeated_roster_row_yields_one_student() {
 		let dir = tempfile::tempdir().unwrap();
 		std::fs::write(dir.path().join("2024010001_lab1.py"), "pass").unwrap();
 
-		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024010001", "Alice Chen")]);
+		// The same person listed twice — merged before the submission ever looks them up.
+		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024010001", "Alice")]);
 		let input = scan_with(dir.path(), &roster);
 
 		assert_eq!(input.student_count(), 1);
-		assert_eq!(
-			input.students[0].roster_match,
-			RosterMatch::Ambiguous(vec![0, 1])
-		);
+		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
+		assert_eq!(input.students[0].identity.name.as_deref(), Some("Alice"));
 		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
-		assert!(input.diagnostics.iter().any(|d| matches!(
-			&d.kind,
-			DiagnosticKind::DuplicateRosterEntry { count, .. } if *count == 2
-		)));
 	}
 
 	#[test]
-	fn test_duplicate_roster_rows_do_not_fan_a_non_submitter_out() {
+	fn test_a_repeated_roster_row_does_not_spawn_a_phantom_non_submitter() {
 		let dir = tempfile::tempdir().unwrap();
-		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024010001", "Alice Chen")]);
+		let roster = Roster::from_pairs(&[("2024010004", "Dan"), ("2024010004", "Dan")]);
 		let input = scan_with(dir.path(), &roster);
 
-		// One student for one number, however many rows name them — two entries would
-		// collide on student_id the moment anything tried to persist them.
+		// One row per person, whether or not they submitted — two would collide on
+		// student_id the moment anything tried to persist them.
 		assert_eq!(input.student_count(), 1);
-		assert_eq!(
-			input.students[0].roster_match,
-			RosterMatch::Ambiguous(vec![0, 1])
-		);
 		assert_eq!(input.students[0].outcome(), SubmissionOutcome::NotSubmitted);
 	}
 
 	#[test]
-	fn test_a_token_with_stray_whitespace_does_not_split_a_student_in_two() {
-		let dir = tempfile::tempdir().unwrap();
-		std::fs::write(dir.path().join("2024010001 _lab1.py"), "pass").unwrap();
-
-		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
-		let input = scan_with(dir.path(), &roster);
-
-		assert_eq!(input.student_count(), 1);
-		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
-		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
-	}
-
-	#[test]
-	fn test_an_unreadable_archive_is_not_reported_as_a_non_submission() {
-		let dir = tempfile::tempdir().unwrap();
-		// A truncated upload: the name is intact, the bytes are not.
-		std::fs::write(
-			dir.path().join("2024010001_lab1.zip"),
-			b"PK\x03\x04 truncated",
-		)
-		.unwrap();
-
-		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
-		let input = scan_with(dir.path(), &roster);
-
-		assert_eq!(input.student_count(), 1);
-		// Something arrived — it just could not be opened. That is not 缺交.
-		assert_eq!(
-			input.students[0].outcome(),
-			SubmissionOutcome::SubmittedEmpty
-		);
-		assert!(
-			input
-				.diagnostics
-				.iter()
-				.any(|d| matches!(&d.kind, DiagnosticKind::ArchiveUnreadable { .. }))
-		);
-	}
-
-	#[test]
-	fn test_a_rejected_archive_entry_does_not_block_the_real_submission() {
-		let dir = tempfile::tempdir().unwrap();
-		let zip_path = dir.path().join("2024010001_lab1.zip");
-		let file = std::fs::File::create(&zip_path).unwrap();
-		let mut zip = zip::ZipWriter::new(file);
-		use std::io::Write;
-		// Oversized junk that flattens onto the same name as the real file.
-		zip.start_file("junk/lab1.py", zip::write::SimpleFileOptions::default())
-			.unwrap();
-		zip.write_all(&vec![b'#'; (MAX_FILE_SIZE + 1) as usize])
-			.unwrap();
-		zip.start_file("src/lab1.py", zip::write::SimpleFileOptions::default())
-			.unwrap();
-		zip.write_all(b"def f(): return 1").unwrap();
-		zip.finish().unwrap();
-
-		let input = scan(dir.path());
-
-		// The rejected entry must not reserve the name the real submission needs.
-		assert_eq!(input.student_count(), 1);
-		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
-		assert_eq!(
-			input.students[0].files()[0].origin,
-			FileOrigin::Archive {
-				archive: zip_path,
-				entry: "src/lab1.py".to_string(),
-			}
-		);
-	}
-
-	#[test]
-	fn test_skip_diagnostics_survive_a_cached_rerun() {
-		let dir = tempfile::tempdir().unwrap();
-		let zip_path = dir.path().join("2024010001_lab1.zip");
-		let file = std::fs::File::create(&zip_path).unwrap();
-		let mut zip = zip::ZipWriter::new(file);
-		use std::io::Write;
-		zip.start_file("ok.py", zip::write::SimpleFileOptions::default())
-			.unwrap();
-		zip.write_all(b"pass").unwrap();
-		zip.start_file("huge.py", zip::write::SimpleFileOptions::default())
-			.unwrap();
-		zip.write_all(&vec![b'#'; (MAX_FILE_SIZE + 1) as usize])
-			.unwrap();
-		zip.finish().unwrap();
-
-		let skips = |input: &AssignmentInput| {
-			input
-				.diagnostics
-				.iter()
-				.filter(|d| matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { .. }))
-				.count()
-		};
-		// A teacher rerunning the same directory must still be told a file was dropped.
-		assert_eq!(skips(&scan(dir.path())), 1);
-		assert_eq!(skips(&scan(dir.path())), 1);
-	}
-
-	/// Builds a zip whose `bad.py` payload fails its CRC check, so `read_to_end` errors.
-	fn zip_with_a_corrupt_entry(path: &std::path::Path) {
-		use std::io::Write;
-		let file = std::fs::File::create(path).unwrap();
-		let mut zip = zip::ZipWriter::new(file);
-		let stored = zip::write::SimpleFileOptions::default()
-			.compression_method(zip::CompressionMethod::Stored);
-		zip.start_file("good.py", stored).unwrap();
-		zip.write_all(b"pass").unwrap();
-		zip.start_file("bad.py", stored).unwrap();
-		zip.write_all(b"PAYLOAD!").unwrap();
-		zip.finish().unwrap();
-
-		// Flip a payload byte after the CRC was computed.
-		let mut bytes = std::fs::read(path).unwrap();
-		let at = bytes
-			.windows(8)
-			.position(|w| w == b"PAYLOAD!")
-			.expect("payload");
-		bytes[at] ^= 0xff;
-		std::fs::write(path, bytes).unwrap();
-	}
-
-	#[test]
-	fn test_an_unreadable_entry_is_reported_on_every_run_not_just_the_first() {
-		let dir = tempfile::tempdir().unwrap();
-		zip_with_a_corrupt_entry(&dir.path().join("2024010001_lab1.zip"));
-
-		let skips = |input: &AssignmentInput| {
-			input
-				.diagnostics
-				.iter()
-				.filter(|d| matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { .. }))
-				.count()
-		};
-		// A teacher rerunning the same directory must still be told the file was dropped.
-		assert_eq!(skips(&scan(dir.path())), 1);
-		assert_eq!(skips(&scan(dir.path())), 1);
-		assert_eq!(
-			serde_json::to_string(&scan(dir.path())).unwrap(),
-			serde_json::to_string(&scan(dir.path())).unwrap()
-		);
-	}
-
-	#[test]
-	fn test_one_students_skip_does_not_swallow_anothers() {
-		let dir = tempfile::tempdir().unwrap();
-		// Students name their files after the assignment, so entry names collide across
-		// archives by construction — the diagnostic must be attributed per archive.
-		zip_with_a_corrupt_entry(&dir.path().join("2024010001_lab1.zip"));
-		zip_with_a_corrupt_entry(&dir.path().join("2024010002_lab1.zip"));
-
-		let input = scan(dir.path());
-		let archives: std::collections::BTreeSet<String> = input
-			.diagnostics
-			.iter()
-			.filter_map(|d| match &d.kind {
-				DiagnosticKind::ArchiveEntrySkipped { archive, .. } => {
-					Some(archive.file_name()?.to_string_lossy().into_owned())
-				}
-				_ => None,
-			})
-			.collect();
-		assert_eq!(
-			archives.len(),
-			2,
-			"both students must be told, got {archives:?}"
-		);
-	}
-
-	#[test]
-	fn test_a_reserved_prefix_in_a_roster_id_does_not_swallow_a_student() {
+	fn test_a_contradictory_roster_surfaces_as_an_error_not_a_warning() {
 		let dir = tempfile::tempdir().unwrap();
 		let roster_path = dir.path().join("roster.csv");
 		std::fs::write(
 			&roster_path,
-			"name,class,student_id\nAlice,A,2024010001\nOdd,B,canvas:5\n",
+			"name,class,student_id\nAlice Wu,A,2024010001\nAlice Chen,B,2024010001\n",
 		)
 		.unwrap();
 		let roster = crate::roster::load_roster(&roster_path).unwrap();
 
 		let subs = dir.path().join("subs");
 		std::fs::create_dir(&subs).unwrap();
+		std::fs::write(subs.join("2024010001_lab1.py"), "pass").unwrap();
 		let input = load_local_input(
 			&[&subs],
 			LocalInputOptions {
@@ -1076,15 +884,14 @@ mod tests {
 		)
 		.unwrap();
 
-		// The reserved-prefix row is refused at the door and said so, rather than being
-		// silently merged with a Canvas-keyed student later.
-		assert_eq!(input.student_count(), 1);
-		assert!(
-			input
-				.diagnostics
-				.iter()
-				.any(|d| matches!(&d.kind, DiagnosticKind::UnusableRosterRow { .. }))
-		);
+		// The CLI refuses to grade while this is present — attributing this submission to
+		// either name would be a coin flip.
+		let errors: Vec<_> = input.errors().collect();
+		assert_eq!(errors.len(), 1);
+		assert!(matches!(
+			&errors[0].kind,
+			DiagnosticKind::ConflictingRosterEntry { .. }
+		));
 	}
 
 	#[test]

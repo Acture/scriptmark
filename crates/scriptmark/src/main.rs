@@ -390,6 +390,19 @@ fn build_local_input(
 	.context("Failed to discover submissions")?;
 
 	report_input(&input);
+
+	// An Error diagnostic means the input cannot be trusted — a roster that disagrees with
+	// itself about who a 学号 belongs to would attribute somebody's work to the wrong name.
+	// Stop before running anything rather than producing results nobody should act on.
+	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
+	if !errors.is_empty() {
+		anyhow::bail!(
+			"refusing to grade: {} problem(s) with the input\n  {}",
+			errors.len(),
+			errors.join("\n  ")
+		);
+	}
+
 	Ok(input)
 }
 
