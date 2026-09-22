@@ -36,6 +36,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rusqlite = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+tar = "0.4.46"
+flate2 = "1.1.10"
+sevenz-rust2 = "0.23.0"
 
 [dev-dependencies]
 tempfile = "3"

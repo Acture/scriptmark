@@ -19,7 +19,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use super::client::{CanvasClient, CanvasError};
-use crate::discovery::expand_archive;
+use crate::archive;
 use crate::input::canvas::{
 	CanvasAttachmentPayload, CanvasPayload, DownloadedAttachment, DownloadedAttachments,
 	ExpandedEntry,
@@ -121,15 +121,9 @@ fn distinct_attachments(payload: &CanvasPayload) -> BTreeMap<u64, &CanvasAttachm
 	found
 }
 
-fn is_zip(path: &Path) -> bool {
-	path.extension()
-		.and_then(|e| e.to_str())
-		.is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-}
-
 /// Expand an archive attachment beside itself, and map it into the input's shape.
 fn expansion_of(path: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<ExpandedEntry> {
-	if !is_zip(path) {
+	if archive::format_of(path).is_none() {
 		return Vec::new();
 	}
 	let stem = path
@@ -137,7 +131,7 @@ fn expansion_of(path: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<Expa
 		.and_then(|s| s.to_str())
 		.unwrap_or("archive");
 	let target = path.with_file_name(format!("{stem}.extracted"));
-	expand_archive(path, &target, diagnostics)
+	archive::expand(path, &target, &archive::is_gradeable, diagnostics)
 		.into_iter()
 		.map(|file| ExpandedEntry {
 			entry: file.entry,
