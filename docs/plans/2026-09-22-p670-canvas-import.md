@@ -3,10 +3,18 @@
 Linear: https://linear.app/acturea/issue/P-670
 Parent: P-663 · Milestone: Canvas 与本地提交可统一导入
 
-Revision 2 — Revision 1 was written against commit `541b259`, then put through a six-lens
+Revision 3 — Revision 1 was written against commit `541b259`, then put through a six-lens
 adversarial review (60 findings, 28 survived refutation). Revision 1 asserted that
 `normalize` was correct and would not be touched. That was wrong in four places, and the
-sections below that carried the most weight — D6, D8, D9, D10 — were the ones that broke.
+sections that carried the most weight — D6, D8, D9, D10 — were the ones that broke.
+
+Revision 2's rewrites of those sections then went through a narrow three-lens re-review
+(29 findings, 17 survived). Two of its new decisions were unimplementable as written: the
+bundle stated two contradictory atomicity models (D6/D8), and `attachments.json` had no
+room for the zip-expansion data D7 required of it, so an offline re-grade would have
+reported every zip submitter `SubmittedEmpty`. D11 and D12 were each wrong in one case —
+excused-after-submitting, and `canvas fetch` having nothing to normalise with. Revision 3
+fixes those; the decisions themselves stand.
 
 ## Scope
 
@@ -197,12 +205,34 @@ provenance, and the teacher should see what Canvas actually reported.
 (`filename` is *not* the risky field and is *not* percent-encoded — attachment_fu's
 `sanitize_filename` already reduces it to `[\w.-]`.)
 
-**Writes are atomic**: download to `<name>.part`, then rename. This removes the truncation
-window rather than trying to detect it afterwards.
+**There is exactly one atomicity model, and it is per-file.** Revision 2 stated two and
+reconciled neither: D6 staged each attachment as `<name>.part` inside the live bundle,
+while D8 said the fetch wrote to a temp directory and renamed into place. The second breaks
+the first — a fresh temp directory holds no prior files, so skip-by-size can never fire and
+every attachment is re-downloaded; and `fs::rename` onto an existing non-empty directory is
+`ENOTEMPTY`, so the second fetch into a bundle errors outright.
+
+So: **the fetch works in place in `<bundle>/`.** Each attachment is staged as `<name>.part`
+and renamed, which closes the truncation window. `canvas-payload.json` and
+`attachments.json` are written the same way — temp file, then rename, **within the bundle
+directory** — and they are written *last*. A listing failure therefore leaves the previous
+manifest and the previous files exactly as they were, which is what D8's "the existing
+bundle is left intact" actually requires.
 
 **Re-fetch skips** an attachment when the file exists and its size equals
 `attachment.size`. When Canvas reports no size, the file is re-downloaded — guessing that
 an existing byte count is complete is how a truncated file becomes a permanent 0.
+
+**The manifest records delivery, not content.** `attachments.json` holds `{path, size}` or
+`{error}` per id and nothing else. In particular it does **not** record a zip's expanded
+entries — see D7, where expansion is re-derived from the archive on disk on every run. A
+manifest that carried the entry list would be a second source of truth that drifts the
+moment an extraction directory is partially removed or a bundle is hand-edited.
+
+**The loader verifies the manifest against the disk.** A manifest entry whose file is
+missing becomes `AttachmentUnavailable { reason: "recorded in the manifest but missing from
+the bundle" }`, not a run-time file-not-found much later. A stale or partially deleted
+bundle is a diagnostic, not a crash.
 
 ### D7 — A zip attachment is expanded, and a failed download is a value, not an absence
 
@@ -227,11 +257,33 @@ map, no double-fire.
 FileOrigin::Attachment { attempt: u32, attachment_id: u64, entry: Option<String> }
 ```
 
-`entry` is `#[serde(default)]`, so old results still load; it is `Some` exactly when the
-file came out of a zip attachment. The archive's own path is recoverable from
-`attachment_id`, so a fourth `FileOrigin` variant would only add a second way to say the
-same thing. A zip that expands to nothing runnable leaves its owner `SubmittedEmpty` with
-the per-entry diagnostics explaining why.
+`entry` is `Some` exactly when the file came out of a zip attachment, and `Option` because
+most files have no archive entry — **not** for backward compatibility. Revision 2 claimed
+`#[serde(default)]` was there "so old results still load"; that was false. `StudentReport`
+holds no `StudentFile`, so `FileOrigin` has never been written to `results.json`, and
+`input.json` (D12) is the first artefact that serialises it at all. There is no legacy file
+to be compatible with, and CLAUDE.md bars shims for imaginary ones.
+
+The archive's own path is recoverable from `attachment_id`, so a fourth `FileOrigin`
+variant would only add a second way to say the same thing. A zip that expands to nothing
+runnable leaves its owner `SubmittedEmpty` with the per-entry diagnostics explaining why.
+
+**Expansion is derived from the zip on disk, on every run, on both paths.** This is the
+hole Revision 2 left: `attachments.json` cannot carry `expanded` (D6), so an offline
+`grade --canvas` would rebuild every zip as `Ok` with an empty `expanded`, fall to "the
+attachment itself is the candidate", find `detect_language("zip") == None`, and report the
+student `SubmittedEmpty` — while the same bundle's fetch-time `input.json` said
+`Executable`. One bundle, two contradictory answers, and because `IgnoredFile` is only
+`Info`, D10's refuse-on-`Error` gate never trips.
+
+Re-deriving is safe and cheap: `extract_archives` records provenance *before* its
+`out_path.exists()` skip, so a second pass over a cached extraction rewrites no bytes, is
+idempotent, and re-emits the zip-bomb guard diagnostics — which belong in the input anyway.
+A directory scan of the extraction tree would **not** work: expansion flattens
+`src/Lab5.py` to `Lab5.py`, so the in-archive path is only recoverable by re-reading the
+zip index. The fetcher and the loader call one shared function, including the
+`ExtractedFile -> ExpandedEntry` mapping, so the two paths cannot produce different
+`FileOrigin`s.
 
 **The extraction code is reused, not rewritten.** `discovery::extract_archives` already
 handles traversal (`enclosed_name`), name collision, the `MAX_FILE_SIZE` /
@@ -260,14 +312,23 @@ A partial *listing* is fatal because the cohort is the thing being established: 
 submissions page that silently went missing becomes a class of phantom 缺交 with no way for
 the teacher to see it. A single attachment is the opposite — 单个附件失败不伪装成学生缺交 —
 so it degrades to a diagnostic and the student keeps whatever else they handed in. The
-fetch writes to a temp directory and renames into place, so a failed re-fetch cannot
-clobber a good bundle.
+"existing bundle is left intact" guarantee is delivered by D6's per-file staging plus
+writing the two JSON files last, **not** by a whole-directory swap.
 
 **Diagnostics name the student.** `AttachmentUnavailable` and `PendingDownload` both carry
 `key: String`, matching `UnsupportedSubmissionType`. Without it the failure list the ticket
 demands (提供导入汇总与失败项) is a flat list of attachment ids that no teacher can act on.
-Neither carries `attempt`: `normalize`'s `diagnostics.dedup()` folds the N identical pushes
-a carried-forward attachment generates into one line, and `attempt` would un-fold them.
+
+Neither carries `attempt`, and the reason Revision 2 gave for that was wrong.
+`Vec::dedup` folds only *consecutive* duplicates, while `attempts_of` iterates
+attempt-major over attachment-minor — so two carried-forward attachments across two
+attempts push `A₁, B₁, A₂, B₂`, no two equal entries adjacent, and the existing
+`diagnostics.dedup()` removes nothing. The only sort that would group them runs *after*.
+So the code changes to `diagnostics.sort(); diagnostics.dedup();`, both derives already
+being in place. The conclusion still stands — adding `attempt` would make the lines
+non-identical and guarantee K×M of them even after sorting — but it now rests on something
+true. This is latent today only because `submission_history` is never requested; D1 turns
+it on.
 
 **Unsupported types are a default arm, not a whitelist.** Revision 1 enumerated five types,
 which leaves any other — `basic_lti_launch` is reachable on exactly the assignments
@@ -276,13 +337,21 @@ ScriptMark grades — with no diagnostic at all. Inverted: anything that is not
 emits `UnsupportedSubmissionType` carrying whatever string Canvas sent. A null type on a
 row with no attempt is already `NotSubmitted` and is not reported.
 
-**A duplicate submission row keeps the row that has an attempt.** Canvas's
+**A duplicate submission row keeps the richest row, by a total rule.** Canvas's
 `submissions#index` is offset-paginated over a relation recomputed per request, so an
 enrollment landing mid-walk shifts the window and re-reads a row. Revision 1 kept the
 first, which is the older snapshot: if the student submitted between the two page fetches,
-the kept copy is the placeholder, and a real submitter is reported 缺交 behind a warning
-that says "kept the first". It stays a warning — escalating to an Error would refuse to
-grade the whole class over transient skew a re-fetch resolves.
+the kept copy is the placeholder, and a real submitter is reported 缺交.
+
+The rule has to be total, so: prefer the row with an `attempt`; if both have one, keep the
+higher; if neither does, keep either — two placeholders for one user carry the same
+information. This means the loop **collects rows per `user_id` first and then decides**,
+rather than deciding as it streams, which is what Revision 2's wording implied and what
+cannot implement "keep the higher attempt". The diagnostic's message changes with the
+rule — "kept the first" would now be a lie — to name which attempt survived.
+
+It stays a warning: escalating to an Error would refuse to grade the whole class over
+transient snapshot skew that a re-fetch resolves.
 
 ```rust
 #[error("attachment {attachment_id} ('{filename}') could not be downloaded for '{key}': {reason}")]
@@ -347,8 +416,14 @@ scriptmark run   --canvas canvas/hw1 -t tests/
 ```
 
 `--canvas-url` falls back to `CANVAS_URL`, as `CANVAS_TOKEN` already works.
-`--course-id` / `--assignment-id` default to `assignment.toml`'s `canvas_course_id` /
-`canvas_assignment_id`, which P-669 added and nothing currently reads.
+
+`--course-id` / `--assignment-id` may be supplied directly, or defaulted from a toml named
+by an explicit `--assignment <path>`, which is what supplies P-669's `canvas_course_id` /
+`canvas_assignment_id` — the fields nothing currently reads. Fetch does **not** search for
+an `assignment.toml` implicitly: `load_assignment` resolves relative to a tests directory,
+and fetch has none. With neither the flags nor the toml, fetch fails rather than guessing.
+Revision 2 promised a toml-derived default without saying where the toml came from, which
+left the resolution rule to be invented at implementation time.
 
 Splitting fetch from grade is the point: re-running a spec must not re-download a class's
 work, and the bundle is what makes a run reproducible.
@@ -395,10 +470,25 @@ and `not_submitted(identity, roster_index, source_status)` carries the row's sta
 This works because `merged_roster` enrols every `payload.users` entry, so every placeholder
 row's owner is recreated in the roster-merge loop — that is the load-bearing check.
 
-To keep the fact in one place rather than two, `StudentSubmission::source_status()` reads
-the selected attempt's when there is one and the placeholder's otherwise, with a
-`debug_assert!` that the stored field is `None` whenever `attempts` is non-empty.
-`report_input` counts excused separately, or the status is preserved and still invisible.
+**`excused` and `missing` describe the submission record; `late` and `workflow_state`
+describe an attempt.** Revision 2 missed this and stored the row's status only for
+placeholder rows, reading it back through a single `source_status()` that returned the
+*selected attempt's*. Under `attempt_policy = "earliest"`, a student who submitted twice
+and was then excused reports `excused == false` — the excusal is on the record, but the
+accessor was looking at an old snapshot. `report_input`'s excused count would undercount by
+exactly those students.
+
+So the row-level `SourceStatus` is stored on `StudentSubmission` **unconditionally**, not
+just for placeholders, and there are two accessors rather than one merged value:
+
+- `source_status()` — the selected attempt's, unchanged: per-attempt provenance;
+- `record_status()` — the submission row's: authoritative for `excused` and `missing`.
+
+They are deliberately **not** merged into one struct. Canvas computes `late`, `missing` and
+`seconds_late` together from one record, so splicing `missing` from the row into an
+attempt's status could emit `late: true, missing: true` — a combination that never existed
+in any single snapshot. Two accessors, each faithful to its own record, and no
+`debug_assert!` to uphold. `report_input` counts excused off `record_status()`.
 
 No `Excused` variant is added to `SubmissionOutcome`: this is provenance, and
 zero-vs-ungraded is P-677's. Nothing here changes a grade today — P-669's D6 already leaves
@@ -410,10 +500,22 @@ The ticket asks the import to 输出统一输入模型 and to 明确使用哪次
 neither durably: the selected attempt existed only in memory and reached no teacher-visible
 surface.
 
-`grade --canvas` and `canvas fetch` write the normalised `AssignmentInput` to
-`<bundle>/input.json`. `StudentSubmission.selected` **is** the durable record of which
-attempt was graded, per student, with its `submitted_at` and its files' provenance beside
-it. The import summary additionally prints how many students are graded on an attempt later
+**`grade --canvas` and `run --canvas` write `<bundle>/input.json`. `canvas fetch` does
+not.** Revision 2 gave the file two writers and no way to build one of them: fetch carries
+no `-t` and no `--assignment`, so it has neither the declared `Assignment` nor the
+`AttemptPolicy` that `normalize` now requires, and would have to pass
+`AttemptPolicy::default()` — silently baking `Latest` into `selected` for a course that
+declared `earliest`, which is the exact defect D10 exists to prevent. Fetch's job is to
+bring the raw material down; normalising is grading's.
+
+`StudentSubmission.selected` **is** the durable record of which attempt was graded, per
+student, with its `submitted_at` and its files' provenance beside it. For that record to
+mean anything, `AssignmentInput` gains `attempt_policy: AttemptPolicy` — an index whose
+governing rule is unrecorded says which attempt was chosen but not why, and cannot be
+checked against the `results.json` produced from it. The local path fills it from
+`LocalInputOptions`, which already carries it.
+
+The import summary additionally prints how many students are graded on an attempt later
 than their first.
 
 Deliberately **not** done: adding `attempt` / `submitted_at` to `StudentReport`.
@@ -429,9 +531,9 @@ statement, not a neutral default"). The grading result format is P-678's.
 | `canvas/client.rs` | `Link`-header `paginate`; timeouts on the builder; `pull_roster -> Vec<CanvasUserPayload>`; `fetch_assignment`, `fetch_submissions`, `list_courses`, `list_assignments`, `download_attachment`; delete `CanvasUser`; `save_roster_csv` on `csv::Writer` + `canvas_id` |
 | `canvas/bundle.rs` *(new)* | write/read `canvas-payload.json`, `attachments.json`, `attachments/<id>/`; `disk_name`; atomic write; skip-by-size; zip expansion; `input.json` |
 | `canvas/mod.rs` | re-export the bundle loader/fetcher |
-| `input/canvas.rs` | `content-type` rename; `Result`-valued `DownloadedAttachments`; `attempts_of` reads `expanded` + keyed diagnostics; retained placeholder rows; `normalize` takes an `Assignment`; duplicate-row rule; `UnsupportedSubmissionType` default arm |
-| `models/submission.rs` | `FileOrigin::Attachment` += `entry`; `StudentSubmission` += `source_status` + accessor; `not_submitted` signature; `key` on `AttachmentUnavailable` / `PendingDownload`; 2 new `DiagnosticKind` variants |
-| `discovery.rs` | extract `expand_archive`; `not_submitted` call site |
+| `input/canvas.rs` | `content-type` rename; `Result`-valued `DownloadedAttachments`; `attempts_of` reads `expanded` + keyed diagnostics; retained placeholder rows; `normalize` takes an `Assignment` + records the policy; duplicate-row rule (collect-then-decide); `sort` before `dedup`; `UnsupportedSubmissionType` default arm; `CanvasAttachmentPayload::name()` becomes `pub(crate)` so `bundle.rs` can share it |
+| `models/submission.rs` | `FileOrigin::Attachment` += `entry`; `StudentSubmission` += row `SourceStatus` + `record_status()`; `not_submitted` signature; `AssignmentInput` += `attempt_policy`; `key` on `AttachmentUnavailable` / `PendingDownload`; duplicate-row diagnostic wording; 2 new `DiagnosticKind` variants |
+| `discovery.rs` | extract `expand_archive` (and make it and `ExtractedFile` `pub(crate)`, or it fails `clippy -D warnings` as a private type in a `pub(crate)` signature); `not_submitted` and `AssignmentInput` literal call sites |
 | `roster.rs` | `load_roster` reads column 3 as `canvas_id`; width-gated blank-id ⇒ `CanvasUser` |
 | `main.rs` | `canvas` subcommand group; `--canvas` on grade/run with `required_unless_present` + `conflicts_with`; toml merge; `report_input` gains excused + later-attempt lines; `cmd_roster_pull` |
 | `tests/input_equivalence.rs` | 2 `DownloadedAttachments` literals + the `values()` `is_file` loop |
@@ -489,10 +591,21 @@ Without a server:
 18. an excused placeholder row (`attempt: null, excused: true`) ⇒ `NotSubmitted` with
     `source_status().excused == true`;
 19. a bundle round-trip: fetch → `attachments.json` → offline load ⇒ the same
-    `AssignmentInput`, including a recorded download failure coming back as
-    `AttachmentUnavailable` rather than `PendingDownload`;
+    `AssignmentInput`. **The fixture must contain a zip attachment**, and the test asserts
+    `FileOrigin::Attachment { entry: Some("src/Lab5.py") }` survives the reload — without
+    both, the round-trip passes while zip provenance is silently lost, and a directory-scan
+    implementation (which cannot recover the in-archive path) would also pass. It also
+    covers a recorded download failure coming back as `AttachmentUnavailable` rather than
+    `PendingDownload`;
 20. bundle Canvas ids disagreeing with `assignment.toml`'s ⇒ refused, naming both;
-21. a legacy `results.json` with no `entry` field still loading.
+21. a manifest entry whose file has been deleted ⇒ `AttachmentUnavailable`, not a
+    file-not-found at run time;
+22. a student excused *after* submitting twice, under `attempt_policy = "earliest"` ⇒
+    `record_status().excused` is true while `source_status()` still describes attempt 1.
+    This is the case Revision 2 got wrong, and no single-attempt fixture can catch it;
+23. two carried-forward attachments across two attempts, both failing ⇒ two diagnostic
+    lines, not four — the `sort`-before-`dedup` fix;
+24. two submission rows for one user, both with attempts ⇒ the higher attempt survives.
 
 Any committed bundle fixture is checked with `git add -n` before it is relied on —
 `.gitignore` has broad `*.csv` / `submissions` rules and P-669 needed an explicit
