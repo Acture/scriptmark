@@ -722,6 +722,7 @@ mod tests {
 		);
 	}
 
+	#[cfg(unix)]
 	#[test]
 	fn test_a_file_we_cannot_stat_is_reported_not_treated_as_absent() {
 		let dir = tempfile::tempdir().unwrap();
@@ -749,6 +750,7 @@ mod tests {
 		);
 	}
 
+	#[cfg(unix)]
 	#[test]
 	fn test_a_symlinked_submission_is_still_graded() {
 		let dir = tempfile::tempdir().unwrap();
