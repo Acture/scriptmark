@@ -58,11 +58,11 @@ fn extract_sid(filename: &str) -> Option<String> {
 
 /// A file that came out of an archive, with the provenance needed to trace it back.
 #[derive(Debug, Clone)]
-struct ExtractedFile {
-	out_path: PathBuf,
-	archive: PathBuf,
+pub(crate) struct ExtractedFile {
+	pub(crate) out_path: PathBuf,
+	pub(crate) archive: PathBuf,
 	/// The path *inside* the archive, before flattening.
-	entry: String,
+	pub(crate) entry: String,
 }
 
 const MAX_FILE_SIZE: u64 = 5_000_000; // 5 MB per file
@@ -81,11 +81,175 @@ fn skipped(archive: &Path, entry: &str, reason: String) -> InputDiagnostic {
 	})
 }
 
-/// Extract `.zip` archives in a directory to `{EXTRACT_DIR}/{archive_stem}/`.
+/// Expand one `.zip` into `target`, flattening entries onto their base names.
 ///
-/// Archives already extracted are not re-extracted, but their index is re-read so that
-/// provenance survives a second run — otherwise a cached extraction would leave every file
-/// it produced with no traceable origin.
+/// Shared with the Canvas importer, whose attachments are commonly archives. Everything
+/// that makes this safe to point at student-uploaded input lives here: `enclosed_name`
+/// rejects traversal, the three size and count guards bound a zip bomb, and a rejected
+/// entry unwinds its claim, its provenance and the counters together so it cannot block the
+/// real file that wanted the same flattened name.
+///
+/// Entries already on disk are not rewritten, but their provenance is recorded again, so a
+/// cached extraction still traces every file back to the entry it came from.
+pub(crate) fn expand_archive(
+	archive: &Path,
+	target: &Path,
+	diagnostics: &mut Vec<InputDiagnostic>,
+) -> Vec<ExtractedFile> {
+	let mut extracted = Vec::new();
+
+	let unreadable = |reason: String| {
+		InputDiagnostic::warning(DiagnosticKind::ArchiveUnreadable {
+			archive: archive.to_path_buf(),
+			reason,
+		})
+	};
+
+	let file = match std::fs::File::open(archive) {
+		Ok(f) => f,
+		Err(e) => {
+			diagnostics.push(unreadable(e.to_string()));
+			return extracted;
+		}
+	};
+	let mut zip_archive = match zip::ZipArchive::new(file) {
+		Ok(a) => a,
+		Err(e) => {
+			diagnostics.push(unreadable(e.to_string()));
+			return extracted;
+		}
+	};
+
+	if let Err(e) = std::fs::create_dir_all(target) {
+		diagnostics.push(unreadable(format!(
+			"cannot create extraction directory: {e}"
+		)));
+		return extracted;
+	}
+
+	let mut total_bytes: u64 = 0;
+	let mut file_count: usize = 0;
+	// Flattening can map two in-archive paths onto one output name; remember who got
+	// there first so the loser is reported rather than silently dropped.
+	let mut claimed: BTreeMap<PathBuf, String> = BTreeMap::new();
+
+	for i in 0..zip_archive.len() {
+		let mut entry = match zip_archive.by_index(i) {
+			Ok(e) => e,
+			Err(e) => {
+				// Unreadable metadata is still something that arrived; reporting it is
+				// what keeps "nothing is dropped on the floor" true.
+				diagnostics.push(skipped(archive, &format!("entry #{i}"), e.to_string()));
+				continue;
+			}
+		};
+		if entry.is_dir() {
+			continue;
+		}
+
+		let Some(name) = entry.enclosed_name() else {
+			// Path traversal attempt.
+			diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::ArchiveEntrySkipped {
+					archive: archive.to_path_buf(),
+					entry: entry.name().to_string(),
+					reason: "unsafe path".to_string(),
+				},
+			));
+			continue;
+		};
+		let entry_name = name.to_string_lossy().into_owned();
+
+		let Some(filename) = name.file_name().map(|n| n.to_owned()) else {
+			continue;
+		};
+		if is_noise(&filename.to_string_lossy()) {
+			continue;
+		}
+
+		let out_path = target.join(&filename);
+
+		if let Some(first) = claimed.get(&out_path) {
+			diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::ArchiveNameCollision {
+					archive: archive.to_path_buf(),
+					entry: format!("{entry_name} (already taken by {first})"),
+				},
+			));
+			continue;
+		}
+
+		// Every guard runs before the entry is recorded. Claiming the name first would
+		// let a rejected entry block the real submission from ever being extracted, and
+		// the accounting runs on a cached rerun too so the diagnostics do not vanish
+		// the second time a directory is scanned.
+		if entry.size() > MAX_FILE_SIZE {
+			diagnostics.push(skipped(
+				archive,
+				&entry_name,
+				format!(
+					"{} bytes exceeds the {MAX_FILE_SIZE} byte limit",
+					entry.size()
+				),
+			));
+			continue;
+		}
+		if total_bytes + entry.size() > MAX_TOTAL_SIZE {
+			diagnostics.push(skipped(
+				archive,
+				&entry_name,
+				format!("archive exceeds the {MAX_TOTAL_SIZE} byte total"),
+			));
+			break;
+		}
+		if file_count >= MAX_FILE_COUNT {
+			diagnostics.push(skipped(
+				archive,
+				&entry_name,
+				format!("archive exceeds the {MAX_FILE_COUNT} file limit"),
+			));
+			break;
+		}
+
+		total_bytes += entry.size();
+		file_count += 1;
+		claimed.insert(out_path.clone(), entry_name.clone());
+
+		// Provenance is recorded whether or not the bytes are written this run, so a
+		// cached extraction still traces back to its archive entry.
+		extracted.push(ExtractedFile {
+			out_path: out_path.clone(),
+			archive: archive.to_path_buf(),
+			entry: entry_name.clone(),
+		});
+
+		// Only the bytes are skipped when the file is already there — an entry that
+		// failed last run is retried, so its diagnostic recurs instead of vanishing on
+		// the second scan of a directory.
+		if out_path.exists() {
+			continue;
+		}
+
+		let mut buf = Vec::new();
+		let failure = match entry.read_to_end(&mut buf) {
+			Err(_) => Some("unreadable entry".to_string()),
+			Ok(_) => std::fs::write(&out_path, &buf).err().map(|e| e.to_string()),
+		};
+		if let Some(reason) = failure {
+			diagnostics.push(skipped(archive, &entry_name, reason));
+			// Roll the claim and the provenance back together; letting them drift is
+			// what lets a rejected entry block a real one.
+			extracted.pop();
+			claimed.remove(&out_path);
+			total_bytes -= entry.size();
+			file_count -= 1;
+		}
+	}
+
+	extracted
+}
+
+/// Extract `.zip` archives in a directory to `{EXTRACT_DIR}/{archive_stem}/`.
 fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<ExtractedFile> {
 	let extract_root = dir.join(EXTRACT_DIR);
 	let mut extracted = Vec::new();
@@ -120,170 +284,13 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 	}
 	archives.sort();
 
-	for archive_path in archives {
-		let stem = archive_path
+	for archive in archives {
+		let stem = archive
 			.file_stem()
 			.and_then(|s| s.to_str())
 			.unwrap_or("unknown");
 		let target = extract_root.join(stem);
-
-		let file = match std::fs::File::open(&archive_path) {
-			Ok(f) => f,
-			Err(e) => {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveUnreadable {
-						archive: archive_path.clone(),
-						reason: e.to_string(),
-					},
-				));
-				continue;
-			}
-		};
-		let mut archive = match zip::ZipArchive::new(file) {
-			Ok(a) => a,
-			Err(e) => {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveUnreadable {
-						archive: archive_path.clone(),
-						reason: e.to_string(),
-					},
-				));
-				continue;
-			}
-		};
-
-		if let Err(e) = std::fs::create_dir_all(&target) {
-			diagnostics.push(InputDiagnostic::warning(
-				DiagnosticKind::ArchiveUnreadable {
-					archive: archive_path.clone(),
-					reason: format!("cannot create extraction directory: {e}"),
-				},
-			));
-			continue;
-		}
-
-		let mut total_bytes: u64 = 0;
-		let mut file_count: usize = 0;
-		// Flattening can map two in-archive paths onto one output name; remember who got
-		// there first so the loser is reported rather than silently dropped.
-		let mut claimed: BTreeMap<PathBuf, String> = BTreeMap::new();
-
-		for i in 0..archive.len() {
-			let mut entry = match archive.by_index(i) {
-				Ok(e) => e,
-				Err(e) => {
-					// Unreadable metadata is still something that arrived; reporting it is
-					// what keeps "nothing is dropped on the floor" true.
-					diagnostics.push(skipped(
-						&archive_path,
-						&format!("entry #{i}"),
-						e.to_string(),
-					));
-					continue;
-				}
-			};
-			if entry.is_dir() {
-				continue;
-			}
-
-			let Some(name) = entry.enclosed_name() else {
-				// Path traversal attempt.
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveEntrySkipped {
-						archive: archive_path.clone(),
-						entry: entry.name().to_string(),
-						reason: "unsafe path".to_string(),
-					},
-				));
-				continue;
-			};
-			let entry_name = name.to_string_lossy().into_owned();
-
-			let Some(filename) = name.file_name().map(|n| n.to_owned()) else {
-				continue;
-			};
-			if is_noise(&filename.to_string_lossy()) {
-				continue;
-			}
-
-			let out_path = target.join(&filename);
-
-			if let Some(first) = claimed.get(&out_path) {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveNameCollision {
-						archive: archive_path.clone(),
-						entry: format!("{entry_name} (already taken by {first})"),
-					},
-				));
-				continue;
-			}
-
-			// Every guard runs before the entry is recorded. Claiming the name first would
-			// let a rejected entry block the real submission from ever being extracted, and
-			// the accounting runs on a cached rerun too so the diagnostics do not vanish
-			// the second time a directory is scanned.
-			if entry.size() > MAX_FILE_SIZE {
-				diagnostics.push(skipped(
-					&archive_path,
-					&entry_name,
-					format!(
-						"{} bytes exceeds the {MAX_FILE_SIZE} byte limit",
-						entry.size()
-					),
-				));
-				continue;
-			}
-			if total_bytes + entry.size() > MAX_TOTAL_SIZE {
-				diagnostics.push(skipped(
-					&archive_path,
-					&entry_name,
-					format!("archive exceeds the {MAX_TOTAL_SIZE} byte total"),
-				));
-				break;
-			}
-			if file_count >= MAX_FILE_COUNT {
-				diagnostics.push(skipped(
-					&archive_path,
-					&entry_name,
-					format!("archive exceeds the {MAX_FILE_COUNT} file limit"),
-				));
-				break;
-			}
-
-			total_bytes += entry.size();
-			file_count += 1;
-			claimed.insert(out_path.clone(), entry_name.clone());
-
-			// Provenance is recorded whether or not the bytes are written this run, so a
-			// cached extraction still traces back to its archive entry.
-			extracted.push(ExtractedFile {
-				out_path: out_path.clone(),
-				archive: archive_path.clone(),
-				entry: entry_name.clone(),
-			});
-
-			// Only the bytes are skipped when the file is already there — an entry that
-			// failed last run is retried, so its diagnostic recurs instead of vanishing on
-			// the second scan of a directory.
-			if out_path.exists() {
-				continue;
-			}
-
-			let mut buf = Vec::new();
-			let failure = match entry.read_to_end(&mut buf) {
-				Err(_) => Some("unreadable entry".to_string()),
-				Ok(_) => std::fs::write(&out_path, &buf).err().map(|e| e.to_string()),
-			};
-			if let Some(reason) = failure {
-				diagnostics.push(skipped(&archive_path, &entry_name, reason));
-				// Roll the claim and the provenance back together; letting them drift is
-				// what lets a rejected entry block a real one.
-				extracted.pop();
-				claimed.remove(&out_path);
-				total_bytes -= entry.size();
-				file_count -= 1;
-			}
-		}
+		extracted.extend(expand_archive(&archive, &target, diagnostics));
 	}
 
 	extracted

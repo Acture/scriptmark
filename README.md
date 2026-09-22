@@ -49,9 +49,16 @@ scriptmark similarity submissions/ --threshold 0.8
 # Generate HTML report
 scriptmark report results.json -o report.html
 
-# Canvas LMS: pull roster / push grades
-CANVAS_TOKEN=... scriptmark roster-pull --canvas-url https://... --course-id 12345
-CANVAS_TOKEN=... scriptmark grades-push --canvas-url https://... --course-id 12345 --assignment-id 67890 results.json
+# Canvas LMS: find a course, fetch an assignment, grade it offline, push grades back
+export CANVAS_TOKEN=... CANVAS_URL=https://canvas.university.edu
+scriptmark canvas courses
+scriptmark canvas assignments --course-id 12345
+scriptmark canvas fetch --course-id 12345 --assignment-id 67890 -o canvas/hw1
+scriptmark grade --canvas canvas/hw1 -t tests/
+scriptmark grades-push --course-id 12345 --assignment-id 67890 output/results.json
+
+# Or just pull the roster
+scriptmark roster-pull --course-id 12345
 
 # Browse results interactively
 scriptmark tui grades.db
