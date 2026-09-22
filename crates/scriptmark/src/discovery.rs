@@ -158,7 +158,16 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 		for i in 0..archive.len() {
 			let mut entry = match archive.by_index(i) {
 				Ok(e) => e,
-				Err(_) => continue,
+				Err(e) => {
+					// Unreadable metadata is still something that arrived; reporting it is
+					// what keeps "nothing is dropped on the floor" true.
+					diagnostics.push(skipped(
+						&archive_path,
+						&format!("entry #{i}"),
+						e.to_string(),
+					));
+					continue;
+				}
 			};
 			if entry.is_dir() {
 				continue;
@@ -337,11 +346,20 @@ pub fn load_local_input(
 		let entries = std::fs::read_dir(dir_path)
 			.map_err(|e| DiscoveryError::IoError(dir_path.clone(), e))?;
 
-		let mut files: Vec<PathBuf> = entries
-			.filter_map(|e| e.ok())
-			.map(|e| e.path())
-			.filter(|p| p.is_file())
-			.collect();
+		let mut files: Vec<PathBuf> = Vec::new();
+		for entry in entries {
+			match entry {
+				Ok(entry) if entry.path().is_file() => files.push(entry.path()),
+				Ok(_) => {}
+				// A directory entry we cannot stat may well be a submission.
+				Err(e) => diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::UnreadableDirEntry {
+						dir: dir_path.clone(),
+						reason: e.to_string(),
+					},
+				)),
+			}
+		}
 		files.sort();
 
 		let is_extracted = dir_path.components().any(|c| c.as_os_str() == EXTRACT_DIR);

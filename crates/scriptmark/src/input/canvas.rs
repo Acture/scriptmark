@@ -17,7 +17,7 @@ use crate::discovery::detect_language;
 use crate::models::{
 	Assignment, AssignmentInput, Attachment, AttemptPolicy, DiagnosticKind, FileOrigin,
 	InputDiagnostic, InputSource, RosterMatch, SourceStatus, StudentFile, StudentIdentity,
-	StudentKey, StudentSubmission, SubmissionAttempt, normalize_key,
+	StudentKey, StudentSubmission, SubmissionAttempt, is_reserved_key, normalize_key,
 };
 use crate::roster::{Roster, RosterEntry, RosterLookup, RosterSource};
 
@@ -141,10 +141,11 @@ pub type DownloadedAttachments = HashMap<u64, PathBuf>;
 
 /// Turn Canvas payloads into the unified input.
 ///
-/// When a roster is supplied it is the roster of record: Canvas users only enrich identity
-/// (name, SIS id, login id) and never add or remove membership. Without one, course
-/// enrollment *is* the roster — Canvas genuinely knows who is enrolled — so a non-submitter
-/// still appears rather than vanishing.
+/// Canvas decides who is in the course. The roster is the union of course enrollment and
+/// whatever the teacher supplied: enrollment settles membership, so somebody Canvas lists
+/// is never called a stranger because a spreadsheet is out of date, and a non-submitter
+/// still appears rather than vanishing. A supplied row Canvas has never heard of is kept
+/// and flagged `NotEnrolled`, so a hand-maintained list cannot lose people either.
 pub fn normalize(
 	payload: &CanvasPayload,
 	roster: Option<&Roster>,
@@ -238,6 +239,7 @@ pub fn normalize(
 	for user in &payload.users {
 		if let Some(number) = user.sis_user_id.as_deref().map(normalize_key)
 			&& !number.is_empty()
+			&& !is_reserved_key(&number)
 		{
 			by_number.entry(number).or_default().push(user);
 		}
@@ -342,7 +344,7 @@ fn merged_roster(
 				.sis_user_id
 				.as_deref()
 				.map(normalize_key)
-				.filter(|n| !n.is_empty());
+				.filter(|n| !n.is_empty() && !is_reserved_key(n));
 			RosterEntry {
 				key: match number {
 					Some(number) => StudentKey::Number(number),
@@ -385,7 +387,10 @@ fn identity_for(
 	let sis = user
 		.and_then(|u| u.sis_user_id.as_deref())
 		.map(normalize_key)
-		.filter(|s| !s.is_empty());
+		.filter(|s| !s.is_empty())
+		// The same rule the roster loader applies: a 学号 beginning with a reserved
+		// prefix would render as a key of another kind and stop round-tripping.
+		.filter(|s| !is_reserved_key(s));
 
 	let mut identity = match &sis {
 		// Canvas vouches for its own SIS id, so this is a confirmed 学号 even before a
@@ -671,6 +676,24 @@ mod tests {
 		// enrolled — so they are a member, not a stranger.
 		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
 		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+	}
+
+	#[test]
+	fn test_a_sis_id_that_looks_like_a_rendered_key_is_not_used_as_a_number() {
+		// Would otherwise render as `local:alice` and parse back as an Extracted key,
+		// so Display would stop being reversible.
+		let payload = CanvasPayload {
+			users: vec![user(7, Some("local:alice"), "Odd")],
+			submissions: vec![placeholder(7)],
+			..Default::default()
+		};
+		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+
+		assert_eq!(input.students[0].key(), &StudentKey::CanvasUser(7));
+		assert!(input.diagnostics.iter().any(|d| matches!(
+			&d.kind,
+			DiagnosticKind::MissingStudentNumber { canvas_user_id } if *canvas_user_id == 7
+		)));
 	}
 
 	#[test]

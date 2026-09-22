@@ -19,22 +19,25 @@ impl Database {
 	pub fn import_roster(&self, roster: &Roster) -> Result<usize, DbError> {
 		let mut stmt = self.conn.prepare(
 			"INSERT INTO students (id, name, canvas_id) VALUES (?1, ?2, ?3)
-			 ON CONFLICT(id) DO UPDATE SET name = excluded.name, canvas_id = excluded.canvas_id",
+			 ON CONFLICT(id) DO UPDATE SET
+			     name = excluded.name,
+			     -- A CSV roster carries no Canvas id, so writing its NULL would erase one
+			     -- an earlier Canvas import had stored, and grade push would lose it.
+			     canvas_id = COALESCE(excluded.canvas_id, students.canvas_id)",
 		)?;
 		let mut stored = std::collections::BTreeSet::new();
 		for entry in &roster.entries {
 			let id = entry.key.to_string();
-			// Duplicate rows have no single right name; storing one would quietly pick a
-			// winner where `Roster::name_of` deliberately refuses to.
-			let name = match roster.lookup(&entry.key) {
-				RosterLookup::Unique(_) => entry.name.clone(),
-				_ => None,
+			// Duplicate rows have no single right name — nor a single right Canvas id.
+			// Storing either would quietly pick a winner where `Roster::name_of` and
+			// `normalize` both deliberately refuse to.
+			let unambiguous = matches!(roster.lookup(&entry.key), RosterLookup::Unique(_));
+			let (name, canvas_id) = if unambiguous {
+				(entry.name.clone(), entry.canvas_user_id.map(|id| id as i64))
+			} else {
+				(None, None)
 			};
-			stmt.execute(rusqlite::params![
-				id,
-				name,
-				entry.canvas_user_id.map(|id| id as i64),
-			])?;
+			stmt.execute(rusqlite::params![id, name, canvas_id])?;
 			stored.insert(id);
 		}
 		Ok(stored.len())

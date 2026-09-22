@@ -179,10 +179,6 @@ fn duplicate_diagnostics(entries: &[RosterEntry]) -> Vec<InputDiagnostic> {
 		.collect()
 }
 
-/// Prefixes [`StudentKey`] uses to mark an unconfirmed or Canvas-native key. A 学号 may not
-/// begin with one, or the rendering would stop being reversible.
-const RESERVED_PREFIXES: [&str; 2] = ["local:", "canvas:"];
-
 /// Load a roster CSV.
 ///
 /// Expected format: `name,_,student_id` (header row skipped), or `name,student_id`.
@@ -229,7 +225,7 @@ pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
 		};
 
 		let student_number = normalize_key(student_number);
-		if let Some(prefix) = RESERVED_PREFIXES
+		if let Some(prefix) = crate::models::RESERVED_KEY_PREFIXES
 			.iter()
 			.find(|p| student_number.starts_with(**p))
 		{

@@ -59,6 +59,17 @@ impl fmt::Display for StudentKey {
 	}
 }
 
+/// Prefixes [`StudentKey`]'s `Display` uses to mark a Canvas-native or unconfirmed key.
+/// A 学号 may not begin with one, or the rendering would stop being reversible.
+pub const RESERVED_KEY_PREFIXES: [&str; 2] = ["local:", "canvas:"];
+
+/// Whether this text could be mistaken for a rendered key of another kind.
+pub fn is_reserved_key(text: &str) -> bool {
+	RESERVED_KEY_PREFIXES
+		.iter()
+		.any(|prefix| text.starts_with(prefix))
+}
+
 impl StudentKey {
 	/// The inverse of [`fmt::Display`], for reading a key back out of a results file, a
 	/// database row or a CSV column.
@@ -523,6 +534,8 @@ pub enum DiagnosticKind {
 	DuplicateSubmissionRow { canvas_user_id: u64 },
 	#[error("'{key}' is on the supplied roster but is not enrolled in the Canvas course")]
 	NotEnrolled { key: String },
+	#[error("could not read an entry of '{dir}': {reason}")]
+	UnreadableDirEntry { dir: PathBuf, reason: String },
 }
 
 /// Where in the source an anomaly was found. `sheet`/`row` are for the spreadsheet
@@ -775,7 +788,14 @@ impl AssignmentInput {
 	pub fn detect_zero_padded_variants(&self) -> Vec<InputDiagnostic> {
 		let mut buckets: std::collections::BTreeMap<String, Vec<String>> = Default::default();
 		for student in &self.students {
-			let raw = student.identity.key.raw();
+			// Only keys that denote a student number are comparable. A Canvas id is a
+			// separate namespace, so `CanvasUser(123)` beside `Number("00123")` is not a
+			// padding variant — warning about it would be a false positive.
+			let raw = match &student.identity.key {
+				StudentKey::Number(number) => number.clone(),
+				StudentKey::Extracted(token) => token.clone(),
+				StudentKey::CanvasUser(_) => continue,
+			};
 			buckets
 				.entry(zero_stripped(&raw).to_string())
 				.or_default()
@@ -986,6 +1006,32 @@ mod tests {
 		));
 		// Both survive as separate students.
 		assert_eq!(input.students.len(), 3);
+	}
+
+	#[test]
+	fn test_a_canvas_id_is_not_a_zero_padding_variant_of_a_student_number() {
+		let mut input = AssignmentInput::new(
+			Assignment::named("hw1"),
+			InputSource::Canvas {
+				course_id: None,
+				assignment_id: None,
+			},
+		);
+		input.students = vec![
+			StudentSubmission::not_submitted(StudentIdentity::number("00123"), vec![0]),
+			StudentSubmission::not_submitted(StudentIdentity::canvas_user(123), vec![1]),
+		];
+
+		// Separate namespaces — comparing their padding would be a false positive.
+		assert!(input.detect_zero_padded_variants().is_empty());
+	}
+
+	#[test]
+	fn test_reserved_prefixes_are_recognised() {
+		assert!(is_reserved_key("local:alice"));
+		assert!(is_reserved_key("canvas:5"));
+		assert!(!is_reserved_key("2024010001"));
+		assert!(!is_reserved_key("localhost"));
 	}
 
 	#[test]
