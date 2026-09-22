@@ -593,11 +593,9 @@ fn attempts_of(
 									},
 								),
 							),
-							None => diagnostics.push(InputDiagnostic::info(
-								DiagnosticKind::IgnoredFile {
-									key: identity.key.raw(),
-									path: expanded.path.clone(),
-								},
+							None => diagnostics.push(crate::discovery::archive_or_ignored(
+								&identity.key.raw(),
+								&expanded.path,
 							)),
 						}
 					}
@@ -612,10 +610,10 @@ fn attempts_of(
 							},
 						),
 					),
-					None => diagnostics.push(InputDiagnostic::info(DiagnosticKind::IgnoredFile {
-						key: identity.key.raw(),
-						path: downloaded.path.clone(),
-					})),
+					None => diagnostics.push(crate::discovery::archive_or_ignored(
+						&identity.key.raw(),
+						&downloaded.path,
+					)),
 				},
 				// Attempted and refused. Named, and attributed, so the failure list tells a
 				// teacher who lost work — and so this is never mistaken for 缺交.

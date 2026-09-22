@@ -547,6 +547,17 @@ pub enum DiagnosticKind {
 	UnusableRosterRow { reason: String },
 	#[error("ignored '{path}' for '{key}': not a supported submission file")]
 	IgnoredFile { key: String, path: PathBuf },
+	#[error(
+		"'{key}' submitted '{path}': {format} archives are not expanded, so its contents \
+		 cannot be graded — only .zip is"
+	)]
+	UnsupportedArchive {
+		key: String,
+		path: PathBuf,
+		format: String,
+	},
+	#[error("archive '{archive}' expanded to nothing")]
+	ArchiveEmpty { archive: PathBuf },
 	#[error("archive '{archive}' entry '{entry}' collides with an already extracted name")]
 	ArchiveNameCollision { archive: PathBuf, entry: String },
 	#[error("archive '{archive}' could not be read: {reason}")]
