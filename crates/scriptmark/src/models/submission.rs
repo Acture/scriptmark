@@ -549,7 +549,7 @@ pub enum DiagnosticKind {
 	IgnoredFile { key: String, path: PathBuf },
 	#[error(
 		"'{key}' submitted '{path}': {format} archives cannot be opened, so its contents \
-		 cannot be graded — .zip, .7z, .tar and .tar.gz can"
+		 cannot be graded — .zip, .rar, .7z and .tar(.gz/.bz2/.xz) can"
 	)]
 	UnsupportedArchive {
 		key: String,

@@ -545,13 +545,13 @@ mod tests {
 		assert_eq!(names, vec!["good.py".to_string()]);
 	}
 
-	/// A `.rar` is not the same problem as a stray PDF: the student's code is there, just
-	/// wrapped in something nothing here opens. Saying so is what lets a teacher tell the
-	/// class to use `.zip` instead of hunting for a file that was submitted all along.
+	/// A bare `.gz` is one compressed stream with no archive inside it, so there is nothing
+	/// to select from — but the student's file *is* in there, which is a different problem
+	/// from a stray PDF and gets a Warning rather than a dim note.
 	#[test]
-	fn test_an_archive_we_cannot_open_says_so_instead_of_ignoring_it() {
+	fn test_a_container_we_cannot_open_says_so_instead_of_ignoring_it() {
 		let dir = tempfile::tempdir().unwrap();
-		std::fs::write(dir.path().join("dave_hw.rar"), b"Rar!\x1a\x07\x00").unwrap();
+		std::fs::write(dir.path().join("dave_hw.gz"), b"\x1f\x8b\x08\x00").unwrap();
 		std::fs::write(dir.path().join("erin_hw.pdf"), b"%PDF-1.4").unwrap();
 
 		let input = scan(dir.path());
@@ -565,9 +565,8 @@ mod tests {
 		assert!(matches!(
 			&unsupported[0].kind,
 			DiagnosticKind::UnsupportedArchive { key, format, .. }
-				if key == "dave" && format == "RAR"
+				if key == "dave" && format == "gzip"
 		));
-		// It is actionable, so it outranks the note a stray file gets.
 		assert_eq!(unsupported[0].severity, DiagnosticSeverity::Warning);
 
 		// The PDF stays an Info-level note: it was never going to be graded.
@@ -575,6 +574,32 @@ mod tests {
 			&d.kind,
 			DiagnosticKind::IgnoredFile { key, .. } if key == "erin"
 		)));
+	}
+
+	/// A truncated RAR is now a *readable format that failed*, not an unknown one — the
+	/// difference a teacher needs, because one means "ask for a zip" and the other means
+	/// "the upload is broken, ask again".
+	#[test]
+	fn test_a_corrupt_rar_reports_the_read_failure_not_an_unsupported_format() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("dave_hw.rar"), b"Rar!\x1a\x07\x00").unwrap();
+
+		let input = scan(dir.path());
+
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::ArchiveUnreadable { .. })),
+			"got {:?}",
+			input.diagnostics
+		);
+		assert!(
+			!input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedArchive { .. }))
+		);
 	}
 
 	/// An archive that opens but yields nothing leaves its owner `SubmittedEmpty`, which on
