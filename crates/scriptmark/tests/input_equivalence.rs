@@ -8,7 +8,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
-use scriptmark::input::canvas::{CanvasPayload, DownloadedAttachments, normalize};
+use scriptmark::input::canvas::{
+	CanvasPayload, DownloadedAttachment, DownloadedAttachments, normalize,
+};
 use scriptmark::models::{
 	Assignment, AssignmentInput, AttemptPolicy, DiagnosticKind, ProjectedStudent, RosterMatch,
 	StudentReport, SubmissionOutcome, UnmatchedReason,
@@ -61,15 +63,34 @@ fn canvas_input() -> AssignmentInput {
 		.unwrap_or_else(|e| panic!("fixture payload missing: {e}"));
 	let payload: CanvasPayload = serde_json::from_str(&raw).expect("fixture payload must parse");
 
-	// Standing in for P-670's downloader: the files these attachments would land in.
+	// Standing in for the downloader: the files these attachments would land in.
 	let downloads: DownloadedAttachments = HashMap::from([
-		(1001, root.join("files/1001/lab1.py")),
-		(1002, root.join("files/1002/draft.py")),
-		(1003, root.join("files/1003/lab1.py")),
-		(1004, root.join("files/1004/lab1.py")),
-		(1005, root.join("files/1005/lab1.py")),
+		(
+			1001,
+			Ok(DownloadedAttachment::file(root.join("files/1001/lab1.py"))),
+		),
+		(
+			1002,
+			Ok(DownloadedAttachment::file(root.join("files/1002/draft.py"))),
+		),
+		(
+			1003,
+			Ok(DownloadedAttachment::file(root.join("files/1003/lab1.py"))),
+		),
+		(
+			1004,
+			Ok(DownloadedAttachment::file(root.join("files/1004/lab1.py"))),
+		),
+		(
+			1005,
+			Ok(DownloadedAttachment::file(root.join("files/1005/lab1.py"))),
+		),
 	]);
-	for path in downloads.values() {
+	for downloaded in downloads.values() {
+		let path = &downloaded
+			.as_ref()
+			.expect("fixtures are all successful")
+			.path;
 		assert!(
 			path.is_file(),
 			"fixture download missing: {}",
@@ -77,7 +98,13 @@ fn canvas_input() -> AssignmentInput {
 		);
 	}
 
-	normalize(&payload, Some(&roster()), &downloads, AttemptPolicy::Latest)
+	normalize(
+		&payload,
+		Some(&roster()),
+		&downloads,
+		AttemptPolicy::Latest,
+		Assignment::default(),
+	)
 }
 
 /// What both sources must produce, written out rather than derived.
@@ -223,9 +250,18 @@ fn test_canvas_material_from_someone_not_enrolled_is_unmatched() {
 		)
 		.unwrap(),
 	);
-	let downloads: DownloadedAttachments = HashMap::from([(1006, root.join("files/1001/lab1.py"))]);
+	let downloads: DownloadedAttachments = HashMap::from([(
+		1006,
+		Ok(DownloadedAttachment::file(root.join("files/1001/lab1.py"))),
+	)]);
 
-	let input = normalize(&payload, Some(&roster()), &downloads, AttemptPolicy::Latest);
+	let input = normalize(
+		&payload,
+		Some(&roster()),
+		&downloads,
+		AttemptPolicy::Latest,
+		Assignment::default(),
+	);
 	let stranger = input
 		.students
 		.iter()

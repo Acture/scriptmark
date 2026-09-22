@@ -8,13 +8,12 @@
 //! to render.
 
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use crate::models::{
 	Assignment, AssignmentInput, AttemptPolicy, DiagnosticKind, FileOrigin, InputDiagnostic,
-	InputSource, RosterMatch, SourceLocation, StudentFile, StudentIdentity, StudentKey,
-	StudentSubmission, SubmissionAttempt, UnmatchedArtifact, UnmatchedReason, normalize_key,
+	InputSource, RosterMatch, StudentFile, StudentIdentity, StudentKey, StudentSubmission,
+	SubmissionAttempt, UnmatchedArtifact, UnmatchedReason, normalize_key,
 };
 use crate::roster::Roster;
 
@@ -56,37 +55,11 @@ fn extract_sid(filename: &str) -> Option<String> {
 	Some(sid)
 }
 
-/// A file that came out of an archive, with the provenance needed to trace it back.
-#[derive(Debug, Clone)]
-struct ExtractedFile {
-	out_path: PathBuf,
-	archive: PathBuf,
-	/// The path *inside* the archive, before flattening.
-	entry: String,
-}
-
-const MAX_FILE_SIZE: u64 = 5_000_000; // 5 MB per file
-const MAX_TOTAL_SIZE: u64 = 50_000_000; // 50 MB total per archive
-const MAX_FILE_COUNT: usize = 100;
-
-fn is_noise(name: &str) -> bool {
-	name.starts_with('.') || name.starts_with("__")
-}
-
-fn skipped(archive: &Path, entry: &str, reason: String) -> InputDiagnostic {
-	InputDiagnostic::warning(DiagnosticKind::ArchiveEntrySkipped {
-		archive: archive.to_path_buf(),
-		entry: entry.to_string(),
-		reason,
-	})
-}
-
-/// Extract `.zip` archives in a directory to `{EXTRACT_DIR}/{archive_stem}/`.
-///
-/// Archives already extracted are not re-extracted, but their index is re-read so that
-/// provenance survives a second run — otherwise a cached extraction would leave every file
-/// it produced with no traceable origin.
-fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<ExtractedFile> {
+/// Expand every archive in a directory into `{EXTRACT_DIR}/{archive_stem}/`.
+fn extract_archives(
+	dir: &Path,
+	diagnostics: &mut Vec<InputDiagnostic>,
+) -> Vec<crate::archive::ExtractedFile> {
 	let extract_root = dir.join(EXTRACT_DIR);
 	let mut extracted = Vec::new();
 
@@ -100,11 +73,7 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 		let Ok(path) = entry.map(|entry| entry.path()) else {
 			continue;
 		};
-		let is_zip = path
-			.extension()
-			.and_then(|e| e.to_str())
-			.is_some_and(|e| e.eq_ignore_ascii_case("zip"));
-		if !is_zip {
+		if crate::archive::format_of(&path).is_none() {
 			continue;
 		}
 		match std::fs::metadata(&path) {
@@ -120,170 +89,18 @@ fn extract_archives(dir: &Path, diagnostics: &mut Vec<InputDiagnostic>) -> Vec<E
 	}
 	archives.sort();
 
-	for archive_path in archives {
-		let stem = archive_path
+	for archive in archives {
+		let stem = archive
 			.file_stem()
 			.and_then(|s| s.to_str())
 			.unwrap_or("unknown");
 		let target = extract_root.join(stem);
-
-		let file = match std::fs::File::open(&archive_path) {
-			Ok(f) => f,
-			Err(e) => {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveUnreadable {
-						archive: archive_path.clone(),
-						reason: e.to_string(),
-					},
-				));
-				continue;
-			}
-		};
-		let mut archive = match zip::ZipArchive::new(file) {
-			Ok(a) => a,
-			Err(e) => {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveUnreadable {
-						archive: archive_path.clone(),
-						reason: e.to_string(),
-					},
-				));
-				continue;
-			}
-		};
-
-		if let Err(e) = std::fs::create_dir_all(&target) {
-			diagnostics.push(InputDiagnostic::warning(
-				DiagnosticKind::ArchiveUnreadable {
-					archive: archive_path.clone(),
-					reason: format!("cannot create extraction directory: {e}"),
-				},
-			));
-			continue;
-		}
-
-		let mut total_bytes: u64 = 0;
-		let mut file_count: usize = 0;
-		// Flattening can map two in-archive paths onto one output name; remember who got
-		// there first so the loser is reported rather than silently dropped.
-		let mut claimed: BTreeMap<PathBuf, String> = BTreeMap::new();
-
-		for i in 0..archive.len() {
-			let mut entry = match archive.by_index(i) {
-				Ok(e) => e,
-				Err(e) => {
-					// Unreadable metadata is still something that arrived; reporting it is
-					// what keeps "nothing is dropped on the floor" true.
-					diagnostics.push(skipped(
-						&archive_path,
-						&format!("entry #{i}"),
-						e.to_string(),
-					));
-					continue;
-				}
-			};
-			if entry.is_dir() {
-				continue;
-			}
-
-			let Some(name) = entry.enclosed_name() else {
-				// Path traversal attempt.
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveEntrySkipped {
-						archive: archive_path.clone(),
-						entry: entry.name().to_string(),
-						reason: "unsafe path".to_string(),
-					},
-				));
-				continue;
-			};
-			let entry_name = name.to_string_lossy().into_owned();
-
-			let Some(filename) = name.file_name().map(|n| n.to_owned()) else {
-				continue;
-			};
-			if is_noise(&filename.to_string_lossy()) {
-				continue;
-			}
-
-			let out_path = target.join(&filename);
-
-			if let Some(first) = claimed.get(&out_path) {
-				diagnostics.push(InputDiagnostic::warning(
-					DiagnosticKind::ArchiveNameCollision {
-						archive: archive_path.clone(),
-						entry: format!("{entry_name} (already taken by {first})"),
-					},
-				));
-				continue;
-			}
-
-			// Every guard runs before the entry is recorded. Claiming the name first would
-			// let a rejected entry block the real submission from ever being extracted, and
-			// the accounting runs on a cached rerun too so the diagnostics do not vanish
-			// the second time a directory is scanned.
-			if entry.size() > MAX_FILE_SIZE {
-				diagnostics.push(skipped(
-					&archive_path,
-					&entry_name,
-					format!(
-						"{} bytes exceeds the {MAX_FILE_SIZE} byte limit",
-						entry.size()
-					),
-				));
-				continue;
-			}
-			if total_bytes + entry.size() > MAX_TOTAL_SIZE {
-				diagnostics.push(skipped(
-					&archive_path,
-					&entry_name,
-					format!("archive exceeds the {MAX_TOTAL_SIZE} byte total"),
-				));
-				break;
-			}
-			if file_count >= MAX_FILE_COUNT {
-				diagnostics.push(skipped(
-					&archive_path,
-					&entry_name,
-					format!("archive exceeds the {MAX_FILE_COUNT} file limit"),
-				));
-				break;
-			}
-
-			total_bytes += entry.size();
-			file_count += 1;
-			claimed.insert(out_path.clone(), entry_name.clone());
-
-			// Provenance is recorded whether or not the bytes are written this run, so a
-			// cached extraction still traces back to its archive entry.
-			extracted.push(ExtractedFile {
-				out_path: out_path.clone(),
-				archive: archive_path.clone(),
-				entry: entry_name.clone(),
-			});
-
-			// Only the bytes are skipped when the file is already there — an entry that
-			// failed last run is retried, so its diagnostic recurs instead of vanishing on
-			// the second scan of a directory.
-			if out_path.exists() {
-				continue;
-			}
-
-			let mut buf = Vec::new();
-			let failure = match entry.read_to_end(&mut buf) {
-				Err(_) => Some("unreadable entry".to_string()),
-				Ok(_) => std::fs::write(&out_path, &buf).err().map(|e| e.to_string()),
-			};
-			if let Some(reason) = failure {
-				diagnostics.push(skipped(&archive_path, &entry_name, reason));
-				// Roll the claim and the provenance back together; letting them drift is
-				// what lets a rejected entry block a real one.
-				extracted.pop();
-				claimed.remove(&out_path);
-				total_bytes -= entry.size();
-				file_count -= 1;
-			}
-		}
+		extracted.extend(crate::archive::expand(
+			&archive,
+			&target,
+			&crate::archive::is_gradeable,
+			diagnostics,
+		));
 	}
 
 	extracted
@@ -393,7 +210,7 @@ pub fn load_local_input(
 			let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
 				continue;
 			};
-			if is_noise(filename) {
+			if crate::archive::is_noise(filename) {
 				continue;
 			}
 
@@ -405,7 +222,7 @@ pub fn load_local_input(
 			// Archives are inputs to extraction, not submissions in their own right — but
 			// the upload still happened. Registering the owner here is what stops a
 			// truncated or empty archive being reported as 缺交.
-			if !is_extracted && ext == "zip" {
+			if !is_extracted && crate::archive::format_of(&path).is_some() {
 				match extract_sid(filename) {
 					Some(key) => {
 						seen_keys.insert(key);
@@ -443,13 +260,7 @@ pub fn load_local_input(
 				}
 				(Some(key), None) => {
 					// Owner known, type unusable: the student submitted, just not code.
-					diagnostics.push(
-						InputDiagnostic::info(DiagnosticKind::IgnoredFile {
-							key: key.clone(),
-							path: path.clone(),
-						})
-						.at(SourceLocation::file(path.clone())),
-					);
+					diagnostics.push(crate::archive::archive_or_ignored(&key, &path));
 					seen_keys.insert(key);
 				}
 				(None, language) => unmatched.push(UnmatchedArtifact {
@@ -530,7 +341,9 @@ pub fn load_local_input(
 			};
 			identity.name = entry.name.clone();
 			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
-			students.push(StudentSubmission::not_submitted(identity, index));
+			// Local input has no notion of excused or missing — only Canvas fills it, and
+			// a default here would be a false statement rather than a neutral one.
+			students.push(StudentSubmission::not_submitted(identity, index, None));
 		}
 	}
 
@@ -546,6 +359,7 @@ pub fn load_local_input(
 		},
 		roster: options.roster.cloned(),
 		students,
+		attempt_policy: options.attempt_policy,
 		unmatched,
 		diagnostics,
 	};
@@ -570,7 +384,7 @@ pub enum DiscoveryError {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::models::{StudentKey, SubmissionOutcome};
+	use crate::models::{DiagnosticSeverity, StudentKey, SubmissionOutcome};
 
 	fn scan(dir: &Path) -> AssignmentInput {
 		load_local_input(&[dir], LocalInputOptions::default()).unwrap()
@@ -670,6 +484,143 @@ mod tests {
 			.find(|s| s.key().raw() == "bob")
 			.expect("bob");
 		assert_eq!(bob_again.files()[0].origin, bob.files()[0].origin);
+	}
+
+	/// Characterisation test for the zip-bomb guards, written before P-670 lifts this loop
+	/// into a shared `expand_archive` that Canvas attachments also feed. An oversized entry
+	/// must be reported and skipped *without* taking its archive-mates down with it — the
+	/// rollback of the claim, the provenance and the counters is the part a refactor is
+	/// most likely to break silently.
+	#[test]
+	fn test_an_oversized_archive_entry_is_skipped_without_losing_its_neighbours() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("dave_Lab5.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		use std::io::Write;
+
+		// Zero-filled, so 6 MB of declared size deflates to a few KB on disk.
+		zip.start_file("big.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(&vec![
+			0u8;
+			(crate::archive::MAX_FILE_SIZE + 1_000_000) as usize
+		])
+		.unwrap();
+		zip.start_file("good.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		zip.write_all(b"def foo(): return 42").unwrap();
+		zip.finish().unwrap();
+
+		let input = scan(dir.path());
+
+		let skipped: Vec<&InputDiagnostic> = input
+			.diagnostics
+			.iter()
+			.filter(|d| matches!(&d.kind, DiagnosticKind::ArchiveEntrySkipped { .. }))
+			.collect();
+		assert_eq!(
+			skipped.len(),
+			1,
+			"expected exactly one skipped entry, got {:?}",
+			input.diagnostics
+		);
+		assert!(
+			matches!(
+				&skipped[0].kind,
+				DiagnosticKind::ArchiveEntrySkipped { entry, reason, .. }
+					if entry == "big.py" && reason.contains(&crate::archive::MAX_FILE_SIZE.to_string())
+			),
+			"the diagnostic must name the entry and the limit it broke, got {:?}",
+			skipped[0].kind
+		);
+
+		// The neighbour still arrives, and the oversized entry left nothing behind.
+		let dave = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "dave")
+			.expect("dave");
+		let names: Vec<String> = dave.files().iter().map(|f| f.file_name()).collect();
+		assert_eq!(names, vec!["good.py".to_string()]);
+	}
+
+	/// A bare `.gz` is one compressed stream with no archive inside it, so there is nothing
+	/// to select from — but the student's file *is* in there, which is a different problem
+	/// from a stray PDF and gets a Warning rather than a dim note.
+	#[test]
+	fn test_a_container_we_cannot_open_says_so_instead_of_ignoring_it() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("dave_hw.gz"), b"\x1f\x8b\x08\x00").unwrap();
+		std::fs::write(dir.path().join("erin_hw.pdf"), b"%PDF-1.4").unwrap();
+
+		let input = scan(dir.path());
+
+		let unsupported: Vec<_> = input
+			.diagnostics
+			.iter()
+			.filter(|d| matches!(&d.kind, DiagnosticKind::UnsupportedArchive { .. }))
+			.collect();
+		assert_eq!(unsupported.len(), 1, "got {:?}", input.diagnostics);
+		assert!(matches!(
+			&unsupported[0].kind,
+			DiagnosticKind::UnsupportedArchive { key, format, .. }
+				if key == "dave" && format == "gzip"
+		));
+		assert_eq!(unsupported[0].severity, DiagnosticSeverity::Warning);
+
+		// The PDF stays an Info-level note: it was never going to be graded.
+		assert!(input.diagnostics.iter().any(|d| matches!(
+			&d.kind,
+			DiagnosticKind::IgnoredFile { key, .. } if key == "erin"
+		)));
+	}
+
+	/// A truncated RAR is now a *readable format that failed*, not an unknown one — the
+	/// difference a teacher needs, because one means "ask for a zip" and the other means
+	/// "the upload is broken, ask again".
+	#[test]
+	fn test_a_corrupt_rar_reports_the_read_failure_not_an_unsupported_format() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("dave_hw.rar"), b"Rar!\x1a\x07\x00").unwrap();
+
+		let input = scan(dir.path());
+
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::ArchiveUnreadable { .. })),
+			"got {:?}",
+			input.diagnostics
+		);
+		assert!(
+			!input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::UnsupportedArchive { .. }))
+		);
+	}
+
+	/// An archive that opens but yields nothing leaves its owner `SubmittedEmpty`, which on
+	/// its own reads exactly like never having submitted.
+	#[test]
+	fn test_an_empty_archive_explains_itself() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("frank_hw.zip");
+		let file = std::fs::File::create(&zip_path).unwrap();
+		zip::ZipWriter::new(file).finish().unwrap();
+
+		let input = scan(dir.path());
+
+		assert!(
+			input.diagnostics.iter().any(|d| matches!(
+				&d.kind,
+				DiagnosticKind::ArchiveEmpty { archive } if archive == &zip_path
+			)),
+			"an empty archive must not be silent, got {:?}",
+			input.diagnostics
+		);
 	}
 
 	#[test]
