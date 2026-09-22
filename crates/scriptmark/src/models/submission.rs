@@ -548,8 +548,8 @@ pub enum DiagnosticKind {
 	#[error("ignored '{path}' for '{key}': not a supported submission file")]
 	IgnoredFile { key: String, path: PathBuf },
 	#[error(
-		"'{key}' submitted '{path}': {format} archives are not expanded, so its contents \
-		 cannot be graded — only .zip is"
+		"'{key}' submitted '{path}': {format} archives cannot be opened, so its contents \
+		 cannot be graded — .zip, .7z, .tar and .tar.gz can"
 	)]
 	UnsupportedArchive {
 		key: String,

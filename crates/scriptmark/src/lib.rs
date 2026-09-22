@@ -1,3 +1,4 @@
+pub(crate) mod archive;
 pub mod models;
 
 pub mod discovery;

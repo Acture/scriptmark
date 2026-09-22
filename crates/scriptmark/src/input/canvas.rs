@@ -593,7 +593,7 @@ fn attempts_of(
 									},
 								),
 							),
-							None => diagnostics.push(crate::discovery::archive_or_ignored(
+							None => diagnostics.push(crate::archive::archive_or_ignored(
 								&identity.key.raw(),
 								&expanded.path,
 							)),
@@ -610,7 +610,7 @@ fn attempts_of(
 							},
 						),
 					),
-					None => diagnostics.push(crate::discovery::archive_or_ignored(
+					None => diagnostics.push(crate::archive::archive_or_ignored(
 						&identity.key.raw(),
 						&downloaded.path,
 					)),
