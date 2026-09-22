@@ -168,13 +168,44 @@ pub struct CanvasPayload {
 	pub submissions: Vec<CanvasSubmissionPayload>,
 }
 
-/// Where each downloaded attachment landed, keyed by attachment id.
+/// One attachment that made it onto disk, with whatever an archive expanded to.
 ///
-/// P-669 does no downloading, so this is supplied by the caller: the fixtures point it at
-/// committed files, and P-670 fills it after fetching. An attachment that is missing from
-/// it is reported as [`DiagnosticKind::PendingDownload`] and never makes a student
-/// executable.
-pub type DownloadedAttachments = HashMap<u64, PathBuf>;
+/// `expanded` is empty for an ordinary file. It is re-derived from the archive on every
+/// run rather than recorded in the bundle manifest: flattening loses the in-archive path,
+/// so only the zip index can restore `entry`, and a second recorded copy would drift from
+/// disk the moment an extraction directory is touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadedAttachment {
+	pub path: PathBuf,
+	pub expanded: Vec<ExpandedEntry>,
+}
+
+impl DownloadedAttachment {
+	/// An attachment that is the file itself.
+	pub fn file(path: impl Into<PathBuf>) -> Self {
+		Self {
+			path: path.into(),
+			expanded: Vec::new(),
+		}
+	}
+}
+
+/// One file lifted out of an archive attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedEntry {
+	/// The path *inside* the archive, before flattening.
+	pub entry: String,
+	pub path: PathBuf,
+}
+
+/// What became of each attachment, keyed by attachment id.
+///
+/// The value is a `Result` so that a download which was *attempted and failed* carries its
+/// reason to the one place a student's identity is in scope. Absence keeps its original
+/// meaning — never attempted — and the two produce different diagnostics: a teacher needs
+/// to know whether a file is missing because Canvas refused it or because the fetch never
+/// got that far.
+pub type DownloadedAttachments = HashMap<u64, Result<DownloadedAttachment, String>>;
 
 /// Turn Canvas payloads into the unified input.
 ///
@@ -188,6 +219,7 @@ pub fn normalize(
 	roster: Option<&Roster>,
 	downloads: &DownloadedAttachments,
 	policy: AttemptPolicy,
+	assignment: Assignment,
 ) -> AssignmentInput {
 	let mut diagnostics: Vec<InputDiagnostic> = Vec::new();
 
@@ -200,23 +232,38 @@ pub fn normalize(
 	// Keyed on the value, not its rendering — `Display` prefixes are not escaped.
 	let mut covered: std::collections::BTreeSet<StudentKey> = Default::default();
 	let mut covered_canvas_ids: std::collections::BTreeSet<u64> = Default::default();
-	let mut seen_users: std::collections::BTreeSet<u64> = Default::default();
 
-	// Deterministic regardless of payload order.
-	let mut submissions: Vec<&CanvasSubmissionPayload> = payload.submissions.iter().collect();
-	submissions.sort_by_key(|s| s.user_id);
+	// Rows are grouped per user *before* anything is decided. Canvas's submissions index is
+	// offset-paginated over a relation recomputed per request, so an enrollment landing
+	// mid-walk shifts the window and re-reads a row. Keeping whichever copy arrived first
+	// keeps the older snapshot — and if the student submitted between the two page fetches,
+	// that copy is the placeholder, which would report a real submitter 缺交.
+	let mut by_user: BTreeMap<u64, Vec<&CanvasSubmissionPayload>> = BTreeMap::new();
+	for submission in &payload.submissions {
+		by_user
+			.entry(submission.user_id)
+			.or_default()
+			.push(submission);
+	}
 
-	for submission in submissions {
-		if !seen_users.insert(submission.user_id) {
+	// Placeholder rows are kept rather than dropped: they carry the record's `excused`, and
+	// 免交 lands on exactly such a row — a teacher excuses a student who never submitted, so
+	// there is no attempt for the status to live on.
+	let mut placeholders: BTreeMap<u64, &CanvasSubmissionPayload> = BTreeMap::new();
+
+	for (user_id, rows) in &by_user {
+		let submission = richest_row(rows);
+		if rows.len() > 1 {
 			diagnostics.push(InputDiagnostic::warning(
 				DiagnosticKind::DuplicateSubmissionRow {
-					canvas_user_id: submission.user_id,
+					canvas_user_id: *user_id,
+					kept: submission.attempt,
 				},
 			));
-			continue;
 		}
-		let user = users.get(&submission.user_id).copied();
-		let mut identity = identity_for(submission.user_id, user, &mut diagnostics);
+
+		let user = users.get(user_id).copied();
+		let mut identity = identity_for(*user_id, user, &mut diagnostics);
 
 		let attempts = attempts_of(submission, downloads, &mut diagnostics, &identity);
 
@@ -225,6 +272,7 @@ pub fn normalize(
 		// the roster does not cover describes a non-event: nothing arrived and nobody is
 		// owed a grade.
 		if attempts.is_empty() {
+			placeholders.insert(*user_id, submission);
 			continue;
 		}
 
@@ -251,12 +299,10 @@ pub fn normalize(
 			}
 		};
 
-		students.push(StudentSubmission::received(
-			identity,
-			roster_match,
-			attempts,
-			policy,
-		));
+		students.push(
+			StudentSubmission::received(identity, roster_match, attempts, policy)
+				.with_record_status(Some(submission.source_status())),
+		);
 	}
 
 	// Canvas knows who these people are even though the teacher's CSV only carries a
@@ -317,25 +363,48 @@ pub fn normalize(
 				identity.name = user.name.clone();
 			}
 		}
-		students.push(StudentSubmission::not_submitted(identity, index));
+		// 免交 rides on the placeholder row, which has no attempt to hang it on.
+		let record_status = identity
+			.canvas_user_id
+			.and_then(|id| placeholders.get(&id))
+			.map(|row| row.source_status());
+		students.push(StudentSubmission::not_submitted(
+			identity,
+			index,
+			record_status,
+		));
 	}
 
 	diagnostics.extend(roster.diagnostics.iter().cloned());
+	// Sorted first: `dedup` folds only *consecutive* duplicates, and `attempts_of` iterates
+	// attempt-major over attachment-minor, so the repeated pushes an attachment carried
+	// forward across attempts generates are never adjacent.
+	diagnostics.sort();
 	diagnostics.dedup();
 
-	let mut input = AssignmentInput {
-		assignment: Assignment {
-			name: payload.assignment_name.clone().unwrap_or_default(),
-			canvas_course_id: payload.course_id,
-			canvas_assignment_id: payload.assignment_id,
-			..Assignment::default()
+	// The declared assignment wins; the payload only fills what it left unset. Dropping it
+	// here is what would silently discard a teacher's declared items — and, with the policy
+	// that travels beside it, grade the wrong attempt.
+	let assignment = Assignment {
+		name: if assignment.name.is_empty() {
+			payload.assignment_name.clone().unwrap_or_default()
+		} else {
+			assignment.name
 		},
+		canvas_course_id: assignment.canvas_course_id.or(payload.course_id),
+		canvas_assignment_id: assignment.canvas_assignment_id.or(payload.assignment_id),
+		..assignment
+	};
+
+	let mut input = AssignmentInput {
+		assignment,
 		source: InputSource::Canvas {
 			course_id: payload.course_id,
 			assignment_id: payload.assignment_id,
 		},
 		roster: Some(roster),
 		students,
+		attempt_policy: policy,
 		unmatched: Vec::new(),
 		diagnostics,
 	};
@@ -344,6 +413,18 @@ pub fn normalize(
 	input.diagnostics.extend(zero_padded);
 
 	input.sorted()
+}
+
+/// Which of several rows for one user to believe.
+///
+/// Total by construction: a row with an attempt beats one without, a higher attempt beats a
+/// lower one, and two placeholders carry the same information so either will do. `rows` is
+/// never empty — it comes from a map entry that was created by pushing into it.
+fn richest_row<'a>(rows: &[&'a CanvasSubmissionPayload]) -> &'a CanvasSubmissionPayload {
+	rows.iter()
+		.copied()
+		.max_by_key(|row| (row.attempt.is_some(), row.attempt.unwrap_or(0)))
+		.expect("a grouped entry always holds at least one row")
 }
 
 /// The roster of record on the Canvas path: course enrollment, plus any supplied row it
@@ -439,6 +520,16 @@ fn identity_for(
 	identity
 }
 
+/// The language of a file, by extension, or `None` when nothing here runs it.
+fn language_of(path: &Path) -> Option<&'static str> {
+	let ext = path
+		.extension()
+		.and_then(|e| e.to_str())
+		.unwrap_or("")
+		.to_lowercase();
+	detect_language(&ext)
+}
+
 /// Every attempt Canvas reported, newest information first resolved into our own shape.
 fn attempts_of(
 	submission: &CanvasSubmissionPayload,
@@ -459,6 +550,20 @@ fn attempts_of(
 			continue;
 		};
 
+		// A default arm, not a list of known-bad types: an enumeration leaves anything
+		// unlisted — `basic_lti_launch`, or whatever Canvas adds next — with no explanation
+		// at all, and the ticket asks for the specific reason. `online_text_entry` keeps its
+		// more precise `TextEntryOnly`.
+		match row.submission_type.as_deref() {
+			None | Some("online_upload") | Some("online_text_entry") => {}
+			Some(other) => diagnostics.push(InputDiagnostic::warning(
+				DiagnosticKind::UnsupportedSubmissionType {
+					key: identity.key.raw(),
+					submission_type: other.to_string(),
+				},
+			)),
+		}
+
 		let mut attachments = Vec::new();
 		let mut files = Vec::new();
 		for payload in &row.attachments {
@@ -472,30 +577,61 @@ fn attempts_of(
 			});
 
 			match downloads.get(&payload.id) {
-				Some(path) => {
-					let ext = Path::new(&name)
-						.extension()
-						.and_then(|e| e.to_str())
-						.unwrap_or("")
-						.to_lowercase();
-					if let Some(language) = detect_language(&ext) {
-						files.push(StudentFile::direct(path.clone(), language).with_origin(
+				// An archive was expanded, so its entries are the candidates — the zip
+				// itself runs nothing. Language is detected from the entry name, and the
+				// in-archive path is kept so a file can be traced back to what it arrived
+				// in.
+				Some(Ok(downloaded)) if !downloaded.expanded.is_empty() => {
+					for expanded in &downloaded.expanded {
+						match language_of(&expanded.path) {
+							Some(language) => files.push(
+								StudentFile::direct(expanded.path.clone(), language).with_origin(
+									FileOrigin::Attachment {
+										attempt: number,
+										attachment_id: payload.id,
+										entry: Some(expanded.entry.clone()),
+									},
+								),
+							),
+							None => diagnostics.push(InputDiagnostic::info(
+								DiagnosticKind::IgnoredFile {
+									key: identity.key.raw(),
+									path: expanded.path.clone(),
+								},
+							)),
+						}
+					}
+				}
+				Some(Ok(downloaded)) => match language_of(Path::new(&name)) {
+					Some(language) => files.push(
+						StudentFile::direct(downloaded.path.clone(), language).with_origin(
 							FileOrigin::Attachment {
 								attempt: number,
 								attachment_id: payload.id,
+								entry: None,
 							},
-						));
-					} else {
-						diagnostics.push(InputDiagnostic::info(DiagnosticKind::IgnoredFile {
-							key: identity.key.raw(),
-							path: path.clone(),
-						}));
-					}
-				}
-				// Not downloaded, so there is nothing to run — the student is not made
+						),
+					),
+					None => diagnostics.push(InputDiagnostic::info(DiagnosticKind::IgnoredFile {
+						key: identity.key.raw(),
+						path: downloaded.path.clone(),
+					})),
+				},
+				// Attempted and refused. Named, and attributed, so the failure list tells a
+				// teacher who lost work — and so this is never mistaken for 缺交.
+				Some(Err(reason)) => diagnostics.push(InputDiagnostic::warning(
+					DiagnosticKind::AttachmentUnavailable {
+						key: identity.key.raw(),
+						attachment_id: payload.id,
+						filename: name.clone(),
+						reason: reason.clone(),
+					},
+				)),
+				// Never attempted, so there is nothing to run — the student is not made
 				// executable on the strength of an attachment we do not have.
 				None => {
 					diagnostics.push(InputDiagnostic::warning(DiagnosticKind::PendingDownload {
+						key: identity.key.raw(),
 						attachment_id: payload.id,
 						filename: name.clone(),
 					}))
@@ -620,8 +756,256 @@ mod tests {
 	fn downloads(pairs: &[(u64, &str)]) -> DownloadedAttachments {
 		pairs
 			.iter()
-			.map(|(id, path)| (*id, PathBuf::from(path)))
+			.map(|(id, path)| (*id, Ok(DownloadedAttachment::file(*path))))
 			.collect()
+	}
+
+	/// 免交 lands on a row with no attempt: a teacher excuses a student who never handed
+	/// anything in, so `attempt` stays null and there is no attempt for the status to live
+	/// on. Reading it off an attempt would make them indistinguishable from someone who
+	/// simply forgot.
+	#[test]
+	fn test_an_excused_non_submitter_is_distinguishable_from_a_forgetful_one() {
+		let mut excused = placeholder(1);
+		excused.excused = Some(true);
+		excused.workflow_state = Some("graded".to_string());
+
+		let payload = CanvasPayload {
+			users: vec![
+				user(1, Some("2024010001"), "Alice"),
+				user(2, Some("2024010002"), "Bob"),
+			],
+			submissions: vec![excused, placeholder(2)],
+			..CanvasPayload::default()
+		};
+
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
+
+		let alice = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "2024010001")
+			.expect("alice");
+		let bob = input
+			.students
+			.iter()
+			.find(|s| s.key().raw() == "2024010002")
+			.expect("bob");
+
+		// Both are 缺交 as far as delivery goes — the difference is why.
+		assert_eq!(alice.outcome(), SubmissionOutcome::NotSubmitted);
+		assert_eq!(bob.outcome(), SubmissionOutcome::NotSubmitted);
+		assert!(alice.is_excused(), "the excusal must survive normalisation");
+		assert!(!bob.is_excused());
+	}
+
+	/// Excused is a property of the submission record, not of an attempt. Reading it off
+	/// the *selected* attempt reports an excusal applied after that attempt as absent —
+	/// which is exactly what an `earliest` policy selects.
+	#[test]
+	fn test_an_excusal_survives_an_earliest_attempt_policy() {
+		let mut row = submitted(1, 2, vec![attachment(20, "lab1.py")]);
+		row.excused = Some(true);
+		row.submission_history = vec![
+			submitted(1, 1, vec![attachment(10, "lab1.py")]),
+			submitted(1, 2, vec![attachment(20, "lab1.py")]),
+		];
+
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![row],
+			..CanvasPayload::default()
+		};
+
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[(10, "/tmp/a.py"), (20, "/tmp/b.py")]),
+			AttemptPolicy::Earliest,
+			Assignment::default(),
+		);
+
+		let alice = &input.students[0];
+		// The graded attempt is the first one...
+		assert_eq!(alice.selected_attempt().map(|a| a.attempt), Some(1));
+		// ...but the excusal belongs to the record, and is still visible.
+		assert!(alice.is_excused());
+	}
+
+	/// Canvas's submissions index is offset-paginated over a relation recomputed per
+	/// request, so a row can be read twice. Keeping the first copy keeps the older
+	/// snapshot — and if the student submitted in between, that copy is the placeholder.
+	#[test]
+	fn test_a_duplicate_row_keeps_the_richer_copy_not_the_first() {
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			// The placeholder is listed first, as the earlier page would have carried it.
+			submissions: vec![
+				placeholder(1),
+				submitted(1, 1, vec![attachment(10, "lab1.py")]),
+			],
+			..CanvasPayload::default()
+		};
+
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[(10, "/tmp/a.py")]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
+
+		assert_eq!(input.student_count(), 1);
+		// The submitter is not reported 缺交.
+		assert_eq!(input.students[0].outcome(), SubmissionOutcome::Executable);
+		assert!(input.diagnostics.iter().any(|d| matches!(
+			&d.kind,
+			DiagnosticKind::DuplicateSubmissionRow { kept: Some(1), .. }
+		)));
+	}
+
+	/// An enumerated list of unsupported types leaves anything unlisted with no explanation
+	/// at all. The ticket asks for the specific reason, so the rule is a default arm.
+	#[test]
+	fn test_an_unknown_submission_type_still_gets_a_reason() {
+		let mut row = submitted(1, 1, vec![]);
+		row.submission_type = Some("basic_lti_launch".to_string());
+
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![row],
+			..CanvasPayload::default()
+		};
+
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
+
+		assert!(
+			input.diagnostics.iter().any(|d| matches!(
+				&d.kind,
+				DiagnosticKind::UnsupportedSubmissionType { submission_type, key }
+					if submission_type == "basic_lti_launch" && key == "2024010001"
+			)),
+			"got {:?}",
+			input.diagnostics
+		);
+	}
+
+	/// A download that was attempted and refused is not the same fact as one that was never
+	/// attempted, and neither may look like 缺交.
+	#[test]
+	fn test_a_failed_download_names_the_student_and_is_not_a_non_submission() {
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![submitted(
+				1,
+				1,
+				vec![attachment(10, "lab1.py"), attachment(20, "extra.py")],
+			)],
+			..CanvasPayload::default()
+		};
+
+		let downloads: DownloadedAttachments = HashMap::from([
+			(10, Ok(DownloadedAttachment::file("/tmp/a.py"))),
+			(20, Err("502 Bad Gateway".to_string())),
+		]);
+
+		let input = normalize(
+			&payload,
+			None,
+			&downloads,
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
+
+		let alice = &input.students[0];
+		// They kept what did arrive, and are emphatically not 缺交.
+		assert_eq!(alice.outcome(), SubmissionOutcome::Executable);
+		assert_eq!(alice.files().len(), 1);
+		assert!(
+			input.diagnostics.iter().any(|d| matches!(
+				&d.kind,
+				DiagnosticKind::AttachmentUnavailable { key, attachment_id, reason, .. }
+					if key == "2024010001" && *attachment_id == 20 && reason.contains("502")
+			)),
+			"the failure list must name who lost work, got {:?}",
+			input.diagnostics
+		);
+	}
+
+	/// `Vec::dedup` folds only *consecutive* duplicates, and `attempts_of` iterates
+	/// attempt-major over attachment-minor — so two carried-forward attachments across two
+	/// attempts push A1 B1 A2 B2, with no two equal entries adjacent.
+	#[test]
+	fn test_repeated_diagnostics_are_folded_across_attempts() {
+		let carried = vec![attachment(10, "a.py"), attachment(20, "b.py")];
+		let mut row = submitted(1, 2, carried.clone());
+		row.submission_history = vec![submitted(1, 1, carried.clone()), submitted(1, 2, carried)];
+
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![row],
+			..CanvasPayload::default()
+		};
+
+		// Neither is downloaded, so each pushes one PendingDownload per attempt.
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
+
+		let pending = input
+			.diagnostics
+			.iter()
+			.filter(|d| matches!(&d.kind, DiagnosticKind::PendingDownload { .. }))
+			.count();
+		assert_eq!(pending, 2, "one line per file, not per file per attempt");
+	}
+
+	/// The declared assignment wins; the payload fills only what it left unset. Dropping it
+	/// would silently discard the teacher's declared items.
+	#[test]
+	fn test_the_declared_assignment_survives_normalisation() {
+		let payload = CanvasPayload {
+			assignment_name: Some("Canvas HW1".to_string()),
+			course_id: Some(7),
+			assignment_id: Some(9),
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![placeholder(1)],
+		};
+
+		let declared = Assignment {
+			name: "Lab 1".to_string(),
+			..Assignment::default()
+		};
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Earliest,
+			declared,
+		);
+
+		assert_eq!(input.assignment.name, "Lab 1");
+		// The ids the toml did not carry come from the payload.
+		assert_eq!(input.assignment.canvas_course_id, Some(7));
+		assert_eq!(input.assignment.canvas_assignment_id, Some(9));
+		// And the rule that chose every `selected` is recorded beside them.
+		assert_eq!(input.attempt_policy, AttemptPolicy::Earliest);
 	}
 
 	#[test]
@@ -631,7 +1015,13 @@ mod tests {
 			submissions: vec![placeholder(1)],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		assert_eq!(input.student_count(), 1);
 		assert_eq!(input.students[0].outcome(), SubmissionOutcome::NotSubmitted);
@@ -644,7 +1034,13 @@ mod tests {
 			submissions: vec![submitted(1, 1, vec![])],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		assert_eq!(
 			input.students[0].outcome(),
@@ -666,7 +1062,13 @@ mod tests {
 		};
 		let files = downloads(&[(10, "/tmp/draft.py"), (20, "/tmp/lab1.py")]);
 
-		let input = normalize(&payload, None, &files, AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&files,
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 		let student = &input.students[0];
 		assert_eq!(student.selected_attempt().unwrap().attempt, 2);
 		assert_eq!(student.files()[0].file_name(), "lab1.py");
@@ -679,7 +1081,13 @@ mod tests {
 			submissions: vec![reversed],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &files, AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&files,
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 		assert_eq!(input.students[0].selected_attempt().unwrap().attempt, 2);
 	}
 
@@ -690,7 +1098,13 @@ mod tests {
 			submissions: vec![submitted(1, 1, vec![attachment(10, "lab1.py")])],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		assert_eq!(
 			input.students[0].outcome(),
@@ -718,6 +1132,7 @@ mod tests {
 			None,
 			&downloads(&[(10, "/tmp/lab1.py")]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		assert_eq!(input.student_count(), 1);
@@ -742,7 +1157,13 @@ mod tests {
 			submissions: vec![placeholder(7)],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		assert_eq!(input.students[0].key(), &StudentKey::CanvasUser(7));
 		assert!(input.diagnostics.iter().any(|d| matches!(
@@ -780,7 +1201,13 @@ mod tests {
 		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
 		let files = downloads(&[(10, "/tmp/a.py"), (20, "/tmp/b.py")]);
 
-		let input = normalize(&payload, Some(&roster), &files, AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			Some(&roster),
+			&files,
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		// Canvas is authoritative about who is in the course, so someone it says is
 		// enrolled is a member — not a stranger whose work goes ungraded.
@@ -809,6 +1236,7 @@ mod tests {
 			Some(&roster),
 			&downloads(&[]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		assert_eq!(input.student_count(), 2);
@@ -845,6 +1273,7 @@ mod tests {
 			None,
 			&downloads(&[(10, "/tmp/a.py")]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		assert_eq!(input.student_count(), 2);
@@ -875,6 +1304,7 @@ mod tests {
 			None,
 			&downloads(&[(10, "/tmp/a.py"), (20, "/tmp/b.py")]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		// A student number identifies one person, so two enrolments claiming it cannot
@@ -900,6 +1330,7 @@ mod tests {
 			Some(&roster),
 			&downloads(&[(10, "/tmp/a.py")]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		assert_eq!(input.students[0].roster_match, RosterMatch::Matched(0));
@@ -923,6 +1354,7 @@ mod tests {
 				Some(&roster),
 				&downloads(&[]),
 				AttemptPolicy::Latest,
+				Assignment::default(),
 			))
 			.unwrap()
 		};
@@ -944,7 +1376,13 @@ mod tests {
 			submissions: vec![placeholder(2024010001), placeholder(7)],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		let no_sis = input
 			.students
@@ -971,6 +1409,7 @@ mod tests {
 			None,
 			&downloads(&[(10, "/tmp/a.py")]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		assert_eq!(input.student_count(), 1);
@@ -992,7 +1431,13 @@ mod tests {
 			submissions: vec![submission],
 			..Default::default()
 		};
-		let input = normalize(&payload, None, &downloads(&[]), AttemptPolicy::Latest);
+		let input = normalize(
+			&payload,
+			None,
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+			Assignment::default(),
+		);
 
 		assert_eq!(
 			input.students[0].outcome(),
@@ -1020,6 +1465,7 @@ mod tests {
 			None,
 			&downloads(&[(10, "/tmp/a.py")]),
 			AttemptPolicy::Latest,
+			Assignment::default(),
 		);
 
 		let status = input.students[0]
