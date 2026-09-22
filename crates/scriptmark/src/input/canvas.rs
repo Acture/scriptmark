@@ -19,7 +19,7 @@ use crate::models::{
 	InputDiagnostic, InputSource, RosterMatch, SourceStatus, StudentFile, StudentIdentity,
 	StudentKey, StudentSubmission, SubmissionAttempt, normalize_key,
 };
-use crate::roster::{Roster, RosterEntry, RosterLookup};
+use crate::roster::{Roster, RosterEntry, RosterLookup, RosterSource};
 
 /// A course user, as `GET /courses/:id/users` returns it.
 ///
@@ -156,10 +156,7 @@ pub fn normalize(
 	let users: BTreeMap<u64, &CanvasUserPayload> =
 		payload.users.iter().map(|u| (u.id, u)).collect();
 
-	let roster = match roster {
-		Some(roster) => roster.clone(),
-		None => enrollment_roster(&payload.users),
-	};
+	let roster = merged_roster(&payload.users, roster, &mut diagnostics);
 
 	let mut students: Vec<StudentSubmission> = Vec::new();
 	// Keyed on the value, not its rendering — `Display` prefixes are not escaped.
@@ -260,13 +257,18 @@ pub fn normalize(
 		}
 		covered_canvas_ids.extend(entry.canvas_user_id);
 
-		let hits = roster.lookup(&entry.key).hits();
+		let lookup = roster.lookup(&entry.key);
+		let unambiguous = matches!(lookup, RosterLookup::Unique(_));
+		let hits = lookup.hits();
 		let mut identity = match &entry.key {
 			StudentKey::CanvasUser(id) => StudentIdentity::canvas_user(*id),
 			key => StudentIdentity::number(key.raw()),
 		};
 		identity.name = entry.name.clone();
-		identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+		// Several rows share this key, so none of their Canvas ids is *the* answer.
+		if unambiguous {
+			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
+		}
 
 		// Enrich from enrollment, but only from an unambiguous match. A Canvas-keyed row
 		// resolves by Canvas id; a 学号 row resolves by student number — never through
@@ -274,6 +276,7 @@ pub fn normalize(
 		// walk straight through the namespace boundary `lookup` exists to hold.
 		let enrolled = match &entry.key {
 			StudentKey::CanvasUser(id) => users.get(id).copied(),
+			_ if !unambiguous => None,
 			_ => entry
 				.student_number()
 				.and_then(|number| by_number.get(number))
@@ -294,12 +297,14 @@ pub fn normalize(
 	}
 
 	diagnostics.extend(roster.diagnostics.iter().cloned());
+	diagnostics.dedup();
 
 	let mut input = AssignmentInput {
 		assignment: Assignment {
 			name: payload.assignment_name.clone().unwrap_or_default(),
 			canvas_course_id: payload.course_id,
 			canvas_assignment_id: payload.assignment_id,
+			..Assignment::default()
 		},
 		source: InputSource::Canvas {
 			course_id: payload.course_id,
@@ -317,12 +322,19 @@ pub fn normalize(
 	input.sorted()
 }
 
-/// Build a roster from course enrollment, for the case where the teacher supplied none.
+/// The roster of record on the Canvas path: course enrollment, plus any supplied row it
+/// does not already cover.
 ///
-/// An enrollee carrying no SIS id is keyed by its Canvas id rather than dropped: Canvas has
-/// already told us this is a member of the course, and a member who hands nothing in must
-/// still appear.
-fn enrollment_roster(users: &[CanvasUserPayload]) -> Roster {
+/// Canvas is authoritative about who is in the course — an enrollee carrying no SIS id is
+/// keyed by their Canvas id rather than dropped, and a submitter Canvas knows about is
+/// never called a stranger because a teacher's spreadsheet is out of date. A supplied row
+/// for somebody Canvas has never heard of is still kept, marked as supplied and flagged,
+/// so a hand-maintained list cannot silently lose people either.
+fn merged_roster(
+	users: &[CanvasUserPayload],
+	supplied: Option<&Roster>,
+	diagnostics: &mut Vec<InputDiagnostic>,
+) -> Roster {
 	let mut entries: Vec<RosterEntry> = users
 		.iter()
 		.map(|u| {
@@ -336,13 +348,32 @@ fn enrollment_roster(users: &[CanvasUserPayload]) -> Roster {
 					Some(number) => StudentKey::Number(number),
 					None => StudentKey::CanvasUser(u.id),
 				},
+				source: RosterSource::CanvasEnrollment,
 				name: u.name.clone(),
 				canvas_user_id: Some(u.id),
 				location: None,
 			}
 		})
 		.collect();
-	entries.sort_by(|a, b| a.key.cmp(&b.key));
+	entries.sort_by(|a, b| (&a.key, a.canvas_user_id).cmp(&(&b.key, b.canvas_user_id)));
+
+	let mut carried = Vec::new();
+	if let Some(supplied) = supplied {
+		let enrolled: std::collections::BTreeSet<&StudentKey> =
+			entries.iter().map(|e| &e.key).collect();
+		for entry in &supplied.entries {
+			if enrolled.contains(&entry.key) {
+				continue;
+			}
+			diagnostics.push(InputDiagnostic::warning(DiagnosticKind::NotEnrolled {
+				key: entry.key.raw(),
+			}));
+			carried.push(entry.clone());
+		}
+		diagnostics.extend(supplied.diagnostics.iter().cloned());
+	}
+	entries.extend(carried);
+
 	Roster::from_entries(entries)
 }
 
@@ -655,11 +686,11 @@ mod tests {
 	}
 
 	#[test]
-	fn test_supplied_roster_is_the_roster_of_record() {
+	fn test_canvas_enrollment_outranks_a_stale_supplied_roster() {
 		let payload = CanvasPayload {
 			users: vec![
 				user(1, Some("2024010001"), "Alice"),
-				user(2, Some("9999999999"), "Stranger"),
+				user(2, Some("9999999999"), "Late Add"),
 			],
 			submissions: vec![
 				submitted(1, 1, vec![attachment(10, "lab1.py")]),
@@ -667,24 +698,55 @@ mod tests {
 			],
 			..Default::default()
 		};
+		// The teacher's CSV predates the late enrolment.
 		let roster = Roster::from_pairs(&[("2024010001", "Alice")]);
 		let files = downloads(&[(10, "/tmp/a.py"), (20, "/tmp/b.py")]);
 
 		let input = normalize(&payload, Some(&roster), &files, AttemptPolicy::Latest);
 
-		let alice = input
+		// Canvas is authoritative about who is in the course, so someone it says is
+		// enrolled is a member — not a stranger whose work goes ungraded.
+		for key in ["2024010001", "9999999999"] {
+			let student = input
+				.students
+				.iter()
+				.find(|s| s.key().raw() == key)
+				.unwrap_or_else(|| panic!("{key} missing"));
+			assert_eq!(student.outcome(), SubmissionOutcome::Executable, "{key}");
+		}
+	}
+
+	#[test]
+	fn test_a_supplied_row_canvas_has_never_heard_of_is_kept_and_flagged() {
+		let payload = CanvasPayload {
+			users: vec![user(1, Some("2024010001"), "Alice")],
+			submissions: vec![placeholder(1)],
+			..Default::default()
+		};
+		// Somebody the teacher tracks who was never enrolled — kept, so a hand-maintained
+		// list cannot silently lose people either.
+		let roster = Roster::from_pairs(&[("2024010001", "Alice"), ("2024019999", "Ghost")]);
+		let input = normalize(
+			&payload,
+			Some(&roster),
+			&downloads(&[]),
+			AttemptPolicy::Latest,
+		);
+
+		assert_eq!(input.student_count(), 2);
+		let ghost = input
 			.students
 			.iter()
-			.find(|s| s.key().raw() == "2024010001")
-			.unwrap();
-		assert_eq!(alice.outcome(), SubmissionOutcome::Executable);
-		// Enrolled in Canvas, absent from the roster of record.
-		let stranger = input
-			.students
-			.iter()
-			.find(|s| s.key().raw() == "9999999999")
-			.unwrap();
-		assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
+			.find(|s| s.key().raw() == "2024019999")
+			.expect("the supplied-only row must survive");
+		assert_eq!(ghost.outcome(), SubmissionOutcome::NotSubmitted);
+		assert!(
+			input
+				.diagnostics
+				.iter()
+				.any(|d| matches!(&d.kind, DiagnosticKind::NotEnrolled { .. })),
+			"and must be flagged as not enrolled"
+		);
 	}
 
 	#[test]
@@ -801,6 +863,7 @@ mod tests {
 			AttemptPolicy::Latest,
 		);
 
+		// Two accounts claim this 学号, so no single Canvas id is the right one.
 		assert_eq!(forward.students[0].identity.canvas_user_id, None);
 		assert_eq!(
 			serde_json::to_string(&forward).unwrap(),

@@ -521,6 +521,8 @@ pub enum DiagnosticKind {
 		"Canvas reported more than one submission row for user {canvas_user_id}; kept the first"
 	)]
 	DuplicateSubmissionRow { canvas_user_id: u64 },
+	#[error("'{key}' is on the supplied roster but is not enrolled in the Canvas course")]
+	NotEnrolled { key: String },
 }
 
 /// Where in the source an anomaly was found. `sheet`/`row` are for the spreadsheet
@@ -607,6 +609,33 @@ pub enum InputSource {
 	},
 }
 
+/// One thing a student is marked on.
+///
+/// `id` is the test spec's `[meta] name`, which is what `TestResult.item_id` carries — so
+/// the assignment's declared items and the results reference the same identity rather than
+/// two parallel notions of "a question". Scores, weights and how evidence inside an item
+/// aggregates are P-677's; this is identity only.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct GradingItem {
+	pub id: String,
+	#[serde(default)]
+	pub title: Option<String>,
+}
+
+impl GradingItem {
+	pub fn new(id: impl Into<String>) -> Self {
+		Self {
+			id: id.into(),
+			title: None,
+		}
+	}
+
+	/// What to show a human: the title when the teacher gave one, else the id.
+	pub fn label(&self) -> &str {
+		self.title.as_deref().unwrap_or(&self.id)
+	}
+}
+
 /// Assignment identity. Course id and assignment id are stored apart from the name, and
 /// apart from any student identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,6 +645,9 @@ pub struct Assignment {
 	pub canvas_course_id: Option<u64>,
 	#[serde(default)]
 	pub canvas_assignment_id: Option<u64>,
+	/// The items this assignment is marked on, in declaration order.
+	#[serde(default)]
+	pub items: Vec<GradingItem>,
 }
 
 impl Assignment {
@@ -625,13 +657,20 @@ impl Assignment {
 			..Self::default()
 		}
 	}
+
+	pub fn with_items(mut self, items: Vec<GradingItem>) -> Self {
+		self.items = items;
+		self
+	}
+
+	pub fn item(&self, id: &str) -> Option<&GradingItem> {
+		self.items.iter().find(|item| item.id == id)
+	}
 }
 
 /// The unified contract. Whatever the entry point, this is what downstream reads.
 ///
-/// The grading item's identity is the existing one — `TestSpec.meta.name`, surfaced as
-/// `TestResult.spec_name` — so it is deliberately not duplicated here. Binding files and
-/// functions to items is P-673; per-item scoring is P-677.
+/// Binding files and functions to items is P-673; per-item scoring is P-677.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssignmentInput {
 	pub assignment: Assignment,
@@ -956,6 +995,39 @@ mod tests {
 		identity.confirm_number();
 		assert_eq!(identity.key, StudentKey::Number("2024010001".into()));
 		assert_eq!(identity.student_number.as_deref(), Some("2024010001"));
+	}
+
+	#[test]
+	fn test_grading_item_identity_is_the_spec_name() {
+		let assignment = Assignment::named("hw1").with_items(vec![
+			GradingItem::new("find_larger_number"),
+			GradingItem {
+				id: "sum_pair".to_string(),
+				title: Some("第二题 求和".to_string()),
+			},
+		]);
+
+		// A result references an item by the same id a test spec's [meta] name carries.
+		let result = crate::models::TestResult {
+			item_id: "sum_pair".to_string(),
+			cases: vec![],
+		};
+		let item = assignment.item(&result.item_id).expect("declared item");
+		assert_eq!(item.label(), "第二题 求和");
+		// Without a title a human still gets something meaningful.
+		assert_eq!(
+			assignment.item("find_larger_number").unwrap().label(),
+			"find_larger_number"
+		);
+		assert!(assignment.item("nope").is_none());
+	}
+
+	#[test]
+	fn test_results_written_as_spec_name_still_load() {
+		// The field was called `spec_name` before items were modelled.
+		let legacy = r#"{"spec_name": "find_larger_number", "cases": []}"#;
+		let result: crate::models::TestResult = serde_json::from_str(legacy).unwrap();
+		assert_eq!(result.item_id, "find_larger_number");
 	}
 
 	#[test]

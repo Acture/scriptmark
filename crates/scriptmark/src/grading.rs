@@ -127,7 +127,7 @@ mod tests {
 		StudentReport {
 			student_id: "test".to_string(),
 			test_results: vec![TestResult {
-				spec_name: "test".to_string(),
+				item_id: "test".to_string(),
 				cases,
 			}],
 			..Default::default()

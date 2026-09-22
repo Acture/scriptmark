@@ -8,8 +8,8 @@ use clap::{Parser, Subcommand};
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::grading::apply_grading;
 use scriptmark::models::{
-	Assignment, AssignmentInput, AttemptPolicy, DiagnosticSeverity, FormulaPolicy, GradingPolicy,
-	StudentKey, SubmissionOutcome, TemplatePolicy,
+	Assignment, AssignmentInput, AttemptPolicy, DiagnosticSeverity, FormulaPolicy, GradingItem,
+	GradingPolicy, StudentKey, SubmissionOutcome, TemplatePolicy, TestSpec,
 };
 use scriptmark::roster::load_roster;
 use scriptmark::runner::orchestrator;
@@ -330,9 +330,39 @@ fn load_assignment(
 			name: config.assignment.name,
 			canvas_course_id: config.assignment.canvas_course_id,
 			canvas_assignment_id: config.assignment.canvas_assignment_id,
+			items: config.items,
 		},
 		config.assignment.attempt_policy,
 	))
+}
+
+/// Reconcile the declared grading items against the specs that were actually loaded.
+///
+/// Undeclared items are derived from the specs, so `Assignment.items` is always populated
+/// and every `TestResult.item_id` names one of them. A declared item with no spec, or a
+/// spec naming no declared item, is reported rather than silently ignored.
+fn reconcile_items(assignment: &mut Assignment, specs: &[TestSpec]) {
+	if assignment.items.is_empty() {
+		assignment.items = specs
+			.iter()
+			.map(|spec| GradingItem::new(&spec.meta.name))
+			.collect();
+		return;
+	}
+
+	for spec in specs {
+		if assignment.item(&spec.meta.name).is_none() {
+			eprintln!(
+				"  warning: test spec '{}' is not a declared grading item",
+				spec.meta.name
+			);
+		}
+	}
+	for item in &assignment.items {
+		if !specs.iter().any(|spec| spec.meta.name == item.id) {
+			eprintln!("  warning: grading item '{}' has no test spec", item.id);
+		}
+	}
 }
 
 /// Build the unified input from local directories.
@@ -444,6 +474,9 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 		load_specs_from_dir(&args.tests_dir).context("Failed to load test specifications")?;
 	println!("Loaded {} test specs", specs.len());
 
+	let mut input = input;
+	reconcile_items(&mut input.assignment, &specs);
+
 	// 3. Run tests
 	let executor = PythonExecutor::with_python_cmd(&args.python);
 	let mut reports = orchestrator::run_all(
@@ -494,7 +527,7 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 					"student_name",
 					"student_id",
 					"submission_state",
-					"spec_name",
+					"item_id",
 					"case_name",
 					"status",
 					"actual",
@@ -515,7 +548,7 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 								report.student_name.as_deref().unwrap_or(""),
 								&report.student_id,
 								&state,
-								&test_result.spec_name,
+								&test_result.item_id,
 								&case.case_name,
 								&format!("{:?}", case.status),
 								case.actual.as_deref().unwrap_or(""),
@@ -596,6 +629,9 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 	let specs =
 		load_specs_from_dir(&args.tests_dir).context("Failed to load test specifications")?;
 	println!("Loaded {} test specs", specs.len());
+
+	let mut input = input;
+	reconcile_items(&mut input.assignment, &specs);
 
 	let executor = PythonExecutor::with_python_cmd(&args.python);
 	// A JSON array, the same shape `grade` writes and `summarize` reads.
