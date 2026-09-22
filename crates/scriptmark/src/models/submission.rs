@@ -199,8 +199,16 @@ pub enum FileOrigin {
 	Direct,
 	/// Extracted from an archive. `entry` is the path *inside* the archive.
 	Archive { archive: PathBuf, entry: String },
-	/// Downloaded from a Canvas attachment.
-	Attachment { attempt: u32, attachment_id: u64 },
+	/// Downloaded from a Canvas attachment. `entry` is the path *inside* the attachment
+	/// when it was an archive that had to be expanded, and `None` when the attachment is
+	/// the file itself. The archive's own path is recoverable from `attachment_id`, so a
+	/// separate variant would only be a second way to say the same thing.
+	Attachment {
+		attempt: u32,
+		attachment_id: u64,
+		#[serde(default)]
+		entry: Option<String>,
+	},
 }
 
 /// A single runnable file belonging to a student's submission.
@@ -312,6 +320,14 @@ pub struct StudentSubmission {
 	pub attempts: Vec<SubmissionAttempt>,
 	/// Index into `attempts`, chosen by [`AttemptPolicy`]. `None` iff nothing was received.
 	pub selected: Option<usize>,
+	/// The source's status for the submission *record*, as opposed to any one attempt.
+	///
+	/// `excused` and `missing` describe the record: a teacher excuses a student, not an
+	/// attempt, and the excusal commonly lands on a row with no attempt at all — which is
+	/// the canonical 免交 and the case an attempt-only home cannot represent. Only Canvas
+	/// fills this; local input has no such notion.
+	#[serde(default)]
+	pub record_status: Option<SourceStatus>,
 }
 
 impl StudentSubmission {
@@ -319,14 +335,41 @@ impl StudentSubmission {
 	///
 	/// Always `Matched`, never `NotInRoster`: a non-submitter only exists because a roster
 	/// vouches for them.
-	pub fn not_submitted(identity: StudentIdentity, roster_index: usize) -> Self {
+	pub fn not_submitted(
+		identity: StudentIdentity,
+		roster_index: usize,
+		record_status: Option<SourceStatus>,
+	) -> Self {
 		Self {
 			identity,
 			roster_match: RosterMatch::Matched(roster_index),
 			state: SubmissionState::NotSubmitted,
 			attempts: Vec::new(),
 			selected: None,
+			record_status,
 		}
+	}
+
+	/// The status of the attempt actually being graded — per-attempt provenance.
+	///
+	/// Use [`Self::record_status`] for `excused` / `missing`: those describe the submission
+	/// record, and reading them off an attempt reports an excusal applied after the
+	/// selected attempt as absent.
+	pub fn attempt_status(&self) -> Option<&SourceStatus> {
+		self.selected
+			.and_then(|i| self.attempts.get(i))
+			.and_then(|a| a.source_status.as_ref())
+	}
+
+	/// Whether the source says this student was excused. Authoritative regardless of which
+	/// attempt is selected, and true for the 免交 case that carries no attempt at all.
+	pub fn is_excused(&self) -> bool {
+		self.record_status.as_ref().is_some_and(|s| s.excused)
+	}
+
+	pub fn with_record_status(mut self, status: Option<SourceStatus>) -> Self {
+		self.record_status = status;
+		self
 	}
 
 	/// A student with received material. `state` is derived from the selected attempt, so
@@ -354,6 +397,7 @@ impl StudentSubmission {
 			state,
 			attempts,
 			selected,
+			record_status: None,
 		}
 	}
 
@@ -513,17 +557,36 @@ pub enum DiagnosticKind {
 		entry: String,
 		reason: String,
 	},
-	#[error("attachment {attachment_id} ('{filename}') has not been downloaded")]
+	#[error("attachment {attachment_id} ('{filename}') for '{key}' was never downloaded")]
 	PendingDownload {
+		key: String,
 		attachment_id: u64,
 		filename: String,
+	},
+	#[error(
+		"attachment {attachment_id} ('{filename}') for '{key}' could not be downloaded: {reason}"
+	)]
+	AttachmentUnavailable {
+		key: String,
+		attachment_id: u64,
+		filename: String,
+		reason: String,
+	},
+	#[error("'{key}' submitted via '{submission_type}', which cannot be graded automatically")]
+	UnsupportedSubmissionType {
+		key: String,
+		submission_type: String,
 	},
 	#[error("'{key}' submitted a text entry with no gradeable file")]
 	TextEntryOnly { key: String },
 	#[error(
-		"Canvas reported more than one submission row for user {canvas_user_id}; kept the first"
+		"Canvas reported more than one submission row for user {canvas_user_id}; kept the \
+		 richer one (attempt {kept:?})"
 	)]
-	DuplicateSubmissionRow { canvas_user_id: u64 },
+	DuplicateSubmissionRow {
+		canvas_user_id: u64,
+		kept: Option<u32>,
+	},
 	#[error("'{key}' is on the supplied roster but is not enrolled in the Canvas course")]
 	NotEnrolled { key: String },
 	#[error("could not read an entry of '{dir}': {reason}")]
@@ -693,6 +756,10 @@ pub struct AssignmentInput {
 	#[serde(default)]
 	pub roster: Option<Roster>,
 	pub students: Vec<StudentSubmission>,
+	/// The rule that chose every `selected` index. Without it the record says which attempt
+	/// was graded but not why, and cannot be checked against the results produced from it.
+	#[serde(default)]
+	pub attempt_policy: AttemptPolicy,
 	#[serde(default)]
 	pub unmatched: Vec<UnmatchedArtifact>,
 	#[serde(default)]
@@ -716,6 +783,7 @@ impl AssignmentInput {
 			source,
 			roster: None,
 			students: Vec::new(),
+			attempt_policy: AttemptPolicy::default(),
 			unmatched: Vec::new(),
 			diagnostics: Vec::new(),
 		}
@@ -855,7 +923,7 @@ mod tests {
 
 	#[test]
 	fn test_not_submitted_is_always_roster_matched() {
-		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010004"), 3);
+		let s = StudentSubmission::not_submitted(StudentIdentity::number("2024010004"), 3, None);
 		assert_eq!(s.state, SubmissionState::NotSubmitted);
 		assert_eq!(s.roster_match, RosterMatch::Matched(3));
 		assert_eq!(s.outcome(), SubmissionOutcome::NotSubmitted);
@@ -903,7 +971,7 @@ mod tests {
 			SubmissionOutcome::ReceivedUnmatched
 		);
 
-		let absent = StudentSubmission::not_submitted(StudentIdentity::number("4"), 0);
+		let absent = StudentSubmission::not_submitted(StudentIdentity::number("4"), 0, None);
 		assert_eq!(absent.outcome(), SubmissionOutcome::NotSubmitted);
 	}
 
@@ -992,9 +1060,9 @@ mod tests {
 			},
 		);
 		input.students = vec![
-			StudentSubmission::not_submitted(StudentIdentity::number("0024010003"), 0),
-			StudentSubmission::not_submitted(StudentIdentity::number("24010003"), 1),
-			StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), 2),
+			StudentSubmission::not_submitted(StudentIdentity::number("0024010003"), 0, None),
+			StudentSubmission::not_submitted(StudentIdentity::number("24010003"), 1, None),
+			StudentSubmission::not_submitted(StudentIdentity::number("2024010001"), 2, None),
 		];
 
 		let found = input.detect_zero_padded_variants();
@@ -1017,8 +1085,8 @@ mod tests {
 			},
 		);
 		input.students = vec![
-			StudentSubmission::not_submitted(StudentIdentity::number("00123"), 0),
-			StudentSubmission::not_submitted(StudentIdentity::canvas_user(123), 1),
+			StudentSubmission::not_submitted(StudentIdentity::number("00123"), 0, None),
+			StudentSubmission::not_submitted(StudentIdentity::canvas_user(123), 1, None),
 		];
 
 		// Separate namespaces — comparing their padding would be a false positive.

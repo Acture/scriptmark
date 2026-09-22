@@ -530,7 +530,9 @@ pub fn load_local_input(
 			};
 			identity.name = entry.name.clone();
 			identity.canvas_user_id = identity.canvas_user_id.or(entry.canvas_user_id);
-			students.push(StudentSubmission::not_submitted(identity, index));
+			// Local input has no notion of excused or missing — only Canvas fills it, and
+			// a default here would be a false statement rather than a neutral one.
+			students.push(StudentSubmission::not_submitted(identity, index, None));
 		}
 	}
 
@@ -546,6 +548,7 @@ pub fn load_local_input(
 		},
 		roster: options.roster.cloned(),
 		students,
+		attempt_policy: options.attempt_policy,
 		unmatched,
 		diagnostics,
 	};
