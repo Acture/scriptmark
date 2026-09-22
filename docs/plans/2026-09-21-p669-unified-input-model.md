@@ -3,9 +3,10 @@
 Linear: https://linear.app/acturea/issue/P-669
 Parent: P-663 · Milestone: Canvas 与本地提交可统一导入
 
-Revision 3 — rewritten after an adversarial design review (6 blockers, 11 majors), then
-corrected after an adversarial review of the implementation (3 blockers, 9 majors, 3
-minors). The post-review corrections are listed at the end.
+Revision 4 — rewritten after an adversarial design review (6 blockers, 11 majors), then
+corrected after two adversarial reviews of the implementation, and then after the ticket
+owner overruled two decisions. **D9 and D10 below are superseded — see "Owner decisions"
+at the end.**
 
 ## Scope
 
@@ -159,7 +160,7 @@ and `Archive`.
 `SubmittedEmpty` = no attachments **and** no usable body. A Canvas `online_text_entry`
 carrying a non-empty body but no file gets its own diagnostic rather than being mislabelled.
 
-### D9 — The roster is the roster of record whenever one is supplied
+### D9 — ~~The roster is the roster of record whenever one is supplied~~ (superseded)
 
 Canvas `users` supplies identity enrichment only (name, `sis_user_id`, `login_id`); it
 never creates or removes membership. With `roster: None` on the Canvas path, enrollment
@@ -170,7 +171,7 @@ a silent `insert` (`canvas/client.rs:110-117`) and `save_roster_csv` writes no C
 that path is deliberately **not** migrated here; it moves in P-670, and until then it can
 feed non-conforming keys into the model.
 
-### D10 — Grading-item identity is the existing one; no new dead type
+### D10 — ~~Grading-item identity is the existing one; no new dead type~~ (superseded)
 
 The repo already has a grading unit with an identity and a live association:
 `TestSpec.meta.name` → `TestResult.spec_name` (`orchestrator.rs:229`). Adding a parallel
@@ -381,3 +382,39 @@ that changed a decision rather than just the code.
   back via `StudentKey::parse` rather than comparing text.
 - **The CSV archive emits a row per student**, so it covers the same cohort as the JSON
   archive instead of dropping every non-submitter.
+
+## Owner decisions (supersede D9 and D10)
+
+Both were judgement calls I made and the owner reversed. They are the ones P-670/P-672/
+P-673 should build on.
+
+### 评分项 is a type, not an implicit convention (supersedes D10)
+
+`GradingItem { id, title }` exists; `Assignment` holds `items`; `TestResult.item_id`
+references it and reads `spec_name` from older results files. `id` is still the test spec's
+`[meta] name` — the point is that the assignment now *declares* its items instead of the
+concept living only in a string copied between two structs.
+
+`assignment.toml` may declare `[[items]]` to give them titles. Undeclared, they are derived
+from the specs that loaded. A declared item with no spec, or a spec that is not a declared
+item, is reported. `points` and weighting stay P-677's.
+
+### Canvas decides membership (supersedes D9)
+
+On the Canvas path the roster is the **union** of course enrollment and whatever the teacher
+supplied, each row marked with its `RosterSource`. Enrollment decides membership — P-663
+and P-670 both put Canvas in charge of student attribution — so a student Canvas lists but a
+stale CSV omits is a member, not a stranger. A supplied row Canvas has never heard of is
+kept and flagged `NotEnrolled`, so a hand-maintained list cannot lose people either.
+
+Three consequences to design against:
+
+- A CSV row duplicated for somebody Canvas lists once resolves to that one enrollment; the
+  duplicate is reported as a data-entry error rather than making the match ambiguous.
+  Locally, where the CSV is the only source, it stays `Ambiguous`.
+- `ReceivedUnmatched` is reachable on Canvas only for a submission from somebody the course
+  does not list. The two sources therefore reach it by different routes, and the fixture
+  asserts it per source rather than across them — the cross-source projection covers the six
+  students both sources genuinely agree on.
+- An ambiguous key yields no `canvas_user_id`: with two accounts claiming one 学号, taking
+  either would make an identity depend on the order the payload happened to arrive in.
