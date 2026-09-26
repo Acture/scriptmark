@@ -22,6 +22,8 @@ pub async fn resolve_oracle(
 			setup: vec![],
 			cases: vec![],
 			lint: None,
+			scenarios: vec![],
+			dir: spec.dir.clone(),
 		};
 		let result = executor
 			.execute_case(&[ref_file], &ref_spec, case, 10)

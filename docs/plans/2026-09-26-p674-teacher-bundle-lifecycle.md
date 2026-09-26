@@ -317,10 +317,9 @@ pub input: Option<CaseInput>,      // {target: {requested, resolved}, args (with
 | process died (signal, deadline kill, or exit without `done`) during a student call | `Timeout` if deadline/SIGXCPU, else `Error` | student | `killed` |
 | not run: an earlier call in the unit hung or killed the process | `Error` | student | `not_run` |
 | not run: a `$ref` / `object` it needs was never produced | `Error` | student | `dependency` |
-| not run: a setup call failed | `Error` | owner of that setup call | `setup` |
+| not run: a setup call failed (raised, timed out, missing target, killed) | `Error` | owner of that setup call: student for `function`/`method`, teacher for `teacher` | `setup` |
 | two records for one call (tampering) | `Error` | student | `protocol` |
 | teacher module failed to import in a unit (it passed `prepare`) | `Error` | teacher | `teacher_import` |
-| teacher setup function raised, timed out, or died | `Error` | teacher | `teacher_setup` |
 | a checker could not decide: Rhai error, checker script crash / bad output, in-process checker raised (not `AssertionError`), timed out, or returned neither `bool` nor `(bool, str)` | `Error` | teacher | `checker` |
 | nothing was judged | `Error` | teacher | `nothing_to_judge` |
 | spawn failed; died before `ready` with no teacher imports; harness crashed; a record did not parse; checker script could not spawn | `Error` | environment | `spawn` / `harness` |
@@ -379,7 +378,7 @@ such as `regex`, `exec` or `wasm` is named. Every semantic problem in the file i
 reported together. It refuses:
 
 - `language` other than `python`; `compile`;
-- an unknown builtin (in the shorthand, `builtin`, or `oracle.check`);
+- an unknown builtin (in the shorthand, `builtin`, or `oracle.check`); an expect-dependent builtin as `oracle.check`;
 - a detailed `check` naming zero or several kinds; `tolerance` without `approx`;
 - `exact`, `approx`, `set_eq`, `contains` or `text` without an `expect` (or, in script
   mode, without `expected_stdout`);

@@ -132,6 +132,7 @@ async fn run_student(
 					timeout: None,
 					parametrize: None,
 					function: None,
+					..Default::default()
 				};
 
 				let setup_spec = TestSpec {
@@ -143,6 +144,8 @@ async fn run_student(
 					setup: vec![],
 					cases: vec![],
 					lint: None,
+					scenarios: vec![],
+					dir: spec.dir.clone(),
 				};
 
 				let result = executor

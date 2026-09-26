@@ -610,7 +610,7 @@ impl PythonExecutor {
 		student_file: &StudentFile,
 		function_name: &str,
 		case: &TestCase,
-		vars: &std::collections::HashMap<String, serde_json::Value>,
+		vars: &std::collections::BTreeMap<String, serde_json::Value>,
 		allowed_imports: &[String],
 		timeout_secs: u64,
 	) -> CaseResult {
@@ -1067,7 +1067,7 @@ impl PythonExecutor {
 			"vars": spec.vars,
 			"setup": setup_payloads,
 			"cases": case_payloads,
-			"copy_refs": spec.meta.copy_refs,
+			"copy_refs": spec.meta.copy_refs.unwrap_or(true),
 			"allowed_imports": spec.meta.allowed_imports,
 		});
 

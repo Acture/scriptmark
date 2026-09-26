@@ -48,7 +48,7 @@ pub fn expand_cases(cases: &[TestCase]) -> Vec<TestCase> {
 mod tests {
 	use super::*;
 	use crate::models::spec::{Oracle, Parametrize};
-	use std::collections::HashMap;
+	use std::collections::BTreeMap as HashMap;
 
 	#[test]
 	fn test_non_parametrized_passthrough() {
