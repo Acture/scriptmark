@@ -1,0 +1,410 @@
+//! The harness, observed directly through `Executor::run`: what a unit reports, before
+//! anything is judged.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use scriptmark::models::Target;
+use scriptmark::runner::executor::{
+	CallPlan, CheckObservation, Executor, Exit, InProcessCheck, Outcome, ScriptRun, Subject,
+	UnitObservation, UnitPlan,
+};
+use scriptmark::runner::python::PythonExecutor;
+use serde_json::{Value, json};
+
+fn write(dir: &Path, name: &str, content: &str) -> PathBuf {
+	let path = dir.join(name);
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent).unwrap();
+	}
+	std::fs::write(&path, content).unwrap();
+	path
+}
+
+fn function(name: &str, args: Vec<Value>) -> CallPlan {
+	call(
+		Target::Function {
+			name: name.to_string(),
+		},
+		args,
+	)
+}
+
+fn call(target: Target, args: Vec<Value>) -> CallPlan {
+	CallPlan {
+		target,
+		args,
+		stdin: None,
+		timeout: 5,
+		id: None,
+		files: Vec::new(),
+		check: None,
+	}
+}
+
+fn unit(file: &Path) -> UnitPlan {
+	UnitPlan {
+		subject: Subject::Student,
+		file: file.to_path_buf(),
+		script: None,
+		imports: Vec::new(),
+		vars: Arc::new(BTreeMap::new()),
+		data_files: Vec::new(),
+		allowed_imports: Vec::new(),
+		load_timeout: 5,
+		setup: Vec::new(),
+		steps: Vec::new(),
+	}
+}
+
+async fn run(plan: &UnitPlan) -> UnitObservation {
+	PythonExecutor::new().run(plan).await
+}
+
+fn returned(outcome: &Outcome) -> &Value {
+	match outcome {
+		Outcome::Returned { value, .. } => value,
+		other => panic!("expected a returned value, got {other:?}"),
+	}
+}
+
+#[tokio::test]
+async fn test_printing_and_stdlib_imports_do_not_break_the_protocol() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import random, csv, datetime, json, pathlib, statistics, decimal\nprint('loading')\ndef add(a, b):\n    print('debug', a, b)\n    return a + b\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("add", vec![json!(1), json!(2)])];
+	let obs = run(&plan).await;
+	assert!(obs.ready && obs.done, "{obs:?}");
+	assert!(matches!(
+		obs.load.as_ref().unwrap().outcome,
+		Outcome::Returned { .. }
+	));
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(3));
+	assert_eq!(obs.steps[0].stdout, "debug 1 2\n");
+	assert_eq!(obs.exit, Exit::Code(0));
+}
+
+#[tokio::test]
+async fn test_the_guard_still_refuses_a_student_import() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def sneaky():\n    import os\n    return os.getcwd()\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("sneaky", vec![])];
+	let obs = run(&plan).await;
+	match &obs.steps[0].outcome {
+		Outcome::Raised(e) => {
+			assert!(e.is_a("ImportError"));
+			assert!(e.message.contains("'os' is not allowed"));
+		}
+		other => panic!("{other:?}"),
+	}
+}
+
+#[tokio::test]
+async fn test_a_timeout_is_recorded_even_through_a_bare_except() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def spin():\n    try:\n        while True:\n            pass\n    except:\n        return -1\n\ndef ok():\n    return 1\n",
+	);
+	let mut plan = unit(&student);
+	let mut spin = function("spin", vec![]);
+	spin.timeout = 1;
+	plan.steps = vec![spin, function("ok", vec![])];
+	let obs = run(&plan).await;
+	assert!(
+		matches!(obs.steps[0].outcome, Outcome::Timeout {}),
+		"{obs:?}"
+	);
+	assert_eq!(
+		returned(&obs.steps[1].outcome),
+		&json!(1),
+		"later steps still run"
+	);
+}
+
+#[tokio::test]
+async fn test_a_unit_that_never_yields_is_killed_at_its_deadline() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def forever():\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n\ndef ok():\n    return 1\n",
+	);
+	let mut plan = unit(&student);
+	plan.load_timeout = 1;
+	let mut forever = function("forever", vec![]);
+	forever.timeout = 1;
+	let mut ok = function("ok", vec![]);
+	ok.timeout = 1;
+	plan.steps = vec![forever, ok];
+	let obs = run(&plan).await;
+	assert_eq!(obs.exit, Exit::Deadline);
+	assert!(obs.steps.is_empty(), "the hung call never reported");
+	assert!(!obs.done);
+}
+
+#[tokio::test]
+async fn test_a_shared_object_is_built_once_and_observed_by_attribute() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"bank.py",
+		"class Account:\n    def __init__(self, balance):\n        self.balance = balance\n    def deposit(self, n):\n        self.balance += n\n        return self.balance\n",
+	);
+	let mut plan = unit(&student);
+	let mut make = function("Account", vec![json!(100)]);
+	make.id = Some("acct".into());
+	plan.setup = vec![make];
+	plan.steps = vec![
+		call(
+			Target::Method {
+				object: "acct".into(),
+				name: "deposit".into(),
+			},
+			vec![json!(50)],
+		),
+		call(
+			Target::Attribute {
+				object: "acct".into(),
+				name: "balance".into(),
+			},
+			vec![],
+		),
+		call(
+			Target::Attribute {
+				object: "acct".into(),
+				name: "owner".into(),
+			},
+			vec![],
+		),
+	];
+	let obs = run(&plan).await;
+	assert_eq!(obs.setup.len(), 1);
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(150));
+	assert_eq!(returned(&obs.steps[1].outcome), &json!(150));
+	assert!(matches!(obs.steps[2].outcome, Outcome::Missing { .. }));
+}
+
+#[tokio::test]
+async fn test_files_are_staged_in_and_observed_out_of_a_private_directory() {
+	let dir = tempfile::tempdir().unwrap();
+	let submission = dir.path().join("submission");
+	let student = write(
+		&submission,
+		"lab.py",
+		"from pathlib import Path\n\ndef read_here():\n    return (Path(__file__).parent / 'data' / 'in.txt').read_text()\n\ndef read_cwd():\n    return open('data/in.txt').read()\n\ndef save(text):\n    with open('out.txt', 'w') as fh:\n        fh.write(text)\n",
+	);
+	let data = write(dir.path(), "spec/data/in.txt", "hello\n");
+	let mut plan = unit(&student);
+	plan.data_files = vec![(data.parent().unwrap().to_path_buf(), "data".into())];
+	let mut save = function("save", vec![json!("written\n")]);
+	save.files = vec!["out.txt".into(), "absent.txt".into()];
+	plan.steps = vec![
+		function("read_here", vec![]),
+		function("read_cwd", vec![]),
+		save,
+	];
+	let obs = run(&plan).await;
+	assert_eq!(returned(&obs.steps[0].outcome), &json!("hello\n"));
+	assert_eq!(returned(&obs.steps[1].outcome), &json!("hello\n"));
+	assert_eq!(
+		obs.steps[2].files.get("out.txt"),
+		Some(&Some("written\n".to_string()))
+	);
+	assert_eq!(obs.steps[2].files.get("absent.txt"), Some(&None));
+	let left: Vec<_> = std::fs::read_dir(&submission).unwrap().collect();
+	assert_eq!(left.len(), 1, "nothing written beside the submission");
+}
+
+#[tokio::test]
+async fn test_a_script_reads_its_stdin_every_way_and_may_exit_cleanly() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"io.py",
+		"import sys\nname = input('name? ')\nrest = sys.stdin.read()\nprint('hi', name, rest.split())\nsys.exit(0)\n",
+	);
+	let mut plan = unit(&student);
+	plan.script = Some(ScriptRun {
+		stdin: Some("ada\n1 2\n".into()),
+		timeout: 5,
+		files: Vec::new(),
+	});
+	let obs = run(&plan).await;
+	assert!(
+		matches!(obs.steps[0].outcome, Outcome::Returned { .. }),
+		"{obs:?}"
+	);
+	assert_eq!(obs.steps[0].stdout, "name? hi ada ['1', '2']\n");
+
+	let failing = write(dir.path(), "bad.py", "import sys\nsys.exit(3)\n");
+	let mut plan = unit(&failing);
+	plan.script = Some(ScriptRun {
+		stdin: None,
+		timeout: 5,
+		files: Vec::new(),
+	});
+	let obs = run(&plan).await;
+	assert!(matches!(&obs.steps[0].outcome, Outcome::Raised(e) if e.is_a("SystemExit")));
+}
+
+#[tokio::test]
+async fn test_exit_at_import_is_the_students_raise_not_a_silent_death() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"choice = input()\nif choice == '0':\n    exit()\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("f", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.done);
+	assert!(matches!(
+		&obs.load.as_ref().unwrap().outcome,
+		Outcome::Raised(e) if e.is_a("SystemExit")
+	));
+	assert!(obs.steps.is_empty());
+}
+
+#[tokio::test]
+async fn test_values_that_cannot_be_serialised_are_reported_not_crashed_on() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def numbers():\n    return {10, 9, 100}\n\nclass Loud:\n    def __str__(self):\n        print('side effect')\n\ndef mixed():\n    return {1, 'a'}\n\ndef collide():\n    return {1: 'a', '1': 'b'}\n\ndef loud():\n    return Loud()\n\ndef cyclic():\n    x = []\n    x.append(x)\n    return x\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![
+		function("numbers", vec![]),
+		function("mixed", vec![]),
+		function("collide", vec![]),
+		function("loud", vec![]),
+		function("cyclic", vec![]),
+	];
+	let obs = run(&plan).await;
+	assert_eq!(returned(&obs.steps[0].outcome), &json!([9, 10, 100]));
+	assert_eq!(returned(&obs.steps[1].outcome), &json!(["a", 1]));
+	assert!(matches!(obs.steps[2].outcome, Outcome::Unserialisable(_)));
+	assert_eq!(returned(&obs.steps[3].outcome), &json!("<Loud>"));
+	assert_eq!(returned(&obs.steps[4].outcome), &json!(["<cycle>"]));
+}
+
+#[tokio::test]
+async fn test_in_process_checks_report_verdicts_rejections_and_errors() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(dir.path(), "lab.py", "def f(x):\n    return x\n");
+	let teacher = write(
+		dir.path(),
+		"teacher.py",
+		"def close(result, expected):\n    return abs(result - expected) < 1, 'off by more than one'\n\ndef strict(result, expected):\n    assert isinstance(result, str), 'expected a string'\n    return True\n\ndef broken(result, expected):\n    return result.nope\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let checked = |name: &str, arg: Value| {
+		let mut c = function("f", vec![arg]);
+		c.check = Some(InProcessCheck {
+			function: name.to_string(),
+			expected: Some(json!(10)),
+		});
+		c
+	};
+	plan.steps = vec![
+		checked("close", json!(10.5)),
+		checked("strict", json!(3)),
+		checked("broken", json!(3)),
+	];
+	let obs = run(&plan).await;
+	assert_eq!(
+		obs.checks[&0],
+		CheckObservation::Verdict {
+			pass: true,
+			message: "off by more than one".into()
+		}
+	);
+	assert_eq!(
+		obs.checks[&1],
+		CheckObservation::Rejected {
+			message: "expected a string".into()
+		}
+	);
+	assert!(matches!(&obs.checks[&2], CheckObservation::Error(e) if e.is_a("AttributeError")));
+}
+
+#[tokio::test]
+async fn test_refs_resolve_live_and_a_missing_one_is_reported() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def echo(x):\n    return x\n\ndef boom():\n    raise ValueError('no')\n",
+	);
+	let mut plan = unit(&student);
+	let mut boom = function("boom", vec![]);
+	boom.id = Some("never".into());
+	plan.vars = Arc::new(BTreeMap::from([("LIMIT".to_string(), json!(7))]));
+	plan.steps = vec![
+		function("echo", vec![json!("$LIMIT")]),
+		function("echo", vec![json!("$$5")]),
+		boom,
+		function("echo", vec![json!("$never")]),
+	];
+	let obs = run(&plan).await;
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(7));
+	assert_eq!(returned(&obs.steps[1].outcome), &json!("$5"));
+	assert!(matches!(&obs.steps[2].outcome, Outcome::Raised(e) if e.is_a("Exception")));
+	assert!(matches!(&obs.steps[3].outcome, Outcome::Unresolved { name } if name == "never"));
+}
+
+#[tokio::test]
+async fn test_a_teacher_module_that_fails_to_import_is_fatal_before_ready() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(dir.path(), "lab.py", "def f():\n    return 1\n");
+	let teacher = write(
+		dir.path(),
+		"teacher.py",
+		"raise RuntimeError('broken helper')\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.steps = vec![function("f", vec![])];
+	let obs = run(&plan).await;
+	assert!(!obs.ready);
+	assert_eq!(obs.fatal.as_ref().unwrap().stage, "teacher_import");
+}
+
+#[tokio::test]
+async fn test_inspect_reports_only_what_a_teacher_module_defines() {
+	let dir = tempfile::tempdir().unwrap();
+	write(dir.path(), "helpers/sibling.py", "BASE = 2\n");
+	let teacher = write(
+		dir.path(),
+		"helpers/teacher.py",
+		"import csv\nfrom pathlib import Path\nfrom collections import deque\nfrom sibling import BASE\nDATA = Path(__file__).parent / 'x.csv'\n\ndef make(n, scale=BASE):\n    return n * scale\n",
+	);
+	let spec: scriptmark::models::TestSpec = toml::from_str(&format!(
+		"[meta]\nname = \"t\"\nfile = \"lab.py\"\nlanguage = \"python\"\nimports = [{:?}]\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+		teacher.to_string_lossy()
+	))
+	.unwrap();
+	let runtime = PythonExecutor::new().inspect(&spec, 5).await.unwrap();
+	let names: Vec<&str> = runtime.exports.keys().map(String::as_str).collect();
+	assert_eq!(names, ["BASE", "DATA", "make"]);
+	assert_eq!(
+		runtime.exports["make"].params.as_deref(),
+		Some(&["n".to_string(), "scale".to_string()][..])
+	);
+}

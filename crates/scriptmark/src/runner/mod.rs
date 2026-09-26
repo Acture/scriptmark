@@ -5,5 +5,6 @@ pub mod linter;
 pub mod oracle;
 pub mod orchestrator;
 pub mod python;
+pub mod records;
 pub mod resolve;
 pub mod sandbox;
