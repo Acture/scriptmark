@@ -97,6 +97,7 @@ mod tests {
 					expected: None,
 					failure: None,
 					elapsed_ms: None,
+					..Default::default()
 				}],
 			}],
 			final_grade: Some(95.0),

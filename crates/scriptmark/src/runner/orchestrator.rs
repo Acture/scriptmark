@@ -244,6 +244,7 @@ async fn run_student(
 							details: String::new(),
 						}),
 						elapsed_ms: Some(0),
+						..Default::default()
 					});
 					continue;
 				}

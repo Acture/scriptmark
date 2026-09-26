@@ -1,11 +1,53 @@
-use super::{CheckInput, CheckOutput, Checker};
+use super::{CheckError, CheckInput, CheckOutput, Checker};
+
+/// A built-in comparison: it always reaches a verdict.
+pub trait Compare: Send + Sync {
+	fn compare(&self, input: &CheckInput) -> CheckOutput;
+}
+
+macro_rules! infallible {
+	($($t:ty),*) => {$(
+		impl Checker for $t {
+			fn check(&self, input: &CheckInput) -> Result<CheckOutput, CheckError> {
+				Ok(self.compare(input))
+			}
+		}
+	)*};
+}
+
+infallible!(
+	ExactChecker,
+	ApproxChecker,
+	SortedChecker,
+	SetEqChecker,
+	ContainsChecker,
+	TextChecker
+);
 
 /// Exact equality checker (default).
 pub struct ExactChecker;
 
-impl Checker for ExactChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
-		if input.result == input.expected {
+/// Equality as Python sees it: numbers compare by value, so `2 == 2.0`.
+pub fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+	use serde_json::Value;
+	match (a, b) {
+		(Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
+			(Some(x), Some(y)) => x == y,
+			_ => x.as_f64() == y.as_f64(),
+		},
+		(Value::Array(x), Value::Array(y)) => {
+			x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b))
+		}
+		(Value::Object(x), Value::Object(y)) => {
+			x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
+		}
+		_ => a == b,
+	}
+}
+
+impl Compare for ExactChecker {
+	fn compare(&self, input: &CheckInput) -> CheckOutput {
+		if same(&input.result, &input.expected) {
 			CheckOutput {
 				pass: true,
 				message: String::new(),
@@ -24,8 +66,8 @@ pub struct ApproxChecker {
 	pub tolerance: f64,
 }
 
-impl Checker for ApproxChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
+impl Compare for ApproxChecker {
+	fn compare(&self, input: &CheckInput) -> CheckOutput {
 		let actual = input.result.as_f64();
 		let expected = input.expected.as_f64();
 
@@ -61,8 +103,8 @@ impl Checker for ApproxChecker {
 /// Check that the result is a sorted array.
 pub struct SortedChecker;
 
-impl Checker for SortedChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
+impl Compare for SortedChecker {
+	fn compare(&self, input: &CheckInput) -> CheckOutput {
 		let Some(arr) = input.result.as_array() else {
 			return CheckOutput {
 				pass: false,
@@ -104,8 +146,8 @@ impl Checker for SortedChecker {
 /// Check that two arrays have the same elements (ignoring order).
 pub struct SetEqChecker;
 
-impl Checker for SetEqChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
+impl Compare for SetEqChecker {
+	fn compare(&self, input: &CheckInput) -> CheckOutput {
 		let (Some(actual), Some(expected)) = (input.result.as_array(), input.expected.as_array())
 		else {
 			return CheckOutput {
@@ -136,8 +178,8 @@ impl Checker for SetEqChecker {
 /// Check that the result contains a substring.
 pub struct ContainsChecker;
 
-impl Checker for ContainsChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
+impl Compare for ContainsChecker {
+	fn compare(&self, input: &CheckInput) -> CheckOutput {
 		let actual_owned = input.result.to_string();
 		let actual = input.result.as_str().unwrap_or(&actual_owned);
 		let expected_owned = input.expected.to_string();
@@ -152,30 +194,6 @@ impl Checker for ContainsChecker {
 			CheckOutput {
 				pass: false,
 				message: format!("output does not contain '{expected}'"),
-			}
-		}
-	}
-}
-
-/// Check that the result matches a regex pattern.
-pub struct RegexChecker {
-	pub pattern: regex::Regex,
-}
-
-impl Checker for RegexChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
-		let actual_owned = input.result.to_string();
-		let actual = input.result.as_str().unwrap_or(&actual_owned);
-
-		if self.pattern.is_match(actual) {
-			CheckOutput {
-				pass: true,
-				message: String::new(),
-			}
-		} else {
-			CheckOutput {
-				pass: false,
-				message: format!("output does not match pattern '{}'", self.pattern),
 			}
 		}
 	}
@@ -198,8 +216,8 @@ impl TextChecker {
 	}
 }
 
-impl Checker for TextChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
+impl Compare for TextChecker {
+	fn compare(&self, input: &CheckInput) -> CheckOutput {
 		let actual_raw = input.result.as_str().unwrap_or("");
 		let expected_raw = input.expected.as_str().unwrap_or("");
 
@@ -245,7 +263,7 @@ mod tests {
 	#[test]
 	fn test_exact_pass() {
 		let checker = ExactChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!(5),
 			expected: json!(5),
 			context: json!({}),
@@ -256,7 +274,7 @@ mod tests {
 	#[test]
 	fn test_exact_fail() {
 		let checker = ExactChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!(3),
 			expected: json!(5),
 			context: json!({}),
@@ -268,7 +286,7 @@ mod tests {
 	#[test]
 	fn test_approx_pass() {
 		let checker = ApproxChecker { tolerance: 0.001 };
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!(1.23),
 			expected: json!(1.238),
 			context: json!({}),
@@ -276,7 +294,7 @@ mod tests {
 		assert!(!result.pass); // diff = 0.008 > 0.001
 
 		let checker = ApproxChecker { tolerance: 0.01 };
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!(1.235),
 			expected: json!(1.238),
 			context: json!({}),
@@ -287,7 +305,7 @@ mod tests {
 	#[test]
 	fn test_sorted_pass() {
 		let checker = SortedChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!([1, 2, 3, 4]),
 			expected: json!(null),
 			context: json!({}),
@@ -298,7 +316,7 @@ mod tests {
 	#[test]
 	fn test_sorted_fail() {
 		let checker = SortedChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!([3, 1, 2]),
 			expected: json!(null),
 			context: json!({}),
@@ -309,7 +327,7 @@ mod tests {
 	#[test]
 	fn test_text_checker_strip_trailing_spaces() {
 		let checker = TextChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!(" *  \n* * *\n *  "),
 			expected: json!(" * \n* * *\n * "),
 			context: json!({}),
@@ -320,7 +338,7 @@ mod tests {
 	#[test]
 	fn test_text_checker_strip_blank_lines() {
 		let checker = TextChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!("\n\n *\n* * *\n *\n\n"),
 			expected: json!(" *\n* * *\n *"),
 			context: json!({}),
@@ -334,7 +352,7 @@ mod tests {
 	#[test]
 	fn test_text_checker_content_diff_fails() {
 		let checker = TextChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!("* *\n***"),
 			expected: json!("* *\n* * *"),
 			context: json!({}),
@@ -345,7 +363,7 @@ mod tests {
 	#[test]
 	fn test_set_eq() {
 		let checker = SetEqChecker;
-		let result = checker.check(&CheckInput {
+		let result = checker.compare(&CheckInput {
 			result: json!([3, 1, 2]),
 			expected: json!([1, 2, 3]),
 			context: json!({}),

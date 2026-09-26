@@ -642,6 +642,7 @@ impl PythonExecutor {
 					details: String::new(),
 				}),
 				elapsed_ms: Some(elapsed),
+				..Default::default()
 			},
 			Err(SpawnError::Spawn(e)) => CaseResult {
 				case_name: case.name.clone(),
@@ -653,6 +654,7 @@ impl PythonExecutor {
 					details: String::new(),
 				}),
 				elapsed_ms: Some(elapsed),
+				..Default::default()
 			},
 			Ok(output) => {
 				let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -683,6 +685,7 @@ impl PythonExecutor {
 						details: stdout.to_string(),
 					}),
 					elapsed_ms: Some(elapsed_ms),
+					..Default::default()
 				};
 			}
 		};
@@ -710,6 +713,7 @@ impl PythonExecutor {
 					expected: Some(format!("{expected_error} (expected)")),
 					failure: None,
 					elapsed_ms: Some(elapsed_ms),
+					..Default::default()
 				};
 			}
 
@@ -727,6 +731,7 @@ impl PythonExecutor {
 					details: String::new(),
 				}),
 				elapsed_ms: Some(elapsed_ms),
+				..Default::default()
 			};
 		}
 
@@ -750,6 +755,7 @@ impl PythonExecutor {
 					details: String::new(),
 				}),
 				elapsed_ms: Some(elapsed_ms),
+				..Default::default()
 			};
 		}
 
@@ -759,11 +765,16 @@ impl PythonExecutor {
 			.cloned()
 			.unwrap_or(serde_json::Value::Null);
 		let checker = self.resolve_checker(case);
-		let check_result = checker.check(&CheckInput {
-			result: actual_value.clone(),
-			expected: case.expect.clone().unwrap_or(serde_json::Value::Null),
-			context: serde_json::Value::Null,
-		});
+		let check_result = checker
+			.check(&CheckInput {
+				result: actual_value.clone(),
+				expected: case.expect.clone().unwrap_or(serde_json::Value::Null),
+				context: serde_json::Value::Null,
+			})
+			.unwrap_or_else(|e| crate::checker::CheckOutput {
+				pass: false,
+				message: e.message,
+			});
 
 		if check_result.pass {
 			CaseResult {
@@ -773,6 +784,7 @@ impl PythonExecutor {
 				expected: case.expect.as_ref().map(|v| v.to_string()),
 				failure: None,
 				elapsed_ms: Some(elapsed_ms),
+				..Default::default()
 			}
 		} else {
 			CaseResult {
@@ -785,6 +797,7 @@ impl PythonExecutor {
 					details: String::new(),
 				}),
 				elapsed_ms: Some(elapsed_ms),
+				..Default::default()
 			}
 		}
 	}
@@ -816,6 +829,7 @@ impl PythonExecutor {
 							details: String::new(),
 						}),
 						elapsed_ms: Some(start.elapsed().as_millis() as u64),
+						..Default::default()
 					};
 				}
 			};
@@ -846,6 +860,7 @@ impl PythonExecutor {
 							details: String::new(),
 						}),
 						elapsed_ms: Some(start.elapsed().as_millis() as u64),
+						..Default::default()
 					};
 				}
 			};
@@ -894,6 +909,7 @@ impl PythonExecutor {
 						details: String::new(),
 					}),
 					elapsed_ms: Some(elapsed),
+					..Default::default()
 				}
 			}
 			Ok(Err(e)) => CaseResult {
@@ -906,6 +922,7 @@ impl PythonExecutor {
 					details: String::new(),
 				}),
 				elapsed_ms: Some(elapsed),
+				..Default::default()
 			},
 			Ok(Ok(output)) => {
 				let actual_stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -919,6 +936,7 @@ impl PythonExecutor {
 						expected: Some(expected.to_string()),
 						failure: None,
 						elapsed_ms: Some(elapsed),
+						..Default::default()
 					}
 				} else {
 					CaseResult {
@@ -931,6 +949,7 @@ impl PythonExecutor {
 							details: format!("expected:\n{expected}\nactual:\n{actual_stdout}"),
 						}),
 						elapsed_ms: Some(elapsed),
+						..Default::default()
 					}
 				}
 			}
@@ -1009,6 +1028,7 @@ impl PythonExecutor {
 								details: String::new(),
 							}),
 							elapsed_ms: Some(0),
+							..Default::default()
 						})
 						.collect();
 				}
@@ -1093,6 +1113,7 @@ impl PythonExecutor {
 						details: String::new(),
 					}),
 					elapsed_ms: Some(elapsed),
+					..Default::default()
 				})
 				.collect(),
 			Err(SpawnError::Spawn(e)) => cases
@@ -1107,6 +1128,7 @@ impl PythonExecutor {
 						details: String::new(),
 					}),
 					elapsed_ms: Some(elapsed),
+					..Default::default()
 				})
 				.collect(),
 			Ok(output) => {
@@ -1138,6 +1160,7 @@ impl PythonExecutor {
 							details: stdout.to_string(),
 						}),
 						elapsed_ms: Some(elapsed_ms),
+						..Default::default()
 					})
 					.collect();
 			}
@@ -1169,6 +1192,7 @@ impl PythonExecutor {
 						details: String::new(),
 					}),
 					elapsed_ms: Some(elapsed_ms),
+					..Default::default()
 				})
 				.collect();
 		}
@@ -1189,6 +1213,7 @@ impl PythonExecutor {
 							details: stdout.to_string(),
 						}),
 						elapsed_ms: Some(elapsed_ms),
+						..Default::default()
 					})
 					.collect();
 			}
@@ -1211,6 +1236,7 @@ impl PythonExecutor {
 								details: String::new(),
 							}),
 							elapsed_ms: Some(elapsed_ms),
+							..Default::default()
 						};
 					}
 				};
@@ -1236,6 +1262,7 @@ impl PythonExecutor {
 							expected: case.expect.as_ref().map(|v| v.to_string()),
 							failure: None,
 							elapsed_ms: Some(elapsed_ms),
+							..Default::default()
 						};
 					} else {
 						return CaseResult {
@@ -1248,6 +1275,7 @@ impl PythonExecutor {
 								details: String::new(),
 							}),
 							elapsed_ms: Some(elapsed_ms),
+							..Default::default()
 						};
 					}
 				}
@@ -1281,15 +1309,21 @@ impl PythonExecutor {
 							details: String::new(),
 						}),
 						elapsed_ms: Some(elapsed_ms),
+						..Default::default()
 					};
 				}
 
 				let checker = self.resolve_checker(case);
-				let check_result = checker.check(&CheckInput {
-					result: actual_value.clone(),
-					expected: case.expect.clone().unwrap_or(serde_json::Value::Null),
-					context: serde_json::Value::Null,
-				});
+				let check_result = checker
+					.check(&CheckInput {
+						result: actual_value.clone(),
+						expected: case.expect.clone().unwrap_or(serde_json::Value::Null),
+						context: serde_json::Value::Null,
+					})
+					.unwrap_or_else(|e| crate::checker::CheckOutput {
+						pass: false,
+						message: e.message,
+					});
 
 				if check_result.pass {
 					CaseResult {
@@ -1299,6 +1333,7 @@ impl PythonExecutor {
 						expected: case.expect.as_ref().map(|v| v.to_string()),
 						failure: None,
 						elapsed_ms: Some(elapsed_ms),
+						..Default::default()
 					}
 				} else {
 					CaseResult {
@@ -1311,6 +1346,7 @@ impl PythonExecutor {
 							details: String::new(),
 						}),
 						elapsed_ms: Some(elapsed_ms),
+						..Default::default()
 					}
 				}
 			})
@@ -1345,6 +1381,7 @@ impl PythonExecutor {
 						details: String::new(),
 					}),
 					elapsed_ms: Some(0),
+					..Default::default()
 				};
 			}
 		};

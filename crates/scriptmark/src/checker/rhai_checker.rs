@@ -1,6 +1,6 @@
 use rhai::{Dynamic, Engine, Scope};
 
-use super::{CheckInput, CheckOutput, Checker};
+use super::{CheckError, CheckInput, CheckOutput, Checker};
 
 /// Checker that evaluates a Rhai inline expression.
 ///
@@ -48,7 +48,7 @@ pub fn json_to_dynamic(value: &serde_json::Value) -> Dynamic {
 }
 
 impl Checker for RhaiChecker {
-	fn check(&self, input: &CheckInput) -> CheckOutput {
+	fn check(&self, input: &CheckInput) -> Result<CheckOutput, CheckError> {
 		let engine = Engine::new();
 		let mut scope = Scope::new();
 
@@ -56,38 +56,31 @@ impl Checker for RhaiChecker {
 		scope.push_dynamic("expected", json_to_dynamic(&input.expected));
 		scope.push_dynamic("context", json_to_dynamic(&input.context));
 
-		match engine.eval_with_scope::<Dynamic>(&mut scope, &self.expression) {
-			Ok(val) => {
-				if let Ok(passed) = val.as_bool() {
-					if passed {
-						CheckOutput {
-							pass: true,
-							message: String::new(),
-						}
-					} else {
-						CheckOutput {
-							pass: false,
-							message: format!(
-								"Rhai check failed: `{}` evaluated to false",
-								self.expression
-							),
-						}
-					}
-				} else {
-					CheckOutput {
-						pass: false,
-						message: format!(
-							"Rhai expression must return bool, got: {}",
-							val.type_name()
-						),
-					}
-				}
-			}
-			Err(e) => CheckOutput {
-				pass: false,
-				message: format!("Rhai evaluation error: {e}"),
+		// An expression that cannot evaluate, or does not say yes or no, has not decided —
+		// even when a malformed answer is what tripped it. That is the teacher's to resolve.
+		let value = engine
+			.eval_with_scope::<Dynamic>(&mut scope, &self.expression)
+			.map_err(|e| {
+				CheckError::teacher(format!(
+					"rhai check `{}` could not evaluate: {e}",
+					self.expression
+				))
+			})?;
+		let passed = value.as_bool().map_err(|_| {
+			CheckError::teacher(format!(
+				"rhai check `{}` returned {}, not a bool",
+				self.expression,
+				value.type_name()
+			))
+		})?;
+		Ok(CheckOutput {
+			pass: passed,
+			message: if passed {
+				String::new()
+			} else {
+				format!("`{}` is false", self.expression)
 			},
-		}
+		})
 	}
 }
 
@@ -99,80 +92,92 @@ mod tests {
 	#[test]
 	fn test_rhai_simple_true() {
 		let checker = RhaiChecker::new("result > 0");
-		let output = checker.check(&CheckInput {
-			result: json!(42),
-			expected: json!(null),
-			context: json!({}),
-		});
+		let output = checker
+			.check(&CheckInput {
+				result: json!(42),
+				expected: json!(null),
+				context: json!({}),
+			})
+			.unwrap();
 		assert!(output.pass);
 	}
 
 	#[test]
 	fn test_rhai_simple_false() {
 		let checker = RhaiChecker::new("result > 100");
-		let output = checker.check(&CheckInput {
-			result: json!(42),
-			expected: json!(null),
-			context: json!({}),
-		});
+		let output = checker
+			.check(&CheckInput {
+				result: json!(42),
+				expected: json!(null),
+				context: json!({}),
+			})
+			.unwrap();
 		assert!(!output.pass);
-		assert!(output.message.contains("evaluated to false"));
+		assert!(output.message.contains("is false"));
 	}
 
 	#[test]
 	fn test_rhai_compare_with_expected() {
 		let checker = RhaiChecker::new("result == expected");
-		let output = checker.check(&CheckInput {
-			result: json!(5),
-			expected: json!(5),
-			context: json!({}),
-		});
+		let output = checker
+			.check(&CheckInput {
+				result: json!(5),
+				expected: json!(5),
+				context: json!({}),
+			})
+			.unwrap();
 		assert!(output.pass);
 	}
 
 	#[test]
 	fn test_rhai_array_length() {
 		let checker = RhaiChecker::new("result.len() > 2");
-		let output = checker.check(&CheckInput {
-			result: json!([1, 2, 3]),
-			expected: json!(null),
-			context: json!({}),
-		});
+		let output = checker
+			.check(&CheckInput {
+				result: json!([1, 2, 3]),
+				expected: json!(null),
+				context: json!({}),
+			})
+			.unwrap();
 		assert!(output.pass);
 	}
 
 	#[test]
 	fn test_rhai_context_access() {
 		let checker = RhaiChecker::new("result == context.answer");
-		let output = checker.check(&CheckInput {
-			result: json!(42),
-			expected: json!(null),
-			context: json!({"answer": 42}),
-		});
+		let output = checker
+			.check(&CheckInput {
+				result: json!(42),
+				expected: json!(null),
+				context: json!({"answer": 42}),
+			})
+			.unwrap();
 		assert!(output.pass);
 	}
 
 	#[test]
 	fn test_rhai_syntax_error() {
 		let checker = RhaiChecker::new("invalid $$$ syntax");
-		let output = checker.check(&CheckInput {
-			result: json!(1),
-			expected: json!(null),
-			context: json!({}),
-		});
-		assert!(!output.pass);
-		assert!(output.message.contains("Rhai evaluation error"));
+		let output = checker
+			.check(&CheckInput {
+				result: json!(1),
+				expected: json!(null),
+				context: json!({}),
+			})
+			.unwrap_err();
+		assert!(output.message.contains("could not evaluate"));
 	}
 
 	#[test]
 	fn test_rhai_non_bool_return() {
 		let checker = RhaiChecker::new("result + 1");
-		let output = checker.check(&CheckInput {
-			result: json!(5),
-			expected: json!(null),
-			context: json!({}),
-		});
-		assert!(!output.pass);
-		assert!(output.message.contains("must return bool"));
+		let output = checker
+			.check(&CheckInput {
+				result: json!(5),
+				expected: json!(null),
+				context: json!({}),
+			})
+			.unwrap_err();
+		assert!(output.message.contains("not a bool"));
 	}
 }

@@ -121,6 +121,7 @@ mod tests {
 				expected: None,
 				failure: None,
 				elapsed_ms: None,
+				..Default::default()
 			})
 			.collect();
 
