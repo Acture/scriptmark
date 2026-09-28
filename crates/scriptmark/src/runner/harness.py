@@ -2,32 +2,44 @@
 
 It reports observations, never verdicts about who is at fault: the grader derives
 those from which call was running, what kind of code it runs, and how the process
-ended. The nonce framing protects the records from accidental output only; a student
+ended. Every piece of student code — loading the module, finding a function, reading
+an attribute, serialising a value — runs inside `call()`, under its timer and import
+guard, so a failure there is that call's outcome and never a harness crash.
+
+The nonce framing protects the records from accidental output only; a student
 determined to reach harness state from inside the same process could, which is why
 nothing here decides anything.
 """
 
-import builtins
-import importlib.util
-import inspect
-import io
-import json
-import math
-import os
-import py_compile
-import runpy
-import signal
 import sys
-import time
+
+# The unit's working directory holds the student's file, and `python -c` puts it first
+# on sys.path: a submission named json.py must not become the harness's json.
+sys.path[:] = [p for p in sys.path if p]
+
+import builtins  # noqa: E402
+import importlib.machinery  # noqa: E402
+import importlib.util  # noqa: E402
+import inspect  # noqa: E402
+import io  # noqa: E402
+import json  # noqa: E402
+import math  # noqa: E402
+import os  # noqa: E402
+import py_compile  # noqa: E402
+import runpy  # noqa: E402
+import signal  # noqa: E402
+import time  # noqa: E402
 
 with open(sys.argv[1], encoding="utf-8") as _fh:
 	PAYLOAD = json.load(_fh)
 os.unlink(sys.argv[1])
 
 _PREFIX = f"\n@@scriptmark:{PAYLOAD['nonce']}@@ "
-_channel = os.fdopen(os.dup(1), "w", encoding="utf-8")
+# `replace`: a lone surrogate a student printed or returned must not crash the channel.
+_channel = os.fdopen(os.dup(1), "w", encoding="utf-8", errors="replace")
 _real_stdout = sys.stdout
 _real_stdin = sys.stdin
+STUDENT = PAYLOAD.get("subject", "student") == "student"
 STDOUT_LIMIT = 64 * 1024
 FILE_LIMIT = 1024 * 1024
 DEPTH_LIMIT = 100
@@ -94,7 +106,9 @@ _original_import = builtins.__import__
 
 
 def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
-	if globals is not None and globals.get(STUDENT_MARK) and level == 0:
+	# `__import__('os')` called directly passes no globals: look at the caller instead.
+	scope = globals if globals is not None else sys._getframe(1).f_globals
+	if scope.get(STUDENT_MARK) and level == 0:
 		if name.split(".")[0] not in ALLOWED:
 			raise ImportError(f"Module '{name}' is not allowed in student code")
 	return _original_import(name, globals, locals, fromlist, level)
@@ -118,32 +132,31 @@ if _HAS_TIMER:
 	signal.signal(signal.SIGALRM, _on_alarm)
 
 
-class Capture(io.TextIOBase):
-	"""A stdout replacement that keeps at most STDOUT_LIMIT characters."""
+class _CappedBytes(io.BytesIO):
+	"""Keeps at most STDOUT_LIMIT bytes and remembers whether it dropped any."""
 
-	encoding = "utf-8"
+	truncated = False
 
-	def __init__(self):
-		self._parts = []
-		self._size = 0
-		self.truncated = False
-
-	def writable(self):
-		return True
-
-	def write(self, s):
-		if not isinstance(s, str):
-			raise TypeError(f"write() argument must be str, not {type(s).__name__}")
-		room = STDOUT_LIMIT - self._size
-		if room > 0:
-			self._parts.append(s[:room])
-			self._size += min(len(s), room)
-		if len(s) > room:
+	def write(self, b):
+		room = STDOUT_LIMIT - self.tell()
+		if len(b) > room:
 			self.truncated = True
-		return len(s)
+		if room > 0:
+			super().write(bytes(b[:room]))
+		return len(b)
 
-	def getvalue(self):
-		return "".join(self._parts)
+
+def capture():
+	"""A stdout that behaves like a real one — `buffer`, `reconfigure`, `print(flush=True)`."""
+	return io.TextIOWrapper(
+		_CappedBytes(), encoding="utf-8", errors="backslashreplace", write_through=True
+	)
+
+
+def captured(stream):
+	stream.flush()
+	raw = stream.buffer
+	return raw.getvalue().decode("utf-8", "replace"), raw.truncated
 
 
 # --- The one value serialiser ----------------------------------------------------------
@@ -152,9 +165,18 @@ class Unserialisable(Exception):
 
 
 def to_json(value, depth=0, seen=None):
-	"""What the grader sees of a Python value. Runs inside the student call's scope."""
-	if value is None or isinstance(value, (bool, int, str)):
+	"""What the grader sees of a Python value. Total: it never raises for a value's sake."""
+	if isinstance(value, bool) or value is None or isinstance(value, str):
 		return value
+	if isinstance(value, int):
+		if -(2**63) <= value < 2**64:
+			return value
+		# Past what the grader's JSON can hold exactly: tag it, so it is never mistaken
+		# for a number and a record always parses.
+		try:
+			return {"$bigint": str(value)}
+		except ValueError:  # more digits than str() will convert
+			return {"$bigint": f"<{value.bit_length()}-bit integer>"}
 	if isinstance(value, float):
 		return value if math.isfinite(value) else repr(value)
 	if depth >= DEPTH_LIMIT:
@@ -175,11 +197,16 @@ def to_json(value, depth=0, seen=None):
 	if isinstance(value, dict):
 		out = {}
 		for k, v in value.items():
-			key = k if isinstance(k, str) else str(k)
+			key = k if isinstance(k, str) else text_of(k)
 			if key in out:
 				raise Unserialisable(f"two keys both read as '{key}'")
 			out[key] = to_json(v, depth + 1, seen)
 		return out
+	return text_of(value)
+
+
+def text_of(value):
+	"""`str(value)`, or the type's name when the value's own `__str__` fails."""
 	try:
 		text = str(value)
 	except Exception:
@@ -188,21 +215,35 @@ def to_json(value, depth=0, seen=None):
 
 
 def error_of(exc):
-	return {
+	info = {
 		"type": type(exc).__name__,
 		"types": [cls.__name__ for cls in type(exc).__mro__],
-		"message": str(exc),
+		"message": text_of(exc),
 	}
+	if isinstance(exc, SystemExit):
+		# The exit status CPython would report: `exit()`, `exit(0)` and `exit(False)` succeed.
+		info["clean"] = exc.code is None or exc.code == 0
+	return info
 
 
 def stdin_stream(text):
 	return io.TextIOWrapper(io.BytesIO((text or "").encode("utf-8")), encoding="utf-8")
 
 
+class Missing(Exception):
+	"""The call's target does not exist."""
+
+
+class Unresolved(Exception):
+	"""A `$ref` or `object` whose value was never produced in this unit."""
+
+
 def call(fn, timeout, stdin=None, guarded=True, serialise=True):
-	"""Run one call. Returns (outcome, stdout, truncated, elapsed_ms, live_value)."""
-	capture = Capture()
-	sys.stdout = capture
+	"""Run one call — its lookup, its body and its serialisation — under its timer and guard.
+
+	Returns (outcome, stdout, truncated, elapsed_ms, live_value)."""
+	out = capture()
+	sys.stdout = out
 	sys.stdin = stdin_stream(stdin) if stdin is not False else _real_stdin
 	if guarded:
 		builtins.__import__ = _guarded_import
@@ -220,8 +261,12 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 				signal.setitimer(signal.ITIMER_REAL, 0)
 	except CallTimeout:
 		outcome = {"timeout": {}}
+	except Missing as exc:
+		outcome = {"missing": {"message": str(exc)}}
+	except Unresolved as exc:
+		outcome = {"unresolved": {"name": str(exc)}}
 	except Unserialisable as exc:
-		outcome = {"unserialisable": {"type": type(exc).__name__, "message": str(exc)}}
+		outcome = {"unserialisable": {"type": "Unserialisable", "message": str(exc)}}
 	except BaseException as exc:  # SystemExit and KeyboardInterrupt are the code's own too
 		outcome = {"raised": error_of(exc)}
 	finally:
@@ -232,10 +277,19 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 		# The timer went off even if the code swallowed it with a bare `except:`.
 		outcome = {"timeout": {}}
 	elapsed = int((time.perf_counter() - start) * 1000)
-	return outcome, capture.getvalue(), capture.truncated, elapsed, value
+	stdout, truncated = captured(out)
+	return outcome, stdout, truncated, elapsed, value
 
 
 # --- Teacher modules -------------------------------------------------------------------
+def _removed_checker(*args, **kwargs):
+	raise RuntimeError(
+		"@checker no longer binds a checker to a function: put "
+		'check = { function = "<checker name>" } on each case it should judge '
+		"(docs/test-bundles.md, 'Migrating an older spec')"
+	)
+
+
 def exports_of(module):
 	"""`__all__` when present; otherwise public names, minus modules and minus classes and
 	functions the module merely imported from elsewhere."""
@@ -257,36 +311,40 @@ def exports_of(module):
 
 
 def load_teacher_modules():
-	exports = {}
-	for index, path in enumerate(PAYLOAD.get("imports", [])):
-		directory = os.path.dirname(path)
-		if directory not in sys.path:
-			sys.path.insert(0, directory)
-		spec = importlib.util.spec_from_file_location(f"teacher_mod_{index}", path)
-		module = importlib.util.module_from_spec(spec)
-		sys.modules[spec.name] = module
-		spec.loader.exec_module(module)
-		exports.update(exports_of(module))
-	return exports
+	"""Returns (exports, duplicates): a name two modules export differently is refused."""
+	exports, owner, duplicates = {}, {}, {}
+	builtins.checker = _removed_checker
+	try:
+		for index, path in enumerate(PAYLOAD.get("imports", [])):
+			directory = os.path.dirname(path)
+			if directory not in sys.path:
+				# After the stdlib: a helper beside the module must not shadow it.
+				sys.path.append(directory)
+			spec = importlib.util.spec_from_file_location(f"teacher_mod_{index}", path)
+			module = importlib.util.module_from_spec(spec)
+			sys.modules[spec.name] = module
+			spec.loader.exec_module(module)
+			for name, value in exports_of(module).items():
+				if name in exports and exports[name] is not value:
+					duplicates[name] = [owner[name], path]
+				exports[name] = value
+				owner.setdefault(name, path)
+	finally:
+		del builtins.checker
+	return exports, duplicates
 
 
 def params_of(fn):
+	"""Each parameter's name, kind, and whether it has a default."""
 	try:
-		return [p.name for p in inspect.signature(fn).parameters.values()]
+		parameters = inspect.signature(fn).parameters.values()
 	except (TypeError, ValueError):
 		return None
+	return [{"name": p.name, "kind": p.kind.name.lower(), "default": p.default is not p.empty} for p in parameters]
 
 
 # --- Calls -----------------------------------------------------------------------------
 context = {}
-
-
-class Unresolved(Exception):
-	"""A `$ref` or `object` whose value was never produced in this unit."""
-
-
-class Missing(Exception):
-	"""The call's target does not exist."""
 
 
 def resolve(value):
@@ -316,7 +374,8 @@ def fuzzy_lookup(module, name, argc):
 			continue
 		score = SequenceMatcher(None, name.lower(), candidate.lower()).ratio()
 		params = params_of(obj)
-		if params is not None and len([p for p in params if p != "self"]) == argc:
+		positional = [p for p in params or [] if p["name"] != "self" and "var" not in p["kind"]]
+		if params is not None and len(positional) == argc:
 			score += 0.2
 		scored.append((score, candidate, obj))
 	scored.sort(key=lambda s: -s[0])
@@ -331,31 +390,43 @@ def live(object_id):
 	return context[object_id]
 
 
-def bind(target, student, args):
-	"""The callable a target names, and the name it resolved to."""
-	kind, spec = next(iter(target.items()))
+def member(obj, object_id, name, what):
+	"""`getattr(obj, name)`, read once. A name that does not exist is Missing; a property
+	that raises — AttributeError included — is the student's exception."""
+	try:
+		return getattr(obj, name)
+	except AttributeError:
+		try:
+			inspect.getattr_static(obj, name)
+		except AttributeError:
+			if not hasattr(type(obj), "__getattr__"):
+				raise Missing(f"'{object_id}' has no {what} '{name}'") from None
+		raise
+
+
+def invoke(plan, student, resolved):
+	"""The call a plan names. Runs inside `call()`: the lookup is student code too."""
+	kind, spec = next(iter(plan["target"].items()))
+	args = resolve(plan.get("args", []))
 	if kind == "function":
 		if PAYLOAD.get("lookup") == "exact":
 			if not hasattr(student, spec["name"]):
 				raise Missing(f"function '{spec['name']}' not found")
-			fn, resolved = getattr(student, spec["name"]), spec["name"]
+			fn, resolved[0] = getattr(student, spec["name"]), spec["name"]
 		else:
-			fn, resolved = fuzzy_lookup(student, spec["name"], len(args))
-		return (lambda: fn(*args)), resolved
+			fn, resolved[0] = fuzzy_lookup(student, spec["name"], len(args))
+		return fn(*args)
 	if kind == "method":
-		fn = getattr(live(spec["object"]), spec["name"], None)
-		if fn is None or not callable(fn):
-			raise Missing(f"'{spec['object']}' has no method '{spec['name']}'")
-		return (lambda: fn(*args)), spec["name"]
+		fn = member(live(spec["object"]), spec["object"], spec["name"], "method")
+		if not callable(fn):
+			raise Missing(f"'{spec['object']}.{spec['name']}' is not a method")
+		return fn(*args)
 	if kind == "attribute":
-		obj = live(spec["object"])
-		if not hasattr(obj, spec["name"]):
-			raise Missing(f"'{spec['object']}' has no attribute '{spec['name']}'")
-		return (lambda: getattr(obj, spec["name"])), spec["name"]
+		return member(live(spec["object"]), spec["object"], spec["name"], "attribute")
 	fn = context.get(spec["name"])
 	if fn is None or not callable(fn):
 		raise Missing(f"teacher function '{spec['name']}' not found")
-	return (lambda: fn(*args)), spec["name"]
+	return fn(*args)
 
 
 def verdict_of(returned):
@@ -381,7 +452,16 @@ def run_check(check, value, stdout, timeout):
 	fn = context.get(check["function"])
 	deps = {}
 	for param in (params_of(fn) or [])[2:]:
-		deps[param] = stdout if param == "stdout" and param not in context else context.get(param)
+		name = param["name"]
+		if "var" in param["kind"]:
+			continue
+		if name == "stdout":
+			deps[name] = stdout
+		elif name in context:
+			deps[name] = context[name]
+		elif not param["default"]:
+			# prepare saw this name in scope: it is an id whose producing call failed.
+			return {"unresolved": {"name": name}}
 	outcome, _, _, _, returned = call(
 		lambda: fn(value, check.get("expected"), **deps), timeout, guarded=False, serialise=False
 	)
@@ -389,7 +469,7 @@ def run_check(check, value, stdout, timeout):
 		return verdict_of(returned)
 	if "timeout" in outcome:
 		return {"error": {"type": "Timeout", "types": ["Timeout"], "message": f"checker timed out after {timeout}s"}}
-	raised = outcome["raised"]
+	raised = outcome.get("raised") or {"type": "Error", "types": [], "message": str(outcome)}
 	if "AssertionError" in raised["types"]:
 		return {"rejected": {"message": raised["message"]}}
 	return {"error": raised}
@@ -401,46 +481,44 @@ def observe_files(paths):
 		try:
 			with open(path, encoding="utf-8", errors="replace") as fh:
 				seen[path] = fh.read(FILE_LIMIT)
-		except (FileNotFoundError, IsADirectoryError):
+		except (OSError, ValueError):  # absent, a directory, unreadable: not the file asked for
 			seen[path] = None
 	return seen
 
 
 def run_calls(phase, calls, student):
 	"""Run setup calls or steps in order. Returns False when a setup call failed."""
+	setup = phase == "setup"
 	for index, plan in enumerate(calls):
-		record = {"kind": "call", "phase": phase, "index": index}
 		requested = next(iter(plan["target"].values()))["name"]
-		value = None
-		try:
-			args = resolve(plan.get("args", []))
-			fn, resolved = bind(plan["target"], student, args)
-		except Unresolved as exc:
-			record["outcome"] = {"unresolved": {"name": str(exc)}}
-		except Missing as exc:
-			record["outcome"] = {"missing": {"message": str(exc)}}
-		else:
-			teacher = "teacher" in plan["target"]
-			outcome, stdout, truncated, elapsed, value = call(
-				fn, plan["timeout"], plan.get("stdin"), guarded=not teacher
-			)
-			record.update(
-				target={"requested": requested, "resolved": resolved},
-				outcome=outcome,
-				stdout=stdout,
-				stdout_truncated=truncated,
-				elapsed_ms=elapsed,
-			)
-			if plan.get("files"):
-				record["files"] = observe_files(plan["files"])
+		resolved = [requested]
+		outcome, stdout, truncated, elapsed, value = call(
+			lambda: invoke(plan, student, resolved),
+			plan["timeout"],
+			plan.get("stdin"),
+			guarded=STUDENT and "teacher" not in plan["target"],
+			serialise=not setup,  # setup values are never judged, only passed on
+		)
+		record = {
+			"kind": "call",
+			"phase": phase,
+			"index": index,
+			"target": {"requested": requested, "resolved": resolved[0]},
+			"outcome": outcome,
+			"stdout": stdout,
+			"stdout_truncated": truncated,
+			"elapsed_ms": elapsed,
+		}
+		if plan.get("files"):
+			record["files"] = observe_files(plan["files"])
 		emit(record)
-		returned = "returned" in record["outcome"]
+		returned = "returned" in outcome
 		if returned and plan.get("id"):
 			context[plan["id"]] = value
 		if returned and plan.get("check"):
-			verdict = run_check(plan["check"], value, record.get("stdout", ""), plan["timeout"])
+			verdict = run_check(plan["check"], value, stdout, plan["timeout"])
 			emit({"kind": "check", "index": index, **verdict})
-		if phase == "setup" and not returned:
+		if setup and not returned:
 			return False
 	return True
 
@@ -454,36 +532,53 @@ def load_student():
 			"outcome": {"raised": {"type": "SyntaxError", "types": ["SyntaxError"], "message": str(exc)}},
 			"stdout": "", "stdout_truncated": False, "elapsed_ms": 0})
 		return None
-	spec = importlib.util.spec_from_file_location("student_mod", path)
-	module = importlib.util.module_from_spec(spec)
-	setattr(module, STUDENT_MARK, True)
-	for key, val in PAYLOAD.get("vars", {}).items():
-		setattr(module, key, val)
-	sys.modules["student_mod"] = module
+	module_holder = []
+
+	def load():
+		# An explicit loader: `Lab5.PY` is Python too, whatever its extension.
+		loader = importlib.machinery.SourceFileLoader("student_mod", path)
+		spec = importlib.util.spec_from_loader("student_mod", loader)
+		module = importlib.util.module_from_spec(spec)
+		if STUDENT:
+			setattr(module, STUDENT_MARK, True)
+		for key, val in PAYLOAD.get("vars", {}).items():
+			setattr(module, key, val)
+		sys.modules["student_mod"] = module
+		loader.exec_module(module)
+		module_holder.append(module)
+
 	original_input = builtins.input
 	builtins.input = lambda *a, **k: "0"
 	try:
 		outcome, stdout, truncated, elapsed, _ = call(
-			lambda: spec.loader.exec_module(module), PAYLOAD["load_timeout"], serialise=False
+			load, PAYLOAD["load_timeout"], guarded=STUDENT, serialise=False
 		)
 	finally:
 		builtins.input = original_input
 	emit({"kind": "call", "phase": "load", "index": 0, "outcome": outcome,
 		"stdout": stdout, "stdout_truncated": truncated, "elapsed_ms": elapsed})
-	return module if "returned" in outcome else None
+	return module_holder[0] if "returned" in outcome else None
 
 
 def run_script():
-	script = PAYLOAD["script"]
+	script, path = PAYLOAD["script"], PAYLOAD["student"]
+	try:
+		py_compile.compile(path, doraise=True)
+	except py_compile.PyCompileError as exc:
+		emit({"kind": "call", "phase": "load", "index": 0,
+			"outcome": {"raised": {"type": "SyntaxError", "types": ["SyntaxError"], "message": str(exc)}},
+			"stdout": "", "stdout_truncated": False, "elapsed_ms": 0})
+		return
 	init = {STUDENT_MARK: True, **PAYLOAD.get("vars", {})}
+	sys.argv = [path]  # as `python student.py` would see it, not the harness's payload
 	outcome, stdout, truncated, elapsed, _ = call(
-		lambda: runpy.run_path(PAYLOAD["student"], init_globals=init, run_name="__main__"),
+		lambda: runpy.run_path(path, init_globals=init, run_name="__main__"),
 		script["timeout"],
 		stdin=False,
 		serialise=False,
 	)
 	raised = outcome.get("raised")
-	if raised and raised["type"] == "SystemExit" and raised["message"] in ("", "0", "None"):
+	if raised and raised["type"] == "SystemExit" and raised.get("clean"):
 		outcome = {"returned": {"value": None, "type": "NoneType"}}
 	record = {"kind": "call", "phase": "step", "index": 0, "outcome": outcome,
 		"stdout": stdout, "stdout_truncated": truncated, "elapsed_ms": elapsed}
@@ -494,12 +589,12 @@ def run_script():
 
 def main():
 	try:
-		exports = load_teacher_modules()
+		exports, duplicates = load_teacher_modules()
 	except BaseException as exc:
 		emit({"kind": "fatal", "stage": "teacher_import", "error": error_of(exc)})
 		finish()
 	if PAYLOAD["mode"] == "inspect":
-		emit({"kind": "inspect", "exports": {
+		emit({"kind": "inspect", "duplicates": duplicates, "exports": {
 			name: {"callable": callable(value), "params": params_of(value) if callable(value) else None}
 			for name, value in exports.items()
 		}})

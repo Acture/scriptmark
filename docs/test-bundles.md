@@ -82,14 +82,15 @@ expect = "A"
 Each case gets a fresh `data`: one case mutating it cannot disturb another. If you want
 calls to share and mutate one object, write a scenario.
 
-Setup's own failure fails the cases that depend on it. It is the student's when setup
-called student code, and the teacher's when it called a `teacher` function.
+A setup call that fails stops the unit it runs in: every case of a top-level `[[setup]]`,
+every step of a scenario. The failure is the student's when setup called student code, and
+the teacher's when it called a `teacher` function.
 
 ## Expectations
 
 | Field | Passes when |
 | -- | -- |
-| `expect = v` | the call returns `v` (numbers compare numerically: `2 == 2.0`) |
+| `expect = v` | the call returns `v` (numbers compare numerically: `2 == 2.0`, exactly — no float rounding) |
 | `expect_error = "ValueError"` | the call raises it, or a subclass of it |
 | `expected_stdout = "..."` | the call printed exactly this |
 | `expect_files = { "out.txt" = "..." }` | the call left this file with this content |
@@ -97,21 +98,30 @@ called student code, and the teacher's when it called a `teacher` function.
 
 A case must declare at least one, and passes only if every one it declares holds.
 
+What a returned value looks like to `expect`: tuples are lists, sets are lists in sorted
+order (mixed types fall back to a stable order), dict keys are strings, and an integer too
+large for a 64-bit number is `{ "$bigint" = "123…" }` — judge those with a function
+checker, which gets the real value.
+
 ## Checkers
 
 | Spelling | |
 | -- | -- |
 | `check = "approx"` (with `expect`) | `exact`, `approx`, `set_eq`, `contains`, `text` compare against `expect`; `sorted` does not need it |
 | `check = { builtin = "approx", tolerance = 0.01 }` | |
-| `check = { rhai = "result.len() > 2" }` | `result`, `expected`, `context.stdout`, `context.files` |
+| `check = { rhai = "result != () && result.len() > 2" }` | `result`, `expected`, `context.stdout`, `context.files` |
 | `check = { python = "verifiers/check.py" }` | reads `{result, expected, context}` as JSON on stdin; prints `{"pass": ..., "message": ...}` |
 | `check = { function = "is_history_of" }` | a teacher-module function run on the live value |
 
-A **function checker** is called as `fn(result, expected, **names)`. Any further
-parameter is filled from the names in scope (`vars`, teacher exports, setup and step
-ids), and `stdout` is the call's output. Return `True`/`False` or `(bool, message)`.
-Raise `AssertionError` to reject a malformed answer. Checkers apply only where a case
-names them; decorating a function binds nothing.
+A **function checker** takes `(result, expected)` and then, by name, whatever else it
+needs: `def chk(result, expected, acct)`. Each further parameter is filled from the names
+in scope (`vars`, teacher exports, setup and step ids) — the live objects, as the call
+left them — and `stdout` is always the call's output. A parameter with a default, or
+`**kwargs`, is filled only when its name is in scope. Return `True`/`False` or
+`(bool, message)`; raise `AssertionError` to reject a malformed answer. Checkers apply only
+where a case names them, and never on a script case (a script has no returned value).
+If the step that produces a parameter failed, the case is the student's `dependency`
+error, not a checker crash.
 
 **A checker that cannot decide is your error, not the student's.** A Rhai error, a checker
 script that crashes, or a function checker that raises anything but `AssertionError`
@@ -133,17 +143,24 @@ data_files = ["data/poem.txt", "fixtures/"]   # copied into every unit's working
 
 Every case and every scenario runs in its own temporary directory with your data files
 staged in it and the student's file copied beside them. `open("data/poem.txt")` and
-`Path(__file__).parent / "data" / "poem.txt"` both work. Anything the student writes
-stays in that directory and is gone afterwards. `expect_files` reads it back.
+`Path(__file__).parent / "data" / "poem.txt"` both work. Relative writes land in that
+directory, which is removed afterwards; `expect_files` reads them back. Neither the
+working directory nor the import allowlist is a security boundary: an absolute path, or
+`importlib`, reaches past them.
 
 Teacher modules are loaded from the bundle, not the working directory. Find your own
-files with `Path(__file__).parent`, not a relative path.
+files with `Path(__file__).parent`, not a relative path; a module may import a sibling
+module from its own directory. A reference implementation runs as teacher code: the
+import allowlist does not apply to it.
 
 ## Timeouts
 
 `--timeout` applies to every call: loading the student's file, each setup call, each case
 and step, and each function checker. `timeout = n` on a case, step or scenario
-overrides it. A step that times out is reported as `timeout`, and later steps still run.
+overrides it; every timeout is between 1 and 86400 seconds. A step that times out is
+reported as `timeout`, and later steps still run. A unit that stops answering altogether
+is killed when all its calls' timeouts have passed: the call it was in is `timeout` /
+`killed`, and the calls after it are `not_run`.
 
 ## What each result means
 
@@ -155,10 +172,14 @@ Every case that does not pass says whose it is (`fault`) and why (`cause`):
 | `failed` | student | `rejected` | a function checker raised `AssertionError` |
 | `error` | student | `raised` / `syntax` / `load` / `unserialisable` | the student's code crashed |
 | `timeout` | student | `timeout` / `killed` | it ran too long |
+| `error` | student | `killed` | the process died during the call (a signal) |
 | `missing` | student | `no_file` / `no_target` | no file, function, method or attribute to call |
-| `error` | student | `not_run` / `dependency` / `setup` | it could not run because an earlier student call failed |
-| `error` | teacher | `checker` / `teacher_import` / `setup` / `nothing_to_judge` | the bundle's fault |
-| `error` | environment | `spawn` / `harness` | the machine's fault |
+| `error` | student | `dependency` | a value it needs was never produced |
+| `error` | student or teacher | `setup` | a setup call failed: the student's or the teacher's, by who owns the call |
+| `error` | the culprit's | `not_run` | an earlier call in the unit hung or killed the process |
+| `error` | student | `protocol` | the unit's records were forged or repeated |
+| `error` | teacher | `checker` / `teacher_import` / `nothing_to_judge` | the bundle's fault |
+| `error` | environment | `spawn` / `harness` | the machine's, or the grader's own, fault |
 
 ## Refused before grading
 
@@ -176,6 +197,13 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 - a teacher module that fails to import;
 - a checker function that does not exist or asks for a name that means nothing;
 - a Rhai check that cannot judge `None`;
+- a function checker on a script case; `check` together with `oracle.check`;
+- an `expect` of the wrong shape for its checker (`approx` needs a number, `set_eq` an
+  array, `text` a string);
+- `inf` or `nan` in `args`; `expected_stdout` longer than the 64 KiB of output kept;
+- `stdout` as a var, export or id (checkers reserve it);
+- a name two teacher modules export differently;
+- a tests directory with no specs;
 - a reference implementation that does not return;
 - missing data files.
 
@@ -183,7 +211,7 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 
 | Was | Now |
 | -- | -- |
-| `@checker("f")` in a teacher module | `check = { function = "check_f" }` on each case meant to use it — decorating no longer binds, and the `checker` name no longer exists |
+| `@checker("f")` in a teacher module | `check = { function = "check_f" }` on each case meant to use it — decorating no longer binds, and importing a module that still uses it fails with that instruction |
 | `copy_refs` | delete it: every case already gets fresh values |
 | `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module |
 | stdin → stdout cases with no function | add `script = true` |

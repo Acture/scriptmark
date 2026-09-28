@@ -106,10 +106,29 @@ pub fn display_failures(reports: &[&StudentReport]) {
 					TestStatus::Passed => continue,
 				};
 				// A teacher's or the machine's failure is flagged: the student cannot fix it.
-				let owner = match case.fault {
-					Some(Fault::Teacher) => format!(" {}", "(teacher)".magenta().bold()),
-					Some(Fault::Environment) => format!(" {}", "(environment)".magenta().bold()),
-					Some(Fault::Student) | None => String::new(),
+				let cause = case
+					.cause
+					.and_then(|c| serde_json::to_value(c).ok())
+					.and_then(|v| v.as_str().map(str::to_string));
+				let owner = match (case.fault, cause) {
+					(Some(Fault::Teacher), cause) => {
+						format!(
+							" {}",
+							format!("(teacher: {})", cause.unwrap_or_default())
+								.magenta()
+								.bold()
+						)
+					}
+					(Some(Fault::Environment), cause) => format!(
+						" {}",
+						format!("(environment: {})", cause.unwrap_or_default())
+							.magenta()
+							.bold()
+					),
+					(_, Some(cause)) if cause != "wrong" => {
+						format!(" {}", format!("({cause})").dimmed())
+					}
+					_ => String::new(),
 				};
 
 				println!(

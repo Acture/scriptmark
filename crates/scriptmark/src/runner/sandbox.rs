@@ -49,7 +49,9 @@ pub fn apply_sandbox(cmd: &mut tokio::process::Command, config: &SandboxConfig) 
 		cmd.pre_exec(move || {
 			// Best-effort: some limits may not be supported on all platforms
 			// (e.g. RLIMIT_AS on macOS, RLIMIT_NPROC when user has many processes)
-			let _ = set_rlimit(libc::RLIMIT_CPU, cpu);
+			// Hard limit a second above the soft one: Linux sends SIGKILL at the hard limit and
+			// SIGXCPU only at the soft one, and SIGXCPU is what says "ran out of CPU time".
+			let _ = set_rlimits(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1));
 			let _ = set_rlimit(libc::RLIMIT_FSIZE, fsize);
 			let _ = set_rlimit(libc::RLIMIT_NOFILE, nofile);
 			let _ = set_rlimit(libc::RLIMIT_NPROC, nproc);
@@ -68,9 +70,14 @@ type RlimitResource = libc::__rlimit_resource_t;
 
 #[cfg(unix)]
 fn set_rlimit(resource: RlimitResource, limit: u64) -> std::io::Result<()> {
+	set_rlimits(resource, limit, limit)
+}
+
+#[cfg(unix)]
+fn set_rlimits(resource: RlimitResource, soft: u64, hard: u64) -> std::io::Result<()> {
 	let rlim = libc::rlimit {
-		rlim_cur: limit as libc::rlim_t,
-		rlim_max: limit as libc::rlim_t,
+		rlim_cur: soft as libc::rlim_t,
+		rlim_max: hard as libc::rlim_t,
 	};
 	let ret = unsafe { libc::setrlimit(resource, &rlim) };
 	if ret != 0 {

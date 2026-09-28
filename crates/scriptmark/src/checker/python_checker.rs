@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -29,11 +29,6 @@ impl PythonChecker {
 		self.python_cmd = cmd.into();
 		self
 	}
-
-	pub fn with_timeout(mut self, secs: u64) -> Self {
-		self.timeout_secs = secs;
-		self
-	}
 }
 
 impl Checker for PythonChecker {
@@ -52,32 +47,51 @@ impl Checker for PythonChecker {
 				CheckError::environment(format!("could not start checker '{script}': {e}"))
 			})?;
 
+		// Write and read on their own threads: a checker that ignores its input, or prints
+		// more than a pipe holds, must not wedge the grader until the timeout.
 		if let Some(mut stdin) = child.stdin.take() {
-			// A checker that exits without reading its input closes the pipe; its output decides.
-			let _ = stdin.write_all(input_json.as_bytes());
+			std::thread::spawn(move || {
+				// A checker that exits without reading its input closes the pipe; its output decides.
+				let _ = stdin.write_all(input_json.as_bytes());
+			});
 		}
+		let drain = |pipe: Option<Box<dyn Read + Send>>| {
+			std::thread::spawn(move || {
+				let mut buf = String::new();
+				if let Some(mut pipe) = pipe {
+					let _ = pipe.read_to_string(&mut buf);
+				}
+				buf
+			})
+		};
+		let stdout = drain(
+			child
+				.stdout
+				.take()
+				.map(|p| Box::new(p) as Box<dyn Read + Send>),
+		);
+		let stderr = drain(
+			child
+				.stderr
+				.take()
+				.map(|p| Box::new(p) as Box<dyn Read + Send>),
+		);
 
 		let status = child
 			.wait_timeout(Duration::from_secs(self.timeout_secs))
 			.map_err(|e| CheckError::environment(format!("lost checker '{script}': {e}")))?;
 		let Some(status) = status else {
 			let _ = child.kill();
+			let _ = child.wait();
 			return Err(CheckError::teacher(format!(
 				"checker '{script}' timed out after {}s",
 				self.timeout_secs
 			)));
 		};
 
-		let read = |pipe: Option<&mut dyn std::io::Read>| {
-			let mut buf = String::new();
-			if let Some(pipe) = pipe {
-				let _ = pipe.read_to_string(&mut buf);
-			}
-			buf
-		};
-		let stdout = read(child.stdout.as_mut().map(|p| p as &mut dyn std::io::Read));
+		let stdout = stdout.join().unwrap_or_default();
 		if !status.success() && stdout.trim().is_empty() {
-			let stderr = read(child.stderr.as_mut().map(|p| p as &mut dyn std::io::Read));
+			let stderr = stderr.join().unwrap_or_default();
 			return Err(CheckError::teacher(format!(
 				"checker '{script}' exited with {status}: {}",
 				stderr.trim()

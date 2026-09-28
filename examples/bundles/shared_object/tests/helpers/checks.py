@@ -1,9 +1,9 @@
 """Teacher checks for the account scenario.
 
-A checker is called as fn(result, expected, **names): any further parameter is filled
-from the names in scope — here `acct`, the object scenario setup built. Return a bool or
-(bool, message); raise AssertionError to reject a malformed answer. Anything else it
-raises means the checker could not decide, which is the teacher's to fix.
+A checker takes (result, expected) and then, by name, whatever else it needs from the
+names in scope — here `acct`, the object scenario setup built, as the step left it.
+Return a bool or (bool, message); raise AssertionError to reject a malformed answer.
+Anything else it raises means the checker could not decide, which is the teacher's to fix.
 """
 
 

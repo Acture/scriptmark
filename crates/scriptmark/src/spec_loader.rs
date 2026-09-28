@@ -15,8 +15,15 @@ use crate::models::{
 pub fn load_spec(path: &Path) -> Result<TestSpec, SpecError> {
 	let content =
 		std::fs::read_to_string(path).map_err(|e| SpecError::IoError(path.to_path_buf(), e))?;
-	let dir = path.parent().unwrap_or(Path::new("."));
-	load_spec_str(&content, dir).map_err(|e| e.at(path))
+	load_spec_str(&content, spec_dir(path)).map_err(|e| e.at(path))
+}
+
+/// The directory a spec's relative paths mean. `Path::new("spec.toml").parent()` is
+/// `Some("")`, not `None`, so a bare filename needs saying.
+fn spec_dir(path: &Path) -> &Path {
+	path.parent()
+		.filter(|p| !p.as_os_str().is_empty())
+		.unwrap_or(Path::new("."))
 }
 
 /// Load and validate a test specification from TOML text, resolving paths against `dir`.
@@ -100,6 +107,15 @@ fn resolve_paths(spec: &mut TestSpec) {
 	}
 }
 
+/// The name a function checker's `stdout` parameter always receives: the call's output.
+pub const RESERVED: &str = "stdout";
+
+/// The longest timeout a spec or the command line may ask for.
+pub const MAX_TIMEOUT_SECS: u64 = 86_400;
+
+/// What the harness keeps of a call's stdout; an expectation longer than this can never match.
+pub const STDOUT_LIMIT: usize = 64 * 1024;
+
 /// Every static problem with a spec: shape rules the type system cannot express, paths
 /// that do not exist, and configurations that would otherwise run along a default path.
 ///
@@ -181,6 +197,14 @@ impl Validator<'_> {
 				self.problem("[meta]", format!("data file '{data}' does not exist"));
 			}
 		}
+		if self.spec.vars.contains_key(RESERVED) {
+			self.problem(
+				"[vars]",
+				format!(
+					"'{RESERVED}' is reserved: function checkers receive the call's output under it"
+				),
+			);
+		}
 		for (name, value) in &self.spec.vars {
 			if contains_null(value) {
 				self.problem(
@@ -228,6 +252,15 @@ impl Validator<'_> {
 		}
 	}
 
+	fn timeout(&mut self, timeout: Option<u64>, at: &str) {
+		if timeout.is_some_and(|t| !(1..=MAX_TIMEOUT_SECS).contains(&t)) {
+			self.problem(
+				at,
+				format!("timeout must be between 1 and {MAX_TIMEOUT_SECS} seconds"),
+			);
+		}
+	}
+
 	fn unique_name(&mut self, names: &mut BTreeSet<String>, name: String) {
 		if !names.insert(name.clone()) {
 			self.problem(
@@ -245,9 +278,7 @@ impl Validator<'_> {
 		if scenario.steps.is_empty() {
 			self.problem(&at, "has no steps");
 		}
-		if scenario.timeout == Some(0) {
-			self.problem(&at, "timeout must be at least 1 second");
-		}
+		self.timeout(scenario.timeout, &at);
 		let mut bound = top.clone();
 		for step in &scenario.setup {
 			self.setup(step, &mut bound, &format!("{at} setup '{}'", step.id));
@@ -258,6 +289,12 @@ impl Validator<'_> {
 			if let Some(id) = &step.id {
 				if bound.all.contains(id) || self.spec.vars.contains_key(id) {
 					self.problem(&step_at, format!("id '{id}' is already bound"));
+				}
+				if id == RESERVED {
+					self.problem(
+						&step_at,
+						format!("id '{RESERVED}' is reserved for the call's output"),
+					);
 				}
 				if let Some(target) = step.target(self.spec.meta.function.as_deref()) {
 					bound.bind(id, &target);
@@ -274,6 +311,18 @@ impl Validator<'_> {
 		if bound.all.contains(&step.id) || self.spec.vars.contains_key(&step.id) {
 			self.problem(at, format!("id '{}' is already bound", step.id));
 		}
+		if step.id == RESERVED {
+			self.problem(
+				at,
+				format!("id '{RESERVED}' is reserved for the call's output"),
+			);
+		}
+		if step.args.iter().any(contains_null) {
+			self.problem(
+				at,
+				"args contain a value TOML cannot pass (inf or nan?); put it in a teacher module and pass '$name'",
+			);
+		}
 		if step.file.is_some() {
 			self.problem(
 				at,
@@ -281,9 +330,7 @@ impl Validator<'_> {
 			);
 			return;
 		}
-		if step.timeout == Some(0) {
-			self.problem(at, "timeout must be at least 1 second");
-		}
+		self.timeout(step.timeout, at);
 		let targets = [
 			step.function.is_some(),
 			step.method.is_some(),
@@ -336,8 +383,23 @@ impl Validator<'_> {
 				"id only applies to scenario steps: nothing outlives an independent case",
 			);
 		}
-		if case.timeout == Some(0) {
-			self.problem(at, "timeout must be at least 1 second");
+		self.timeout(case.timeout, at);
+		if case.args.iter().any(contains_null) {
+			self.problem(
+				at,
+				"args contain a value TOML cannot pass (inf or nan?); put it in a teacher module and pass '$name'",
+			);
+		}
+		if let Some(expected) = &case.expected_stdout
+			&& expected.len() > STDOUT_LIMIT
+		{
+			self.problem(
+				at,
+				format!(
+					"expected_stdout is longer than the {} KiB of output kept",
+					STDOUT_LIMIT / 1024
+				),
+			);
 		}
 
 		if case.script {
@@ -419,6 +481,13 @@ impl Validator<'_> {
 			(!case.args.is_empty(), "args"),
 			(case.expect.is_some(), "expect"),
 			(case.parametrize.is_some(), "parametrize"),
+			(
+				matches!(
+					case.check.as_ref().map(|c| c.resolve()),
+					Some(Ok(Check::Function(_)))
+				),
+				"check = { function } (it judges a returned value; use a builtin, rhai or python on the output)",
+			),
 		];
 		for (present, field) in refused {
 			if present {
@@ -486,6 +555,26 @@ impl Validator<'_> {
 				);
 			}
 		}
+		// The shape a comparison needs: a wrong one fails every student for a teacher's typo.
+		if let Check::Builtin { name, .. } = check {
+			let expected = if case.script {
+				case.expected_stdout.clone().map(serde_json::Value::String)
+			} else {
+				case.expect.clone()
+			};
+			let wants = match name.as_str() {
+				"approx" => Some(("a number", expected.as_ref().is_none_or(Value::is_number))),
+				"set_eq" => Some(("an array", expected.as_ref().is_none_or(Value::is_array))),
+				"text" => Some(("a string", expected.as_ref().is_none_or(Value::is_string))),
+				_ => None,
+			};
+			if let Some((shape, false)) = wants {
+				self.problem(
+					at,
+					format!("the {name} checker needs {shape} to compare against"),
+				);
+			}
+		}
 		match check {
 			Check::Rhai(expr) => {
 				if let Err(e) = compile_rhai(expr, &["result", "expected", "context"]) {
@@ -527,6 +616,30 @@ impl Validator<'_> {
 				"expect conflicts with an oracle that computes the expectation",
 			);
 		}
+		if (oracle.reference.is_some() || oracle.rhai.is_some()) && case.expect_error.is_some() {
+			self.problem(
+				at,
+				"expect_error conflicts with an oracle that computes a returned value",
+			);
+		}
+		if oracle.check.is_some() && case.check.is_some() {
+			self.problem(
+				at,
+				"check conflicts with oracle.check, which would replace it",
+			);
+		}
+		if case.attribute.is_some() {
+			self.problem(
+				at,
+				"an attribute takes no args, so it cannot be parametrized",
+			);
+		}
+		if oracle.reference.is_some() && case.method.is_some() {
+			self.problem(
+				at,
+				"a reference oracle calls a function; it cannot answer for a method call",
+			);
+		}
 		if let Some(name) = &oracle.check {
 			match crate::models::CheckMethod::Builtin(name.clone()).resolve() {
 				Err(e) => self.problem(at, format!("oracle.check: {e}")),
@@ -559,7 +672,7 @@ impl Validator<'_> {
 /// Compile a Rhai expression with strict variables, so an undefined name is refused now
 /// rather than failing on every student later.
 pub fn compile_rhai(expr: &str, names: &[&str]) -> Result<(), String> {
-	let mut engine = rhai::Engine::new();
+	let mut engine = crate::checker::rhai_checker::engine();
 	engine.set_strict_variables(true);
 	let mut scope = rhai::Scope::new();
 	for name in names {
@@ -1004,5 +1117,106 @@ expect = 150
 			err.contains("data file 'data/in.csv' does not exist"),
 			"{err}"
 		);
+	}
+
+	#[test]
+	fn test_every_static_refusal_names_its_problem() {
+		let table = [
+			("", "has no [[cases]] and no [[scenarios]]"),
+			(
+				"[[cases]]\nname = \"x\"\nexpect = 1\ntimeout = 0\n",
+				"timeout must be between 1 and",
+			),
+			(
+				"[[cases]]\nname = \"x\"\nexpect = 1\ntimeout = 100000\n",
+				"timeout must be between 1 and",
+			),
+			(
+				"[[setup]]\nid = \"d\"\nfunction = \"a\"\n[[setup]]\nid = \"d\"\nfunction = \"b\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				"id 'd' is already bound",
+			),
+			(
+				"[[setup]]\nid = \"d\"\nfunction = \"a\"\nteacher = \"b\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				"must name exactly one of function",
+			),
+			(
+				"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"p\"\nscript = true\nexpected_stdout = \"\"\n",
+				"cannot run the file as a script",
+			),
+			(
+				"[[setup]]\nid = \"a\"\nfunction = \"A\"\n[[cases]]\nname = \"x\"\nattribute = \"b\"\nobject = \"a\"\nargs = [1]\nexpect = 1\n",
+				"reading an attribute takes no args",
+			),
+			(
+				"[[cases]]\nname = \"x\"\ncheck = { python = \"missing.py\" }\n",
+				"checker script",
+			),
+			(
+				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\ncheck = \"sorted\"\n",
+				"names exactly one of reference, rhai, check",
+			),
+			(
+				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"nope\"\n",
+				"oracle.check: unknown checker 'nope'",
+			),
+			(
+				"[[cases]]\nname = \"x\"\ncheck = { rhai = \"result != ()\" }\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+				"check conflicts with oracle.check",
+			),
+			(
+				"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\n",
+				"expect_error conflicts with an oracle",
+			),
+			(
+				"[[setup]]\nid = \"a\"\nfunction = \"A\"\n[[cases]]\nname = \"x\"\nattribute = \"b\"\nobject = \"a\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\n",
+				"cannot be parametrized",
+			),
+			(
+				"[[cases]]\nname = \"x\"\nexpect = \"3.0\"\ncheck = \"approx\"\n",
+				"the approx checker needs a number",
+			),
+			(
+				"[[cases]]\nname = \"x\"\nexpect = 3\ncheck = \"set_eq\"\n",
+				"the set_eq checker needs an array",
+			),
+			(
+				"[[cases]]\nname = \"x\"\nexpect = 3\ncheck = \"text\"\n",
+				"the text checker needs a string",
+			),
+			(
+				"[[cases]]\nname = \"x\"\nargs = [inf]\nexpect = 1\n",
+				"args contain a value TOML cannot pass",
+			),
+			(
+				"[vars]\nstdout = 1\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				"'stdout' is reserved",
+			),
+			(
+				"[[setup]]\nid = \"stdout\"\nfunction = \"a\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				"id 'stdout' is reserved",
+			),
+		];
+		for (body, needle) in table {
+			refused(body, needle);
+		}
+		let long = "x".repeat(STDOUT_LIMIT + 1);
+		refused(
+			&format!("[[cases]]\nname = \"x\"\nexpected_stdout = \"{long}\"\n"),
+			"longer than the 64 KiB",
+		);
+	}
+
+	#[test]
+	fn test_a_script_case_refuses_a_function_checker() {
+		refused(
+			"[[cases]]\nname = \"x\"\nscript = true\nexpected_stdout = \"1\"\ncheck = { function = \"chk\" }\n",
+			"check = { function } (it judges a returned value",
+		);
+	}
+
+	#[test]
+	fn test_a_bare_relative_filename_means_the_current_directory() {
+		assert_eq!(spec_dir(Path::new("t.toml")), Path::new("."));
+		assert_eq!(spec_dir(Path::new("tests/t.toml")), Path::new("tests"));
 	}
 }

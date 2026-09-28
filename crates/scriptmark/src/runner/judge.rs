@@ -14,7 +14,7 @@ use crate::models::{
 	CaseInput, CaseResult, Cause, Check, FailureDetail, Fault, Target, TestCase, TestStatus,
 };
 use crate::runner::executor::{
-	CallObservation, CheckObservation, Exit, Outcome, UnitObservation, UnitPlan,
+	CallObservation, CheckObservation, Exit, Outcome, ProtocolError, UnitObservation, UnitPlan,
 };
 
 /// A scored call: the name its result is reported under, and what it expects.
@@ -40,16 +40,23 @@ pub fn judge(
 	obs: &UnitObservation,
 	python_cmd: &str,
 ) -> Vec<CaseResult> {
+	let target = |index: usize| plan.steps.get(index).map(|c| target_name(&c.target));
 	if let Some(blanket) = unit_failure(plan, obs) {
-		return scored.iter().map(|s| blanket_result(s, &blanket)).collect();
+		return scored
+			.iter()
+			.enumerate()
+			.map(|(i, s)| blanket_result(s, &blanket, target(i)))
+			.collect();
 	}
+	// The harness broke after student code ran: what it recorded before that still stands.
+	let broken = stream_break(obs);
 
 	let mut results = Vec::with_capacity(scored.len());
 	// Once a call hangs or the process dies, nothing after it ran — on whoever's account.
 	let mut stopped: Option<Blanket> = None;
 	for (index, s) in scored.iter().enumerate() {
 		if let Some(blanket) = &stopped {
-			results.push(blanket_result(s, blanket));
+			results.push(blanket_result(s, blanket, target(index)));
 			continue;
 		}
 		let call = plan.steps.get(index);
@@ -61,10 +68,11 @@ pub fn judge(
 					&& matches!(record.outcome, Outcome::Returned { .. })
 				{
 					// The student's call finished; the teacher's checker never did.
-					let blanket =
-						in_flight(&obs.exit, Fault::Teacher, Cause::Checker, "its checker");
-					results.push(blanket_result(s, &blanket));
-					stopped = Some(not_run(&blanket, s.name));
+					let blanket = broken.clone().unwrap_or_else(|| {
+						in_flight(&obs.exit, Fault::Teacher, Cause::Checker, "its checker")
+					});
+					results.push(blanket_result(s, &blanket, target(index)));
+					stopped = Some(broken.clone().unwrap_or_else(|| not_run(&blanket, s.name)));
 					continue;
 				}
 				let timeout = call.map_or_else(
@@ -80,19 +88,22 @@ pub fn judge(
 					python_cmd,
 				));
 			}
-			None if obs.done => results.push(blanket_result(
-				s,
-				&Blanket {
-					status: TestStatus::Error,
-					fault: Fault::Environment,
-					cause: Cause::Harness,
-					message: "the harness finished without running this call".into(),
-				},
-			)),
 			None => {
-				let blanket = in_flight(&obs.exit, Fault::Student, Cause::Killed, "this call");
-				results.push(blanket_result(s, &blanket));
-				stopped = Some(not_run(&blanket, s.name));
+				let blanket = match &broken {
+					Some(broken) => broken.clone(),
+					None if obs.done => Blanket {
+						status: TestStatus::Error,
+						fault: Fault::Environment,
+						cause: Cause::Harness,
+						message: "the harness finished without running this call".into(),
+					},
+					None => in_flight(&obs.exit, Fault::Student, Cause::Killed, "this call"),
+				};
+				results.push(blanket_result(s, &blanket, target(index)));
+				stopped = Some(match &broken {
+					Some(broken) => broken.clone(),
+					None => not_run(&blanket, s.name),
+				});
 			}
 		}
 	}
@@ -117,7 +128,7 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 			message.clone(),
 		);
 	}
-	if let Some(problem) = &obs.protocol_error {
+	if let Some(ProtocolError::Tampered(problem)) = &obs.protocol_error {
 		// After `ready`, student code has had the chance to write; before it, nobody's has.
 		let fault = if obs.ready {
 			Fault::Student
@@ -131,26 +142,21 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 			format!("the unit's records cannot be trusted: {problem}"),
 		);
 	}
-	if let Some(fatal) = &obs.fatal {
-		let (fault, cause) = match fatal.stage.as_str() {
-			"teacher_import" => (Fault::Teacher, Cause::TeacherImport),
-			_ => (Fault::Environment, Cause::Harness),
-		};
+	if let Some(fatal) = obs.fatal.as_ref().filter(|f| f.stage == "teacher_import") {
 		return blanket(
 			TestStatus::Error,
-			fault,
-			cause,
+			Fault::Teacher,
+			Cause::TeacherImport,
 			format!(
-				"{}: {}: {}",
-				if cause == Cause::TeacherImport {
-					"a teacher module failed to import"
-				} else {
-					"the harness failed"
-				},
-				fatal.error.type_name,
-				fatal.error.message
+				"a teacher module failed to import: {}: {}",
+				fatal.error.type_name, fatal.error.message
 			),
 		);
+	}
+	if !obs.ready
+		&& let Some(broken) = stream_break(obs)
+	{
+		return Some(broken);
 	}
 	if !obs.ready {
 		let (fault, cause, what) = if plan.imports.is_empty() {
@@ -170,10 +176,20 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 		);
 	}
 	if plan.script.is_some() {
-		return None;
+		// A script that does not compile never ran.
+		return match obs.load.as_ref().map(|l| &l.outcome) {
+			Some(Outcome::Raised(e)) => blanket(
+				TestStatus::Error,
+				Fault::Student,
+				Cause::Syntax,
+				format!("the script does not compile: {}", e.message),
+			),
+			_ => None,
+		};
 	}
 
 	match &obs.load {
+		None if stream_break(obs).is_some() => return stream_break(obs),
 		None => {
 			return Some(in_flight(
 				&obs.exit,
@@ -229,14 +245,8 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 			Some(record) => match &record.outcome {
 				Outcome::Returned { .. } => {}
 				outcome => {
-					let status =
-						if owner == Fault::Student && matches!(outcome, Outcome::Timeout {}) {
-							TestStatus::Timeout
-						} else {
-							TestStatus::Error
-						};
 					return blanket(
-						status,
+						TestStatus::Error,
 						owner,
 						Cause::Setup,
 						format!("not run: {label} {}", describe(outcome, call.timeout)),
@@ -244,9 +254,12 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 				}
 			},
 			None => {
+				if let Some(broken) = stream_break(obs) {
+					return Some(broken);
+				}
 				let killed = in_flight(&obs.exit, owner, Cause::Setup, &label);
 				return blanket(
-					killed.status,
+					TestStatus::Error,
 					owner,
 					Cause::Setup,
 					format!("not run: {}", killed.message),
@@ -340,7 +353,38 @@ fn describe(outcome: &Outcome, timeout: u64) -> String {
 	}
 }
 
-fn blanket_result(s: &Scored, blanket: &Blanket) -> CaseResult {
+/// The harness itself broke — a crash of its own, or a record it could not have meant —
+/// after which nothing it would have reported can be known.
+fn stream_break(obs: &UnitObservation) -> Option<Blanket> {
+	let message = match (&obs.fatal, &obs.protocol_error) {
+		(Some(fatal), _) if fatal.stage != "teacher_import" => format!(
+			"the harness failed: {}: {}",
+			fatal.error.type_name, fatal.error.message
+		),
+		(_, Some(ProtocolError::Unreadable(problem))) => {
+			format!("the harness wrote a record it could not have meant: {problem}")
+		}
+		_ => return None,
+	};
+	Some(Blanket {
+		status: TestStatus::Error,
+		fault: Fault::Environment,
+		cause: Cause::Harness,
+		message,
+	})
+}
+
+/// The name a call asked for, as a plan spells it.
+fn target_name(target: &Target) -> String {
+	match target {
+		Target::Function { name } | Target::Teacher { name } => name.clone(),
+		Target::Method { object, name } | Target::Attribute { object, name } => {
+			format!("{object}.{name}")
+		}
+	}
+}
+
+fn blanket_result(s: &Scored, blanket: &Blanket, target: Option<String>) -> CaseResult {
 	CaseResult {
 		case_name: s.name.to_string(),
 		status: blanket.status,
@@ -351,7 +395,10 @@ fn blanket_result(s: &Scored, blanket: &Blanket) -> CaseResult {
 		elapsed_ms: Some(0),
 		fault: Some(blanket.fault),
 		cause: Some(blanket.cause),
-		input: Some(input_of(s.case, None)),
+		input: Some(CaseInput {
+			target,
+			..input_of(s.case, None)
+		}),
 		..Default::default()
 	}
 }
@@ -418,6 +465,12 @@ fn judge_call(
 		},
 		judged: false,
 	};
+	// A script is judged on what it printed; a truncated capture cannot be judged.
+	if script && record.stdout_truncated && (case.expected_stdout.is_some() || case.check.is_some())
+	{
+		return verdict
+			.wrong("printed more than the 64 KiB kept, so its output cannot be compared".into());
+	}
 	// 1. The outcome, against `expect_error`.
 	match &record.outcome {
 		Outcome::Missing { message } => {
@@ -455,7 +508,22 @@ fn judge_call(
 		Outcome::Raised(e) => {
 			verdict.result.actual = Some(format!("{}: {}", e.type_name, e.message));
 			match &case.expect_error {
-				Some(want) if e.is_a(want) => verdict.judged = true,
+				Some(want) if e.is_a(want) => {
+					verdict.judged = true;
+					// A script that exits with the expected error still owes its output.
+					if script
+						&& let Some(failed) = check_value(
+							&mut verdict,
+							case,
+							&Value::String(record.stdout.clone()),
+							case.expected_stdout.clone().map(Value::String),
+							record,
+							check,
+							python_cmd,
+						) {
+						return failed;
+					}
+				}
 				Some(want) => {
 					return verdict.wrong(format!(
 						"expected {want}, raised {}: {}",
@@ -579,6 +647,14 @@ fn check_value(
 				} else {
 					message.clone()
 				})),
+				Some(CheckObservation::Unresolved { name: missing }) => Some(take(verdict).fail(
+					TestStatus::Error,
+					Fault::Student,
+					Cause::Dependency,
+					format!(
+						"checker '{name}' needs '{missing}', which the call that makes it never produced"
+					),
+				)),
 				Some(CheckObservation::Rejected { message }) => Some(take(verdict).fail(
 					TestStatus::Failed,
 					Fault::Student,
@@ -654,7 +730,7 @@ mod tests {
 	use super::*;
 	use crate::models::CheckMethod;
 	use crate::runner::executor::{
-		CallPlan, ErrorInfo, Fatal, InProcessCheck, Resolved, ScriptRun, Subject,
+		CallPlan, ErrorInfo, Fatal, InProcessCheck, ProtocolError, Resolved, ScriptRun, Subject,
 	};
 
 	fn plan(steps: usize) -> UnitPlan {
@@ -1045,7 +1121,7 @@ mod tests {
 		);
 
 		let mut tampered = finished(vec![record(0, returned(json!(1)))]);
-		tampered.protocol_error = Some("step record 0 repeated".into());
+		tampered.protocol_error = Some(ProtocolError::Tampered("step record 0 repeated".into()));
 		assert_eq!(
 			verdict(&one(&c, &p, &tampered)),
 			(
@@ -1111,5 +1187,161 @@ mod tests {
 			one(&text, &p, &finished(vec![printed])).status,
 			TestStatus::Passed
 		);
+	}
+
+	#[test]
+	fn test_a_broken_stream_keeps_what_arrived_and_blames_the_harness_for_the_rest() {
+		let p = plan(2);
+		let c = case("expect = 1");
+		let scored = [
+			Scored {
+				name: "a",
+				case: &c,
+			},
+			Scored {
+				name: "b",
+				case: &c,
+			},
+		];
+		for broke in [
+			|obs: &mut UnitObservation| {
+				obs.fatal = Some(Fatal {
+					stage: "harness".into(),
+					error: ErrorInfo {
+						type_name: "ValueError".into(),
+						types: vec![],
+						message: "x".into(),
+					},
+				})
+			},
+			|obs: &mut UnitObservation| {
+				obs.protocol_error = Some(ProtocolError::Unreadable("garbled".into()))
+			},
+		] {
+			let mut obs = finished(vec![record(0, returned(json!(1)))]);
+			obs.done = false;
+			broke(&mut obs);
+			let r = judge(&p, &scored, &obs, "python3");
+			assert_eq!(r[0].status, TestStatus::Passed, "an earlier pass stands");
+			assert_eq!(
+				verdict(&r[1]),
+				(
+					TestStatus::Error,
+					Some(Fault::Environment),
+					Some(Cause::Harness)
+				)
+			);
+		}
+	}
+
+	#[test]
+	fn test_a_harness_that_never_got_ready_without_teacher_code_is_the_environments() {
+		let obs = UnitObservation::not_started(Exit::Code(1));
+		assert_eq!(
+			verdict(&one(&case("expect = 1"), &plan(1), &obs)),
+			(
+				TestStatus::Error,
+				Some(Fault::Environment),
+				Some(Cause::Harness)
+			)
+		);
+	}
+
+	#[test]
+	fn test_a_setup_that_timed_out_is_an_error_for_its_dependents() {
+		let mut p = plan(1);
+		let mut setup = call(Target::Function {
+			name: "load".into(),
+		});
+		setup.id = Some("db".into());
+		p.setup = vec![setup];
+		let mut obs = finished(vec![]);
+		obs.setup = vec![record(0, Outcome::Timeout {})];
+		assert_eq!(
+			verdict(&one(&case("expect = 1"), &p, &obs)),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Setup))
+		);
+	}
+
+	#[test]
+	fn test_a_checker_whose_dependency_never_arrived_blames_the_producer() {
+		let mut p = plan(1);
+		p.steps[0].check = Some(InProcessCheck {
+			function: "chk".into(),
+			expected: None,
+		});
+		let mut obs = finished(vec![record(0, returned(json!(1)))]);
+		obs.checks.insert(
+			0,
+			CheckObservation::Unresolved {
+				name: "made".into(),
+			},
+		);
+		assert_eq!(
+			verdict(&one(&case("check = { function = \"chk\" }"), &p, &obs)),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Dependency)
+			)
+		);
+	}
+
+	fn script_plan() -> UnitPlan {
+		UnitPlan {
+			script: Some(ScriptRun {
+				stdin: None,
+				timeout: 10,
+				files: Vec::new(),
+			}),
+			..plan(0)
+		}
+	}
+
+	#[test]
+	fn test_a_script_is_held_to_every_expectation() {
+		let p = script_plan();
+		let exits = case(
+			"script = true\nexpected_stdout = \"bad input\\n\"\nexpect_error = \"SystemExit\"",
+		);
+		let mut exited = record(0, raised("SystemExit", &["SystemExit", "BaseException"]));
+		assert_eq!(
+			one(&exits, &p, &finished(vec![exited.clone()])).status,
+			TestStatus::Failed,
+			"it exited as expected but printed nothing"
+		);
+		exited.stdout = "bad input\n".into();
+		assert_eq!(
+			one(&exits, &p, &finished(vec![exited])).status,
+			TestStatus::Passed
+		);
+
+		let mut long = record(0, returned(Value::Null));
+		long.stdout = "x".into();
+		long.stdout_truncated = true;
+		let r = one(
+			&case("script = true\nexpected_stdout = \"x\""),
+			&p,
+			&finished(vec![long]),
+		);
+		assert!(r.failure.unwrap().message.contains("64 KiB"));
+
+		let mut syntax = finished(vec![]);
+		syntax.load = Some(record(0, raised("SyntaxError", &["SyntaxError"])));
+		assert_eq!(
+			verdict(&one(
+				&case("script = true\nexpected_stdout = \"x\""),
+				&p,
+				&syntax
+			)),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Syntax))
+		);
+	}
+
+	#[test]
+	fn test_a_blanket_result_still_names_what_was_asked_for() {
+		let obs = UnitObservation::not_started(Exit::Spawn("no python".into()));
+		let r = one(&case("expect = 1"), &plan(1), &obs);
+		assert_eq!(r.input.unwrap().target.as_deref(), Some("f"));
 	}
 }

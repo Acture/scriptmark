@@ -129,6 +129,10 @@ pub struct TestResult {
 	/// `[meta] name`. Read from `spec_name` in results written before items were modelled.
 	#[serde(alias = "spec_name")]
 	pub item_id: String,
+	/// The student file these cases ran against, as submitted. `None` when no file matched,
+	/// or in results written before it was recorded.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub file: Option<String>,
 	pub cases: Vec<CaseResult>,
 }
 

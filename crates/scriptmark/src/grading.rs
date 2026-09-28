@@ -128,6 +128,7 @@ mod tests {
 		StudentReport {
 			student_id: "test".to_string(),
 			test_results: vec![TestResult {
+				file: None,
 				item_id: "test".to_string(),
 				cases,
 			}],

@@ -123,6 +123,7 @@ async fn run_student<E: Executor>(
 		bundles.iter().map(|b| vec![None; b.units.len()]).collect();
 	let mut tasks = JoinSet::new();
 	let mut where_is = HashMap::new();
+	let mut graded_files: Vec<Option<String>> = vec![None; bundles.len()];
 
 	for (b, bundle) in bundles.iter().enumerate() {
 		// One file per (student, bundle): every unit of a spec runs against the same file.
@@ -141,6 +142,7 @@ async fn run_student<E: Executor>(
 			}
 			continue;
 		};
+		graded_files[b] = Some(file.path.to_string_lossy().into_owned());
 		let path = std::path::absolute(&file.path).unwrap_or_else(|_| file.path.clone());
 		for u in 0..bundle.units.len() {
 			let (bundles, executor, semaphore, python, path) = (
@@ -190,8 +192,10 @@ async fn run_student<E: Executor>(
 	let test_results = bundles
 		.iter()
 		.zip(slots)
-		.map(|(bundle, units)| TestResult {
+		.zip(graded_files)
+		.map(|((bundle, units), file)| TestResult {
 			item_id: bundle.spec.meta.name.clone(),
+			file,
 			cases: units.into_iter().flatten().flatten().collect(),
 		})
 		.collect();

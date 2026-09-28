@@ -600,3 +600,118 @@ ruff check crates/scriptmark/src/runner/harness.py
 
 `tests/canvas_fetch.rs` binds local ports and fails inside the Claude Code sandbox; it is
 run outside it.
+
+## Code review corrections
+
+The implementation (`1a2bb21..7dd3b9e`) went through a six-lens adversarial code review,
+each lens with its own refuter: harness, judge, contract, Rust, tests, conformance. About
+80 findings survived. Everything below is fixed and has a test. Where the design above
+now reads differently from the code, the code and this section are right.
+
+**Student code handled outside a call crashed the harness, and the whole unit was blamed
+on the environment.** There were six ways in:
+
+- a `@property` or `__getattr__` that raises, which runs during method or attribute
+  lookup;
+- an exception whose `__str__` raises;
+- an integer too large for the grader's JSON, which was read as tampering, or above
+  4300 digits, which crashed the harness;
+- a lone surrogate on the record channel;
+- `expect_files` hitting a path the student had blocked;
+- a `.PY` extension.
+
+Now the whole call runs inside `call()`, under its timer and guard: the lookup, the
+body, and serialisation.
+
+- A property is read once. `getattr_static` decides between "missing" and "raised".
+- `error_of` and the serialiser are total. Integers outside the 64-bit range are
+  `{"$bigint": "…"}`.
+- The channel replaces unencodable characters.
+- `observe_files` treats any `OSError` as "not the file asked for".
+- The student file loads through an explicit `SourceFileLoader`.
+
+**A broken stream no longer erases what arrived.** Only a record that repeats or comes
+out of order, which is somebody else writing, discards the unit as `protocol`. A harness
+crash after `ready`, or a record that does not parse, keeps every recorded call, and only
+the unreported ones become `environment` / `harness`. That matches the D7 row "a record
+did not parse". Other records are now also refused:
+
+- a `teacher_import` fatal after `ready`;
+- a repeated `ready`, `done` or `fatal`;
+- anything after `done`;
+- more than 32 MiB on the channel.
+
+**Checker dependencies.** A parameter whose producing step failed no longer arrives as
+`None`, which blamed the teacher's checker. It is `student` / `dependency`. Parameters are
+reported with their kind and default: `**kwargs` and defaulted parameters are filled only
+when named. `stdout` is always the call's output, and a var, export or id called `stdout`
+is refused. A name two teacher modules export differently is refused, naming both modules.
+`@checker` fails with the instruction to write `check = { function = … }`.
+
+**Refusals added in `load_spec`:**
+
+- a function checker on a script case (it had failed every student as `environment`);
+- `check` with `oracle.check`, which had silently replaced it;
+- `expect_error` with a reference or Rhai oracle;
+- parametrize on an attribute; a reference oracle on a method;
+- an `expect` of the wrong shape for `approx`, `set_eq` or `text` (`text` had passed
+  any non-string);
+- `inf`/`nan` in `args`;
+- `expected_stdout` longer than the capture;
+- timeouts outside 1–86400 s.
+
+**Refusals added in `prepare`:** an empty spec set, a zero default timeout, and a
+reference implementation that returns `None`.
+
+**Script mode.**
+
+- A syntax error is `syntax`.
+- Truncated output fails explicitly.
+- A script that exits with the expected error must still print `expected_stdout`.
+- `sys.argv` is the script's own.
+- The capture is a real `TextIOWrapper`, so `sys.stdout.buffer` and `reconfigure` work.
+- A clean exit is judged by the exit code, not its text.
+
+**Process.**
+
+- The harness runs in its own process group, and the whole group is killed at the
+  deadline and after exit.
+- Pipes are read into bounded, shared buffers, so a drain timeout keeps what arrived and
+  stderr keeps only its tail.
+- `PYTHONSAFEPATH=1` and an explicit `sys.path` scrub mean a submission named `json.py`
+  cannot shadow the harness's imports.
+- Teacher module directories are appended to `sys.path`, not prepended.
+- RLIMIT_CPU's hard limit sits one second above the soft one, so Linux sends SIGXCPU,
+  not SIGKILL. D6's "can never fire first" overstated it: the CPU limit is a backstop
+  for one busy core, and multi-threaded native code can still reach it early.
+- Deadline arithmetic saturates.
+- Rhai runs with an operation limit, so a looping expression is a checker error, not a
+  hang.
+
+**Design points restated.**
+
+- Sets serialise in natural sorted order, falling back to JSON-text order only for mixed
+  types. D5's "sorted by their JSON text" would put 10 before 9.
+- A setup failure is always `error`, never `timeout`.
+- `not_run` inherits the fault of the call that stopped the unit.
+- The file-matching hint is the chain rule as it actually was: the first function a case
+  names, then `[meta] function`. D10 had them reversed.
+- The reference implementation runs as teacher code, outside the import guard, as D5
+  says teacher code does.
+- Exact comparison of integers is exact: `2**63` is not `2**63 - 1`.
+
+**Evidence.** `TestResult.file` records which student file was graded. A blanket result
+still names the target it asked for. The terminal failure listing shows the cause.
+
+**CLI and bindings.** `--timeout` accepts 1–86400. `--concurrency` must be at least 1.
+In the Python bindings, an invalid bundle is a `ValueError` from every entry point, and a
+missing path is `FileNotFoundError`.
+
+**Left for their owners.**
+
+- An unparseable generator expression still yields `null` arguments. That belongs to
+  P-675, which makes generation errors a preparation failure.
+- A function checker that trips over a student object's own methods is still the
+  teacher's `checker` error, by design (D9). Attributing it by traceback frame is a
+  follow-up.
+- Reference oracles still resolve one at a time; making them concurrent belongs to P-676.

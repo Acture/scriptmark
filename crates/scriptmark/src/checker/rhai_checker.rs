@@ -18,6 +18,16 @@ impl RhaiChecker {
 	}
 }
 
+/// The one Rhai engine configuration: bounded, so a teacher expression that loops cannot
+/// hang a run — it fails, and a check that cannot finish is the teacher's to fix.
+pub fn engine() -> Engine {
+	let mut engine = Engine::new();
+	engine.set_max_operations(1_000_000);
+	engine.set_max_call_levels(64);
+	engine.set_max_expr_depths(64, 32);
+	engine
+}
+
 /// Convert a serde_json::Value to a Rhai Dynamic value.
 pub fn json_to_dynamic(value: &serde_json::Value) -> Dynamic {
 	match value {
@@ -49,7 +59,7 @@ pub fn json_to_dynamic(value: &serde_json::Value) -> Dynamic {
 
 impl Checker for RhaiChecker {
 	fn check(&self, input: &CheckInput) -> Result<CheckOutput, CheckError> {
-		let engine = Engine::new();
+		let engine = engine();
 		let mut scope = Scope::new();
 
 		scope.push_dynamic("result", json_to_dynamic(&input.result));

@@ -11,7 +11,7 @@ use scriptmark::models::{AssignmentInput, StudentReport, TestSpec};
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
-use scriptmark::spec_loader::{load_spec as load_spec_file, load_specs_from_dir};
+use scriptmark::spec_loader::{SpecError, load_spec as load_spec_file, load_specs_from_dir};
 
 /// A test specification loaded from a TOML file.
 #[pyclass(name = "TestSpec")]
@@ -185,11 +185,22 @@ fn local_input(paths: &[String]) -> PyResult<AssignmentInput> {
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
+/// A bundle that cannot be graded is a ValueError, however it was found out; a path that
+/// is not there is the OS error it always was.
+fn spec_error(e: SpecError) -> PyErr {
+	match e {
+		SpecError::IoError(..) => pyo3::exceptions::PyFileNotFoundError::new_err(e.to_string()),
+		SpecError::NotADirectory(_) => {
+			pyo3::exceptions::PyNotADirectoryError::new_err(e.to_string())
+		}
+		_ => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+	}
+}
+
 /// Load and validate a test specification from a TOML file.
 #[pyfunction]
 fn load_spec(path: String) -> PyResult<PyTestSpec> {
-	let spec = load_spec_file(Path::new(&path))
-		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+	let spec = load_spec_file(Path::new(&path)).map_err(spec_error)?;
 	Ok(PyTestSpec { inner: spec })
 }
 
@@ -248,8 +259,7 @@ fn run_grading(
 ) -> PyResult<Vec<StudentReport>> {
 	let input = local_input(submissions)?;
 
-	let specs = load_specs_from_dir(Path::new(tests))
-		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+	let specs = load_specs_from_dir(Path::new(tests)).map_err(spec_error)?;
 
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
 	let options = RunOptions {

@@ -22,7 +22,7 @@ use crate::runner::executor::{
 use crate::runner::expander::expand_case;
 use crate::runner::judge::Scored;
 use crate::runner::oracle::resolve_oracle;
-use crate::spec_loader::{refs, validate};
+use crate::spec_loader::{MAX_TIMEOUT_SECS, RESERVED, refs, validate};
 
 /// A prepared test bundle: one spec, ready to run against any student.
 #[derive(Debug, Serialize)]
@@ -72,19 +72,44 @@ pub async fn prepare<E: Executor>(
 	executor: Arc<E>,
 	timeout_secs: u64,
 ) -> Result<Vec<Bundle>, PrepareErrors> {
+	let refuse = |problem: &str| {
+		Err(PrepareErrors(vec![PrepareError {
+			name: "(the run)".into(),
+			problems: vec![problem.to_string()],
+		}]))
+	};
+	if specs.is_empty() {
+		return refuse("no test specs were found: nothing would be graded");
+	}
+	if !(1..=MAX_TIMEOUT_SECS).contains(&timeout_secs) {
+		return refuse(&format!(
+			"the default timeout must be between 1 and {MAX_TIMEOUT_SECS} seconds"
+		));
+	}
+
+	let names: Vec<String> = specs.iter().map(|s| s.meta.name.clone()).collect();
 	let mut tasks = tokio::task::JoinSet::new();
+	let mut index_of = std::collections::HashMap::new();
 	for (index, spec) in specs.into_iter().enumerate() {
 		let executor = executor.clone();
-		tasks.spawn(async move { (index, prepare_one(spec, &*executor, timeout_secs).await) });
+		let handle = tasks.spawn(async move { prepare_one(spec, &*executor, timeout_secs).await });
+		index_of.insert(handle.id(), index);
 	}
-	let mut done = Vec::new();
-	while let Some(joined) = tasks.join_next().await {
-		done.push(joined.map_err(|e| {
-			PrepareErrors(vec![PrepareError {
-				name: "?".into(),
-				problems: vec![format!("preparation panicked: {e}")],
-			}])
-		})?);
+	let mut done: Vec<(usize, Result<Bundle, PrepareError>)> = Vec::new();
+	while let Some(joined) = tasks.join_next_with_id().await {
+		match joined {
+			Ok((id, result)) => done.push((index_of[&id], result)),
+			Err(e) => {
+				let index = index_of[&e.id()];
+				done.push((
+					index,
+					Err(PrepareError {
+						name: names[index].clone(),
+						problems: vec![format!("preparing this bundle panicked: {e}")],
+					}),
+				));
+			}
+		}
 	}
 	done.sort_by_key(|(index, _)| *index);
 
@@ -167,7 +192,21 @@ async fn prepare_one<E: Executor>(
 
 /// Every name a call uses must mean exactly one thing.
 fn check_names(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> {
-	let mut problems = Vec::new();
+	let mut problems: Vec<String> = teacher
+		.duplicates
+		.iter()
+		.map(|(name, modules)| {
+			format!(
+				"'{name}' is exported by more than one teacher module ({})",
+				modules.join(", ")
+			)
+		})
+		.collect();
+	if teacher.exports.contains_key(RESERVED) {
+		problems.push(format!(
+			"a teacher module exports '{RESERVED}', a name checkers reserve for the call's output"
+		));
+	}
 	let exports: BTreeSet<&str> = teacher.exports.keys().map(String::as_str).collect();
 	let mut top: BTreeSet<String> = BTreeSet::new();
 	for name in spec.vars.keys() {
@@ -258,15 +297,21 @@ fn check_call(
 		match teacher.exports.get(&name) {
 			Some(export) if export.callable => {
 				if let Some(params) = &export.params {
-					if params.len() < 2 {
+					let positional = params.iter().take(2).filter(|p| !p.is_variadic()).count();
+					if positional < 2 {
 						problems.push(format!(
 							"{at}: checker '{name}' must take (result, expected, ...)"
 						));
 					}
 					for param in params.iter().skip(2) {
-						if param != "stdout" && !scope.contains(param) {
+						// *args, **kwargs and defaulted parameters are filled only when named.
+						let filled = param.is_variadic()
+							|| param.default || param.name == RESERVED
+							|| scope.contains(&param.name);
+						if !filled {
 							problems.push(format!(
-								"{at}: checker '{name}' asks for '{param}', which names nothing in scope"
+								"{at}: checker '{name}' asks for '{}', which names nothing in scope",
+								param.name
 							));
 						}
 					}

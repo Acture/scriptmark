@@ -88,16 +88,32 @@ async fn test_the_shared_object_example() {
 	let reports = grade_example("shared_object").await;
 	assert_all_passed(student(&reports, "alice"));
 	let bob = student(&reports, "bob");
-	let failed = failures(bob);
-	assert_eq!(failed.len(), 4, "{failed:#?}");
+	let step = |name: &str| format!("ada's account / {name}");
 	assert_eq!(
-		failed[3],
-		(
-			"ada's account / history records every change".into(),
-			TestStatus::Failed,
-			Some(Cause::Rejected)
-		),
-		"the teacher's checker rejected a malformed answer"
+		failures(bob),
+		[
+			(
+				step("deposit returns the new balance"),
+				TestStatus::Failed,
+				Some(Cause::Wrong)
+			),
+			(
+				step("overdrawing is refused"),
+				TestStatus::Failed,
+				Some(Cause::Wrong)
+			),
+			(
+				step("a refused withdrawal leaves the balance alone"),
+				TestStatus::Failed,
+				Some(Cause::Wrong)
+			),
+			(
+				step("history records every change"),
+				TestStatus::Failed,
+				Some(Cause::Rejected)
+			),
+		],
+		"the teacher's checker rejected a malformed answer; every failure is bob's"
 	);
 	assert!(
 		bob.test_results[0]

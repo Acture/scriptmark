@@ -27,14 +27,12 @@ infallible!(
 /// Exact equality checker (default).
 pub struct ExactChecker;
 
-/// Equality as Python sees it: numbers compare by value, so `2 == 2.0`.
+/// Equality as Python sees it: numbers compare by value, so `2 == 2.0` — exactly, never
+/// through a lossy float (`2**63` is not `2**63 - 1`).
 pub fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 	use serde_json::Value;
 	match (a, b) {
-		(Value::Number(x), Value::Number(y)) => match (x.as_i64(), y.as_i64()) {
-			(Some(x), Some(y)) => x == y,
-			_ => x.as_f64() == y.as_f64(),
-		},
+		(Value::Number(x), Value::Number(y)) => same_number(x, y),
 		(Value::Array(x), Value::Array(y)) => {
 			x.len() == y.len() && x.iter().zip(y).all(|(a, b)| same(a, b))
 		}
@@ -42,6 +40,25 @@ pub fn same(a: &serde_json::Value, b: &serde_json::Value) -> bool {
 			x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same(v, w)))
 		}
 		_ => a == b,
+	}
+}
+
+fn same_number(x: &serde_json::Number, y: &serde_json::Number) -> bool {
+	/// An integer as i128, which holds every i64 and u64 exactly.
+	fn int(n: &serde_json::Number) -> Option<i128> {
+		n.as_i64()
+			.map(i128::from)
+			.or_else(|| n.as_u64().map(i128::from))
+	}
+	/// A float equals an integer only when it is integral and converts to it exactly.
+	fn float_is(f: f64, i: i128) -> bool {
+		f.fract() == 0.0 && f.is_finite() && (f as i128) == i && (i as f64) == f
+	}
+	match (int(x), int(y)) {
+		(Some(a), Some(b)) => a == b,
+		(Some(i), None) => y.as_f64().is_some_and(|f| float_is(f, i)),
+		(None, Some(i)) => x.as_f64().is_some_and(|f| float_is(f, i)),
+		(None, None) => x.as_f64() == y.as_f64(),
 	}
 }
 
@@ -369,5 +386,17 @@ mod tests {
 			context: json!({}),
 		});
 		assert!(result.pass);
+	}
+
+	#[test]
+	fn test_same_is_exact_for_integers_and_python_like_across_types() {
+		assert!(same(&json!(2), &json!(2.0)));
+		assert!(!same(&json!(2), &json!(2.5)));
+		assert!(!same(&json!(i64::MAX), &json!(9223372036854775808u64)));
+		assert!(!same(
+			&json!(9007199254740993i64),
+			&json!(9007199254740992.0)
+		));
+		assert!(same(&json!([1, {"a": 2.0}]), &json!([1.0, {"a": 2}])));
 	}
 }

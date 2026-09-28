@@ -403,8 +403,214 @@ async fn test_inspect_reports_only_what_a_teacher_module_defines() {
 	let runtime = PythonExecutor::new().inspect(&spec, 5).await.unwrap();
 	let names: Vec<&str> = runtime.exports.keys().map(String::as_str).collect();
 	assert_eq!(names, ["BASE", "DATA", "make"]);
-	assert_eq!(
-		runtime.exports["make"].params.as_deref(),
-		Some(&["n".to_string(), "scale".to_string()][..])
+	let params = runtime.exports["make"].params.as_deref().unwrap();
+	let described: Vec<(&str, bool)> = params
+		.iter()
+		.map(|p| (p.name.as_str(), p.default))
+		.collect();
+	assert_eq!(described, [("n", false), ("scale", true)]);
+}
+
+#[tokio::test]
+async fn test_a_raising_property_is_that_steps_exception_not_a_harness_crash() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"bank.py",
+		"class Account:\n    reads = 0\n    def __init__(self):\n        self.history = []\n    @property\n    def last(self):\n        Account.reads += 1\n        return self.history[-1]\n    @property\n    def typo(self):\n        return self.histroy\n    def __getattr__(self, name):\n        if name == 'dynamic':\n            raise KeyError(name)\n        raise AttributeError(name)\n    def count(self):\n        return Account.reads\n",
 	);
+	let mut plan = unit(&student);
+	let mut make = function("Account", vec![]);
+	make.id = Some("acct".into());
+	plan.setup = vec![make];
+	let on = |kind: &str, name: &str| {
+		let object = "acct".to_string();
+		let name = name.to_string();
+		call(
+			match kind {
+				"attribute" => Target::Attribute { object, name },
+				_ => Target::Method { object, name },
+			},
+			vec![],
+		)
+	};
+	plan.steps = vec![
+		on("attribute", "last"),
+		on("attribute", "typo"),
+		on("method", "dynamic"),
+		on("attribute", "nowhere"),
+		on("method", "count"),
+	];
+	let obs = run(&plan).await;
+	assert!(obs.fatal.is_none(), "{obs:?}");
+	assert!(matches!(&obs.steps[0].outcome, Outcome::Raised(e) if e.is_a("IndexError")));
+	assert!(
+		matches!(&obs.steps[1].outcome, Outcome::Raised(e) if e.is_a("AttributeError")),
+		"a typo inside a property is the property raising, not a missing attribute"
+	);
+	assert!(matches!(&obs.steps[2].outcome, Outcome::Raised(e) if e.is_a("KeyError")));
+	assert!(matches!(&obs.steps[3].outcome, Outcome::Raised(e) if e.is_a("AttributeError")));
+	assert_eq!(
+		returned(&obs.steps[4].outcome),
+		&json!(1),
+		"the property was read once, inside its own call"
+	);
+}
+
+#[tokio::test]
+async fn test_nothing_a_student_returns_or_prints_can_crash_the_record_channel() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"class Broke(Exception):\n    def __str__(self):\n        return 'n=' + 1\n\ndef bad_message():\n    raise Broke()\n\ndef big():\n    return 2 ** 1100\n\ndef huge():\n    return 10 ** 5000\n\ndef lone():\n    print('\\ud800')\n    return '\\udc80'\n\ndef blocked(path):\n    open('out', 'w').write('a file, not a directory')\n",
+	);
+	let mut plan = unit(&student);
+	let mut blocked = function("blocked", vec![json!("out/x.txt")]);
+	blocked.files = vec!["out/x.txt".into()];
+	plan.steps = vec![
+		function("bad_message", vec![]),
+		function("big", vec![]),
+		function("huge", vec![]),
+		function("lone", vec![]),
+		blocked,
+	];
+	let obs = run(&plan).await;
+	assert!(
+		obs.fatal.is_none() && obs.protocol_error.is_none(),
+		"{obs:?}"
+	);
+	assert!(matches!(&obs.steps[0].outcome, Outcome::Raised(e) if e.type_name == "Broke"));
+	let big = returned(&obs.steps[1].outcome);
+	assert!(
+		big["$bigint"].as_str().unwrap().starts_with("1358"),
+		"{big}"
+	);
+	assert!(returned(&obs.steps[2].outcome)["$bigint"].is_string());
+	assert_eq!(returned(&obs.steps[3].outcome), &json!("?"));
+	assert_eq!(obs.steps[4].files.get("out/x.txt"), Some(&None));
+}
+
+#[tokio::test]
+async fn test_a_submission_cannot_shadow_what_the_harness_imports() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"json.py",
+		"def dumps(*a, **k):\n    raise RuntimeError('shadowed')\n\ndef f():\n    return [1, 2]\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("f", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.ready && obs.done, "{obs:?}");
+	assert_eq!(returned(&obs.steps[0].outcome), &json!([1, 2]));
+
+	let upper = write(dir.path(), "LAB5.PY", "def f():\n    return 5\n");
+	let mut plan = unit(&upper);
+	plan.steps = vec![function("f", vec![])];
+	assert_eq!(returned(&run(&plan).await.steps[0].outcome), &json!(5));
+}
+
+#[tokio::test]
+async fn test_a_script_sees_itself_as_argv_and_a_real_stdout() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"io.py",
+		"import sys\nsys.stdout.reconfigure(encoding='utf-8')\nprint(len(sys.argv), sys.argv[0].endswith('io.py'), flush=True)\nsys.stdout.buffer.write(b'raw\\n')\nexit(False)\n",
+	);
+	let mut plan = unit(&student);
+	plan.script = Some(ScriptRun {
+		stdin: None,
+		timeout: 5,
+		files: Vec::new(),
+	});
+	let obs = run(&plan).await;
+	assert!(
+		matches!(obs.steps[0].outcome, Outcome::Returned { .. }),
+		"{obs:?}"
+	);
+	assert_eq!(obs.steps[0].stdout, "1 True\nraw\n");
+}
+
+#[tokio::test]
+async fn test_checker_contract_and_missing_dependencies_are_reported() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def f():\n    return 1\n\ndef boom():\n    raise ValueError('no')\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"teacher.py",
+		"def numeric(result, expected):\n    return 1\n\ndef uses(result, expected, made, tol=0.5, **rest):\n    return True\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let checked = |fn_name: &str, check: &str| {
+		let mut c = function(fn_name, vec![]);
+		c.check = Some(InProcessCheck {
+			function: check.to_string(),
+			expected: None,
+		});
+		c
+	};
+	let mut producer = function("boom", vec![]);
+	producer.id = Some("made".into());
+	plan.steps = vec![checked("f", "numeric"), producer, checked("f", "uses")];
+	let obs = run(&plan).await;
+	assert!(
+		matches!(&obs.checks[&0], CheckObservation::Error(e) if e.type_name == "CheckerContract")
+	);
+	assert_eq!(
+		obs.checks[&2],
+		CheckObservation::Unresolved {
+			name: "made".into()
+		}
+	);
+}
+
+#[tokio::test]
+async fn test_inspect_names_duplicates_and_the_removed_decorator() {
+	let dir = tempfile::tempdir().unwrap();
+	let a = write(dir.path(), "a.py", "def helper():\n    return 'a'\n");
+	let b = write(dir.path(), "b.py", "def helper():\n    return 'b'\n");
+	let spec_of = |imports: &[&PathBuf]| -> scriptmark::models::TestSpec {
+		toml::from_str(&format!(
+			"[meta]\nname = \"t\"\nfile = \"lab.py\"\nlanguage = \"python\"\nimports = {:?}\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			imports.iter().map(|p| p.to_string_lossy().into_owned()).collect::<Vec<_>>()
+		))
+		.unwrap()
+	};
+	let runtime = PythonExecutor::new()
+		.inspect(&spec_of(&[&a, &b]), 5)
+		.await
+		.unwrap();
+	assert_eq!(runtime.duplicates["helper"].len(), 2);
+
+	let decorated = write(
+		dir.path(),
+		"decorated.py",
+		"@checker('f')\ndef check_f(result, expected):\n    return True\n",
+	);
+	let err = PythonExecutor::new()
+		.inspect(&spec_of(&[&decorated]), 5)
+		.await
+		.unwrap_err();
+	assert!(err.contains("check = { function"), "{err}");
+}
+
+#[tokio::test]
+async fn test_a_reference_runs_as_teacher_code() {
+	let dir = tempfile::tempdir().unwrap();
+	let reference = write(
+		dir.path(),
+		"ref.py",
+		"import os\n\ndef f():\n    return os.sep\n",
+	);
+	let mut plan = unit(&reference);
+	plan.subject = Subject::Reference;
+	plan.steps = vec![function("f", vec![])];
+	assert_eq!(returned(&run(&plan).await.steps[0].outcome), &json!("/"));
 }

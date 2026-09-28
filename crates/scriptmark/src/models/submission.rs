@@ -1133,6 +1133,7 @@ mod tests {
 
 		// A result references an item by the same id a test spec's [meta] name carries.
 		let result = crate::models::TestResult {
+			file: None,
 			item_id: "sum_pair".to_string(),
 			cases: vec![],
 		};

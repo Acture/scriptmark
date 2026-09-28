@@ -169,6 +169,13 @@ async fn test_a_fixed_bundle_grades_without_generator_oracle_or_seed() {
 	);
 	let input = case(bob, "3 < 5").input.clone().unwrap();
 	assert_eq!(input.args, vec![serde_json::json!(3), serde_json::json!(5)]);
+	assert!(
+		bob.test_results[0]
+			.file
+			.as_deref()
+			.is_some_and(|f| f.ends_with("bob/lab5.py")),
+		"the graded file is part of the evidence"
+	);
 }
 
 /// The seam between the input model and the results: `run_all` is the only place a
@@ -845,7 +852,7 @@ async fn test_a_bundle_that_cannot_be_honoured_is_refused_before_grading() {
 		(
 			spec("[[cases]]\nname = \"x\"\nexpect = 1\n")
 				.tap_imports(&bench, "helpers/decorated.py"),
-			"name 'checker' is not defined",
+			"check = { function = \"<checker name>\" }",
 		),
 		(
 			spec("[[cases]]\nname = \"x\"\ncheck = { rhai = \"result.len() > 0\" }\n"),
@@ -875,6 +882,256 @@ async fn test_a_bundle_that_cannot_be_honoured_is_refused_before_grading() {
 			"expected {needle:?} in:\n{message}"
 		);
 	}
+}
+
+#[tokio::test]
+async fn test_every_name_must_mean_exactly_one_thing() {
+	let bench = Bench::new();
+	bench.write(
+		"helpers/t.py",
+		"LIMIT = 3\n\ndef make():\n    return 1\n\ndef chk(result, expected, ghost):\n    return True\n\ndef lenient(result, expected, tol=0.5, **rest):\n    return True\n",
+	);
+	bench.write("helpers/u.py", "def make():\n    return 2\n");
+	bench.write("helpers/out.py", "stdout = 'mine'\n");
+	bench.write("reference/none.py", "def f(x):\n    print(x)\n");
+	let spec = |body: &str, imports: &[&str]| {
+		let imports: Vec<String> = imports.iter().map(|i| format!("{i:?}")).collect();
+		bench.spec(&format!(
+			"[meta]\nname = \"t\"\nfile = \"lab.py\"\nfunction = \"f\"\nlanguage = \"python\"\nimports = [{}]\n{body}",
+			imports.join(", ")
+		))
+	};
+	let t = "helpers/t.py";
+	let refusals = [
+		(
+			spec(
+				"[vars]\nLIMIT = 4\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				&[t],
+			),
+			"'LIMIT' is both a [vars] entry and a teacher export",
+		),
+		(
+			spec(
+				"[[setup]]\nid = \"make\"\nfunction = \"f\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				&[t],
+			),
+			"id 'make' is also a teacher export",
+		),
+		(
+			spec(
+				"[[setup]]\nid = \"d\"\nteacher = \"absent\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+				&[t],
+			),
+			"teacher function 'absent' is not exported",
+		),
+		(
+			spec(
+				"[[cases]]\nname = \"x\"\ncheck = { function = \"chk\" }\n",
+				&[t],
+			),
+			"asks for 'ghost', which names nothing in scope",
+		),
+		(
+			spec(
+				"[[cases]]\nname = \"x\"\nexpect = 1\n",
+				&[t, "helpers/u.py"],
+			),
+			"'make' is exported by more than one teacher module",
+		),
+		(
+			spec("[[cases]]\nname = \"x\"\nexpect = 1\n", &["helpers/out.py"]),
+			"exports 'stdout'",
+		),
+		(
+			spec(
+				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\n",
+				&[],
+			),
+			"returned None",
+		),
+	];
+	for (spec, needle) in refusals {
+		let message = refusal(spec).await;
+		assert!(
+			message.contains(needle),
+			"expected {needle:?} in:\n{message}"
+		);
+	}
+
+	// Defaulted and variadic parameters are filled only when named: this one prepares.
+	assert!(
+		prepare(
+			vec![spec(
+				"[[cases]]\nname = \"x\"\ncheck = { function = \"lenient\" }\n",
+				&[t]
+			)],
+			Arc::new(PythonExecutor::new()),
+			5
+		)
+		.await
+		.is_ok()
+	);
+
+	let nothing = prepare(vec![], Arc::new(PythonExecutor::new()), 5).await;
+	assert!(
+		nothing
+			.map(|_| ())
+			.unwrap_err()
+			.to_string()
+			.contains("no test specs")
+	);
+	let zero = prepare(vec![bench.spec(LARGER)], Arc::new(PythonExecutor::new()), 0).await;
+	assert!(
+		zero.map(|_| ())
+			.unwrap_err()
+			.to_string()
+			.contains("between 1 and")
+	);
+}
+
+#[tokio::test]
+async fn test_concurrent_units_write_the_same_file_without_meeting() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "writes"
+file = "lab.py"
+function = "save"
+language = "python"
+
+[[cases]]
+name = "one"
+args = ["first"]
+expect_files = { "out.txt" = "first" }
+
+[[cases]]
+name = "two"
+args = ["second"]
+expect_files = { "out.txt" = "second" }
+
+[[cases]]
+name = "three"
+args = ["third"]
+expect_files = { "out.txt" = "third" }
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"import time\n\ndef save(text):\n    with open('out.txt', 'w') as fh:\n        fh.write(text)\n    time.sleep(0.3)\n",
+	);
+	let cwd_before: Vec<_> = std::fs::read_dir(".")
+		.unwrap()
+		.map(|e| e.unwrap().file_name())
+		.collect();
+	let results = grade(vec![spec], &[student]).await;
+	assert_eq!(results[0].total_passed(), 3, "{:#?}", results[0]);
+	let cwd_after: Vec<_> = std::fs::read_dir(".")
+		.unwrap()
+		.map(|e| e.unwrap().file_name())
+		.collect();
+	assert_eq!(
+		cwd_before.len(),
+		cwd_after.len(),
+		"nothing written to the grader's cwd"
+	);
+	let submission = bench.path().join("students/alice");
+	assert_eq!(
+		std::fs::read_dir(submission).unwrap().count(),
+		1,
+		"nor beside the submission"
+	);
+}
+
+#[tokio::test]
+async fn test_a_failing_student_setup_fails_every_case_it_runs_in() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "loader"
+file = "lab.py"
+function = "echo"
+language = "python"
+
+[[setup]]
+id = "data"
+function = "load"
+
+[[cases]]
+name = "uses it"
+args = ["$data"]
+expect = 1
+
+[[cases]]
+name = "does not"
+args = [2]
+expect = 2
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def load():\n    raise FileNotFoundError('data.csv')\n\ndef echo(x):\n    return x\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	for name in ["uses it", "does not"] {
+		let c = case(&results[0], name);
+		assert_eq!(
+			verdict(c),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Setup))
+		);
+		assert!(c.failure.as_ref().unwrap().message.contains("setup 'data'"));
+	}
+}
+
+#[tokio::test]
+async fn test_a_scenario_killed_at_its_deadline_blames_the_call_that_hung() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "stubborn"
+file = "lab.py"
+language = "python"
+
+[[scenarios]]
+name = "s"
+[[scenarios.steps]]
+name = "first"
+function = "ok"
+expect = 1
+[[scenarios.steps]]
+name = "stubborn"
+function = "forever"
+expect = 1
+[[scenarios.steps]]
+name = "after"
+function = "ok"
+expect = 1
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def ok():\n    return 1\n\ndef forever():\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n",
+	);
+	let results = grade_with(vec![spec], &[student], PythonExecutor::new(), 1).await;
+	let r = &results[0];
+	assert_eq!(case(r, "s / first").status, TestStatus::Passed);
+	assert_eq!(
+		verdict(case(r, "s / stubborn")),
+		(
+			TestStatus::Timeout,
+			Some(Fault::Student),
+			Some(Cause::Killed)
+		)
+	);
+	assert_eq!(
+		verdict(case(r, "s / after")),
+		(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
+	);
 }
 
 trait TapImports {

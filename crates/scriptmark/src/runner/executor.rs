@@ -59,21 +59,18 @@ pub struct UnitPlan {
 
 impl UnitPlan {
 	/// Seconds the unit may run in total: every call's own timeout, plus slack. The
-	/// kernel's CPU limit is set just above it, so the harness's timers always fire first.
+	/// kernel's CPU limit sits just above it as a backstop for a single busy core.
 	pub fn deadline_secs(&self) -> u64 {
-		let calls: u64 = match &self.script {
+		let calls = match &self.script {
 			Some(script) => script.timeout,
-			None => {
-				self.load_timeout
-					+ self
-						.setup
-						.iter()
-						.chain(&self.steps)
-						.map(CallPlan::budget)
-						.sum::<u64>()
-			}
+			None => self
+				.setup
+				.iter()
+				.chain(&self.steps)
+				.map(CallPlan::budget)
+				.fold(self.load_timeout, u64::saturating_add),
 		};
-		calls + 2
+		calls.saturating_add(2)
 	}
 }
 
@@ -102,7 +99,8 @@ pub struct CallPlan {
 
 impl CallPlan {
 	fn budget(&self) -> u64 {
-		self.timeout + self.check.as_ref().map_or(0, |_| self.timeout)
+		self.timeout
+			.saturating_add(self.check.as_ref().map_or(0, |_| self.timeout))
 	}
 }
 
@@ -113,18 +111,37 @@ pub struct InProcessCheck {
 	pub expected: Option<Value>,
 }
 
-/// What a teacher module exports, as found by importing it.
+/// What the teacher modules export, as found by importing them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TeacherRuntime {
 	pub exports: BTreeMap<String, Export>,
+	/// Names two modules export as different objects, with both modules' paths.
+	#[serde(default)]
+	pub duplicates: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Export {
 	pub callable: bool,
-	/// Parameter names, when the export is callable and introspectable.
+	/// The parameters, when the export is callable and introspectable.
 	#[serde(default)]
-	pub params: Option<Vec<String>>,
+	pub params: Option<Vec<Param>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Param {
+	pub name: String,
+	/// Python's `inspect.Parameter.kind`, lowercased (`positional_or_keyword`, `var_keyword`, …).
+	pub kind: String,
+	/// Whether the parameter has a default.
+	pub default: bool,
+}
+
+impl Param {
+	/// `*args` or `**kwargs`: never filled by name.
+	pub fn is_variadic(&self) -> bool {
+		self.kind.starts_with("var_")
+	}
 }
 
 /// Where a call in the unit sits.
@@ -210,6 +227,10 @@ pub enum CheckObservation {
 	Rejected {
 		message: String,
 	},
+	/// A name the checker takes was never produced — its producing call failed.
+	Unresolved {
+		name: String,
+	},
 	/// The checker could not decide.
 	Error(ErrorInfo),
 }
@@ -238,8 +259,8 @@ pub struct UnitObservation {
 	pub fatal: Option<Fatal>,
 	pub done: bool,
 	pub exit: Exit,
-	/// A record repeated or did not parse: the stream cannot be trusted past it.
-	pub protocol_error: Option<String>,
+	/// The record stream broke: the unit's records cannot be trusted past this point.
+	pub protocol_error: Option<ProtocolError>,
 	/// The tail of stderr, for diagnosing a crash.
 	pub stderr: String,
 }
@@ -258,6 +279,24 @@ impl UnitObservation {
 			exit,
 			protocol_error: None,
 			stderr: String::new(),
+		}
+	}
+}
+
+/// How the record stream broke.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtocolError {
+	/// A framed record did not parse — the harness wrote something it should not have.
+	Unreadable(String),
+	/// A record repeated or came out of order — somebody else wrote it.
+	Tampered(String),
+}
+
+impl std::fmt::Display for ProtocolError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			ProtocolError::Unreadable(m) | ProtocolError::Tampered(m) => f.write_str(m),
 		}
 	}
 }

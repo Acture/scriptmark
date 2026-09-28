@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use tokio::process::Command;
 
 use crate::models::{StudentFile, TestSpec};
-use crate::runner::executor::{Executor, Exit, Subject, TeacherRuntime, UnitObservation, UnitPlan};
+use crate::runner::executor::{
+	Executor, Exit, ProtocolError, Subject, TeacherRuntime, UnitObservation, UnitPlan,
+};
 #[cfg(unix)]
 use crate::runner::sandbox::apply_sandbox;
 
@@ -141,6 +144,9 @@ const HARNESS: &str = include_str!("harness.py");
 /// The tail of stderr kept for diagnosing a crash.
 const STDERR_TAIL: usize = 4096;
 
+/// More than this on the record channel is not the harness writing.
+const STDOUT_CAP: usize = 32 * 1024 * 1024;
+
 /// A unit's private directory: the payload beside a working directory the student runs in.
 struct Staged {
 	/// Removed on drop.
@@ -211,6 +217,8 @@ fn nonce() -> String {
 /// What a finished harness process left behind.
 struct Finished {
 	stdout: String,
+	/// The process wrote more than `STDOUT_CAP` to the record channel.
+	stdout_overflow: bool,
 	stderr: String,
 	exit: Exit,
 }
@@ -223,19 +231,16 @@ impl PythonExecutor {
 		deadline_secs: u64,
 		stdin: Option<String>,
 	) -> Finished {
-		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		use tokio::io::AsyncWriteExt;
 
-		let sandbox = crate::runner::sandbox::SandboxConfig {
-			// Above the deadline, so the harness's own timers always fire first.
-			cpu_secs: deadline_secs + 1,
-			..Default::default()
-		};
 		let mut cmd = Command::new(&self.python_cmd);
 		cmd.env_clear()
 			.env("PATH", "/usr/bin:/usr/local/bin:/opt/homebrew/bin")
 			.env("HOME", "/tmp")
 			.env("PYTHONDONTWRITEBYTECODE", "1")
 			.env("PYTHONIOENCODING", "utf-8")
+			// Keep the unit's directory, which holds the student's file, off sys.path.
+			.env("PYTHONSAFEPATH", "1")
 			.arg("-c")
 			.arg(HARNESS)
 			.arg(&staged.payload)
@@ -249,18 +254,24 @@ impl PythonExecutor {
 			.stderr(std::process::Stdio::piped())
 			.kill_on_drop(true);
 		#[cfg(unix)]
-		apply_sandbox(&mut cmd, &sandbox);
+		{
+			// Its own process group, so anything it spawns dies with it.
+			cmd.process_group(0);
+			apply_sandbox(&mut cmd, &sandbox_for(deadline_secs));
+		}
 
 		let mut child = match cmd.spawn() {
 			Ok(child) => child,
 			Err(e) => {
 				return Finished {
 					stdout: String::new(),
+					stdout_overflow: false,
 					stderr: String::new(),
 					exit: Exit::Spawn(format!("could not start {}: {e}", self.python_cmd)),
 				};
 			}
 		};
+		let group = child.id();
 
 		if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
 			tokio::spawn(async move {
@@ -268,22 +279,15 @@ impl PythonExecutor {
 				let _ = pipe.write_all(text.as_bytes()).await;
 			});
 		}
-		let mut out = child.stdout.take();
-		let mut err = child.stderr.take();
-		let stdout_task = tokio::spawn(async move {
-			let mut buf = Vec::new();
-			if let Some(pipe) = out.as_mut() {
-				let _ = pipe.read_to_end(&mut buf).await;
-			}
-			buf
-		});
-		let stderr_task = tokio::spawn(async move {
-			let mut buf = Vec::new();
-			if let Some(pipe) = err.as_mut() {
-				let _ = pipe.read_to_end(&mut buf).await;
-			}
-			buf
-		});
+		let stdout = Arc::new(Mutex::new(Sink::head(STDOUT_CAP)));
+		let stderr = Arc::new(Mutex::new(Sink::tail(STDERR_TAIL)));
+		let mut pumps = tokio::task::JoinSet::new();
+		if let Some(pipe) = child.stdout.take() {
+			pumps.spawn(pump(pipe, stdout.clone()));
+		}
+		if let Some(pipe) = child.stderr.take() {
+			pumps.spawn(pump(pipe, stderr.clone()));
+		}
 
 		let exit =
 			match tokio::time::timeout(std::time::Duration::from_secs(deadline_secs), child.wait())
@@ -291,35 +295,114 @@ impl PythonExecutor {
 			{
 				Ok(Ok(status)) => exit_of(status),
 				Ok(Err(e)) => Exit::Spawn(format!("lost the process: {e}")),
-				Err(_) => {
-					let _ = child.kill().await;
-					Exit::Deadline
-				}
+				Err(_) => Exit::Deadline,
 			};
+		// Whatever is left of the group — the harness at its deadline, or a process a student
+		// left behind holding the pipes — goes now.
+		kill_group(group);
+		let _ = child.kill().await;
 
-		// The pipes close with the process; a grandchild holding one gets a moment, no more.
-		let drain = std::time::Duration::from_secs(1);
-		let stdout = tokio::time::timeout(drain, stdout_task)
-			.await
-			.ok()
-			.and_then(Result::ok)
-			.unwrap_or_default();
-		let stderr = tokio::time::timeout(drain, stderr_task)
-			.await
-			.ok()
-			.and_then(Result::ok)
-			.unwrap_or_default();
-		let stderr = String::from_utf8_lossy(&stderr);
-		let tail_from = stderr
-			.char_indices()
-			.rev()
-			.nth(STDERR_TAIL)
-			.map_or(0, |(i, _)| i);
+		// What was read stays read: a pipe held open past this only loses what comes after.
+		let drain = tokio::time::sleep(std::time::Duration::from_secs(1));
+		tokio::pin!(drain);
+		loop {
+			tokio::select! {
+				joined = pumps.join_next() => if joined.is_none() { break },
+				_ = &mut drain => {
+					pumps.abort_all();
+					break;
+				}
+			}
+		}
+		let (stdout, stdout_overflow) = {
+			let sink = stdout.lock().expect("stdout sink poisoned");
+			(
+				String::from_utf8_lossy(&sink.bytes).into_owned(),
+				sink.overflow,
+			)
+		};
+		let stderr = String::from_utf8_lossy(&stderr.lock().expect("stderr sink poisoned").bytes)
+			.into_owned();
 		Finished {
-			stdout: String::from_utf8_lossy(&stdout).into_owned(),
-			stderr: stderr[tail_from..].to_string(),
+			stdout,
+			stdout_overflow,
+			stderr,
 			exit,
 		}
+	}
+}
+
+/// The sandbox for a unit: its CPU limit sits above its deadline, a backstop for one busy
+/// core rather than a second, shorter timeout.
+fn sandbox_for(deadline_secs: u64) -> crate::runner::sandbox::SandboxConfig {
+	crate::runner::sandbox::SandboxConfig {
+		cpu_secs: deadline_secs.saturating_add(1),
+		..Default::default()
+	}
+}
+
+#[cfg(unix)]
+fn kill_group(group: Option<u32>) {
+	if let Some(pid) = group.and_then(|p| libc::pid_t::try_from(p).ok()) {
+		// SAFETY: killpg only sends a signal; ESRCH (the group is already gone) is expected.
+		unsafe {
+			libc::killpg(pid, libc::SIGKILL);
+		}
+	}
+}
+
+#[cfg(not(unix))]
+fn kill_group(_group: Option<u32>) {}
+
+/// A pipe's contents, bounded: the first `cap` bytes, or only the last.
+struct Sink {
+	bytes: Vec<u8>,
+	cap: usize,
+	keep_tail: bool,
+	overflow: bool,
+}
+
+impl Sink {
+	fn head(cap: usize) -> Self {
+		Self {
+			bytes: Vec::new(),
+			cap,
+			keep_tail: false,
+			overflow: false,
+		}
+	}
+
+	fn tail(cap: usize) -> Self {
+		Self {
+			keep_tail: true,
+			..Self::head(cap)
+		}
+	}
+
+	fn push(&mut self, chunk: &[u8]) {
+		if self.keep_tail {
+			self.bytes.extend_from_slice(chunk);
+			if self.bytes.len() > self.cap {
+				let excess = self.bytes.len() - self.cap;
+				self.bytes.drain(..excess);
+			}
+		} else {
+			let room = self.cap.saturating_sub(self.bytes.len());
+			self.bytes
+				.extend_from_slice(&chunk[..room.min(chunk.len())]);
+			self.overflow |= chunk.len() > room;
+		}
+	}
+}
+
+async fn pump<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, sink: Arc<Mutex<Sink>>) {
+	use tokio::io::AsyncReadExt;
+	let mut chunk = vec![0u8; 64 * 1024];
+	while let Ok(n) = pipe.read(&mut chunk).await {
+		if n == 0 {
+			break;
+		}
+		sink.lock().expect("sink poisoned").push(&chunk[..n]);
 	}
 }
 
@@ -348,13 +431,14 @@ impl Executor for PythonExecutor {
 	}
 
 	fn locate<'a>(&self, files: &'a [StudentFile], spec: &TestSpec) -> Option<&'a StudentFile> {
-		// Today's chain rule: [meta] function, else the first function any case names.
-		let hint = spec.meta.function.as_deref().or_else(|| {
-			spec.cases
-				.iter()
-				.chain(spec.scenarios.iter().flat_map(|s| s.steps.iter()))
-				.find_map(|c| c.function.as_deref())
-		});
+		// The hint chain mode used: the first function a case names, else [meta] function.
+		// (Per-case specs named no case function, so this is their hint too.)
+		let hint = spec
+			.cases
+			.iter()
+			.chain(spec.scenarios.iter().flat_map(|s| s.steps.iter()))
+			.find_map(|c| c.function.as_deref())
+			.or(spec.meta.function.as_deref());
 		self.find_student_file_with_hint(files, &spec.meta.file, hint)
 	}
 
@@ -389,7 +473,7 @@ impl Executor for PythonExecutor {
 			));
 		}
 		match records.inspect {
-			Some(exports) => Ok(TeacherRuntime { exports }),
+			Some(runtime) => Ok(runtime),
 			None => Err(match finished.exit {
 				Exit::Deadline => {
 					format!("importing the teacher modules took longer than {timeout_secs}s")
@@ -423,6 +507,7 @@ impl Executor for PythonExecutor {
 					"vars": &*plan.vars,
 					"allowed_imports": plan.allowed_imports,
 					"load_timeout": plan.load_timeout,
+					"subject": plan.subject,
 					"lookup": match plan.subject {
 						Subject::Student => "fuzzy",
 						Subject::Reference => "exact",
@@ -454,7 +539,13 @@ impl Executor for PythonExecutor {
 		let finished = self.run_harness(&staged, plan.deadline_secs(), stdin).await;
 		discard(staged).await;
 
-		let records = crate::runner::records::parse(&finished.stdout, &nonce);
+		let mut records = crate::runner::records::parse(&finished.stdout, &nonce);
+		if finished.stdout_overflow && records.protocol_error.is_none() {
+			records.protocol_error = Some(ProtocolError::Tampered(format!(
+				"more than {} MiB was written to the record channel",
+				STDOUT_CAP >> 20
+			)));
+		}
 		UnitObservation {
 			ready: records.ready,
 			load: records.load,

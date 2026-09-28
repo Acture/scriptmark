@@ -51,6 +51,10 @@ pub async fn resolve_oracle<E: Executor>(
 		};
 		let obs = executor.run(&plan).await;
 		return match obs.steps.first().map(|c| &c.outcome) {
+			// A reference that prints its answer returns None: that is no expectation.
+			Some(Outcome::Returned { type_name, .. }) if type_name == "NoneType" => Err(format!(
+				"reference implementation '{name}' returned None; an answer it prints is not an expectation yet (P-676)"
+			)),
 			Some(Outcome::Returned { value, .. }) => {
 				case.expect = Some(value.clone());
 				Ok(())
@@ -69,7 +73,7 @@ pub async fn resolve_oracle<E: Executor>(
 		};
 	}
 	if let Some(expr) = &oracle.rhai {
-		let engine = rhai::Engine::new();
+		let engine = crate::checker::rhai_checker::engine();
 		let mut scope = rhai::Scope::new();
 		for (name, value) in arg_names.iter().zip(&case.args) {
 			scope.push_dynamic(

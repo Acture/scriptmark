@@ -99,13 +99,14 @@ struct GradeArgs {
 	#[arg(long, default_value = "60,100", value_parser = parse_range)]
 	range: (f64, f64),
 
-	/// Per-test timeout in seconds
-	#[arg(long, default_value = "10")]
+	/// Seconds each call may run: loading the student's file, each setup call, each case
+	/// and step, each checker
+	#[arg(long, default_value = "10", value_parser = clap::value_parser!(u64).range(1..=86_400))]
 	timeout: u64,
 
-	/// Max concurrent student executions
-	#[arg(long)]
-	concurrency: Option<usize>,
+	/// Units (cases or scenarios) running at once; defaults to the number of CPUs
+	#[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+	concurrency: Option<u64>,
 
 	/// Python interpreter command
 	#[arg(long, default_value = "python3")]
@@ -152,13 +153,14 @@ struct RunArgs {
 	#[arg(long)]
 	assignment: Option<PathBuf>,
 
-	/// Per-test timeout in seconds
-	#[arg(long, default_value = "10")]
+	/// Seconds each call may run: loading the student's file, each setup call, each case
+	/// and step, each checker
+	#[arg(long, default_value = "10", value_parser = clap::value_parser!(u64).range(1..=86_400))]
 	timeout: u64,
 
-	/// Max concurrent student executions
-	#[arg(long)]
-	concurrency: Option<usize>,
+	/// Units (cases or scenarios) running at once; defaults to the number of CPUs
+	#[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+	concurrency: Option<u64>,
 
 	/// Python interpreter command
 	#[arg(long, default_value = "python3")]
@@ -601,7 +603,7 @@ async fn run_bundles(
 	specs: Vec<TestSpec>,
 	python: &str,
 	timeout: u64,
-	concurrency: Option<usize>,
+	concurrency: Option<u64>,
 ) -> Result<Vec<StudentReport>> {
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
 	let bundles = prepare(specs, executor.clone(), timeout)
@@ -613,7 +615,7 @@ async fn run_bundles(
 		bundles.iter().map(|b| b.units.len()).sum::<usize>()
 	);
 	let options = RunOptions {
-		concurrency,
+		concurrency: concurrency.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
 		python: executor.python_cmd().to_string(),
 	};
 	Ok(orchestrator::run_all(students, bundles.into(), executor, &options).await)
