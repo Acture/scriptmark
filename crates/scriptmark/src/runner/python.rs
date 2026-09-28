@@ -144,8 +144,9 @@ const HARNESS: &str = include_str!("harness.py");
 /// The tail of stderr kept for diagnosing a crash.
 const STDERR_TAIL: usize = 4096;
 
-/// More than this on the record channel is not the harness writing.
-const STDOUT_CAP: usize = 32 * 1024 * 1024;
+/// More than this on the record channel is not the harness writing: its records carry at
+/// most a 4 MiB value, 64 KiB of stdout and 1 MiB per observed file per call.
+const STDOUT_CAP: usize = 64 * 1024 * 1024;
 
 /// A unit's private directory: the payload beside a working directory the student runs in.
 struct Staged {
@@ -271,7 +272,8 @@ impl PythonExecutor {
 				};
 			}
 		};
-		let group = child.id();
+		// Killed however this future ends: finished, timed out, or dropped by a caller.
+		let _group = GroupGuard::new(child.id());
 
 		if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
 			tokio::spawn(async move {
@@ -299,7 +301,7 @@ impl PythonExecutor {
 			};
 		// Whatever is left of the group — the harness at its deadline, or a process a student
 		// left behind holding the pipes — goes now.
-		kill_group(group);
+		_group.kill();
 		let _ = child.kill().await;
 
 		// What was read stays read: a pipe held open past this only loses what comes after.
@@ -341,18 +343,62 @@ fn sandbox_for(deadline_secs: u64) -> crate::runner::sandbox::SandboxConfig {
 	}
 }
 
-#[cfg(unix)]
-fn kill_group(group: Option<u32>) {
-	if let Some(pid) = group.and_then(|p| libc::pid_t::try_from(p).ok()) {
-		// SAFETY: killpg only sends a signal; ESRCH (the group is already gone) is expected.
-		unsafe {
-			libc::killpg(pid, libc::SIGKILL);
+/// Every unit's process group still alive, so an interrupted grader can take them with it.
+static LIVE_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+/// Kill every unit process group still running. For a grader that is being interrupted:
+/// the units run in their own groups, so the terminal's Ctrl-C does not reach them.
+pub fn kill_all_units() {
+	let groups = std::mem::take(&mut *LIVE_GROUPS.lock().expect("group registry poisoned"));
+	for group in groups {
+		kill_group(group);
+	}
+}
+
+/// A unit's process group: registered while it lives, killed when the guard drops.
+struct GroupGuard(Option<i32>);
+
+impl GroupGuard {
+	fn new(pid: Option<u32>) -> Self {
+		let group = pid.and_then(|p| i32::try_from(p).ok());
+		if let Some(group) = group {
+			LIVE_GROUPS
+				.lock()
+				.expect("group registry poisoned")
+				.push(group);
+		}
+		Self(group)
+	}
+
+	fn kill(&self) {
+		if let Some(group) = self.0 {
+			kill_group(group);
 		}
 	}
 }
 
+impl Drop for GroupGuard {
+	fn drop(&mut self) {
+		if let Some(group) = self.0 {
+			kill_group(group);
+			LIVE_GROUPS
+				.lock()
+				.expect("group registry poisoned")
+				.retain(|g| *g != group);
+		}
+	}
+}
+
+#[cfg(unix)]
+fn kill_group(group: i32) {
+	// SAFETY: killpg only sends a signal; ESRCH (the group is already gone) is expected.
+	unsafe {
+		libc::killpg(group, libc::SIGKILL);
+	}
+}
+
 #[cfg(not(unix))]
-fn kill_group(_group: Option<u32>) {}
+fn kill_group(_group: i32) {}
 
 /// A pipe's contents, bounded: the first `cap` bytes, or only the last.
 struct Sink {
@@ -541,7 +587,7 @@ impl Executor for PythonExecutor {
 
 		let mut records = crate::runner::records::parse(&finished.stdout, &nonce);
 		if finished.stdout_overflow && records.protocol_error.is_none() {
-			records.protocol_error = Some(ProtocolError::Tampered(format!(
+			records.protocol_error = Some(ProtocolError::Flooded(format!(
 				"more than {} MiB was written to the record channel",
 				STDOUT_CAP >> 20
 			)));

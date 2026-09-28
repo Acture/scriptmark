@@ -614,3 +614,117 @@ async fn test_a_reference_runs_as_teacher_code() {
 	plan.steps = vec![function("f", vec![])];
 	assert_eq!(returned(&run(&plan).await.steps[0].outcome), &json!("/"));
 }
+
+#[tokio::test]
+async fn test_a_student_who_rewraps_or_closes_stdout_is_still_heard() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import sys, io\n\nKEEP = []\n\ndef rewrap():\n    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')\n    print('hi')\n\ndef kept():\n    KEEP.append(io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8'))\n    sys.stdout = KEEP[0]\n    print('hi')\n\ndef detach():\n    print('hi', flush=True)\n    sys.stdout.detach()\n\ndef close():\n    print('hi')\n    sys.stdout.close()\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = ["rewrap", "kept", "detach", "close"]
+		.iter()
+		.map(|f| function(f, vec![]))
+		.collect();
+	let obs = run(&plan).await;
+	assert!(obs.fatal.is_none() && obs.done, "{obs:?}");
+	for step in &obs.steps {
+		assert_eq!(step.stdout, "hi\n", "{step:?}");
+	}
+}
+
+#[tokio::test]
+async fn test_serialisation_edges_found_in_rereview() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def neg():\n    return -10 ** 5000\n\ndef zero_float_exit():\n    raise SystemExit(0.0)\n\ndef big_list():\n    return list(range(1_500_000))\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def length(result, expected):\n    return len(result) == 1_500_000\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut big = function("big_list", vec![]);
+	big.check = Some(InProcessCheck {
+		function: "length".into(),
+		expected: None,
+	});
+	plan.steps = vec![
+		function("neg", vec![]),
+		function("zero_float_exit", vec![]),
+		big,
+	];
+	let obs = run(&plan).await;
+	assert!(
+		obs.fatal.is_none() && obs.protocol_error.is_none(),
+		"{obs:?}"
+	);
+	let neg = returned(&obs.steps[0].outcome)["$bigint"]
+		.as_str()
+		.unwrap()
+		.to_string();
+	assert!(
+		neg.starts_with("-0x"),
+		"exact and signed past the digit limit: {neg}"
+	);
+	assert!(matches!(&obs.steps[1].outcome, Outcome::Raised(e) if e.is_a("SystemExit")));
+	assert!(returned(&obs.steps[2].outcome)["$too_large"].is_string());
+	assert_eq!(
+		obs.checks[&2],
+		CheckObservation::Verdict {
+			pass: true,
+			message: String::new()
+		},
+		"a value too large to report is still judged live"
+	);
+}
+
+#[tokio::test]
+async fn test_a_script_leaves_no_bytecode_and_can_import_a_staged_helper() {
+	let dir = tempfile::tempdir().unwrap();
+	let helper = write(
+		dir.path(),
+		"spec/helper.py",
+		"def twice(x):\n    return 2 * x\n",
+	);
+	let student = write(
+		dir.path(),
+		"io.py",
+		"import os\nimport helper\nprint(sorted(os.listdir('.')), helper.twice(4))\n",
+	);
+	let mut plan = unit(&student);
+	plan.allowed_imports = vec!["os".into(), "helper".into()];
+	plan.data_files = vec![(helper, "helper.py".into())];
+	plan.script = Some(ScriptRun {
+		stdin: None,
+		timeout: 5,
+		files: Vec::new(),
+	});
+	let obs = run(&plan).await;
+	assert!(
+		matches!(obs.steps[0].outcome, Outcome::Returned { .. }),
+		"{obs:?}"
+	);
+	assert_eq!(obs.steps[0].stdout, "['helper.py', 'io.py'] 8\n");
+}
+
+#[tokio::test]
+async fn test_equal_constants_in_two_teacher_modules_are_not_duplicates() {
+	let dir = tempfile::tempdir().unwrap();
+	let a = write(dir.path(), "a.py", "TOL = 1e-6\nNAME = 'hello world'\n");
+	let b = write(dir.path(), "b.py", "TOL = 1e-6\nNAME = 'hello world'\n");
+	let spec: scriptmark::models::TestSpec = toml::from_str(&format!(
+		"[meta]\nname = \"t\"\nfile = \"lab.py\"\nlanguage = \"python\"\nimports = [{:?}, {:?}]\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+		a.to_string_lossy(),
+		b.to_string_lossy()
+	))
+	.unwrap();
+	let runtime = PythonExecutor::new().inspect(&spec, 5).await.unwrap();
+	assert!(runtime.duplicates.is_empty(), "{:?}", runtime.duplicates);
+}

@@ -25,7 +25,6 @@ import io  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import os  # noqa: E402
-import py_compile  # noqa: E402
 import runpy  # noqa: E402
 import signal  # noqa: E402
 import time  # noqa: E402
@@ -37,11 +36,18 @@ os.unlink(sys.argv[1])
 _PREFIX = f"\n@@scriptmark:{PAYLOAD['nonce']}@@ "
 # `replace`: a lone surrogate a student printed or returned must not crash the channel.
 _channel = os.fdopen(os.dup(1), "w", encoding="utf-8", errors="replace")
-_real_stdout = sys.stdout
+# Between calls, stdout is a sink: a student's thread printing then must not share a pipe
+# with the records. Only a deliberate write to fd 1 still reaches it.
+_quiet = open(os.devnull, "w", encoding="utf-8")
+sys.stdout = _quiet
 _real_stdin = sys.stdin
+# Student code may import helpers staged beside it — after the stdlib, so a submission
+# named json.py or heapq.py never shadows what the harness or a teacher module imports.
+sys.path.append(os.getcwd())
 STUDENT = PAYLOAD.get("subject", "student") == "student"
 STDOUT_LIMIT = 64 * 1024
 FILE_LIMIT = 1024 * 1024
+VALUE_LIMIT = 4 * 1024 * 1024
 DEPTH_LIMIT = 100
 
 
@@ -145,17 +151,23 @@ class _CappedBytes(io.BytesIO):
 			super().write(bytes(b[:room]))
 		return len(b)
 
+	def close(self):
+		"""A student's wrapper around `sys.stdout.buffer` closes it when it is collected:
+		what was written must survive that."""
+
 
 def capture():
-	"""A stdout that behaves like a real one — `buffer`, `reconfigure`, `print(flush=True)`."""
-	return io.TextIOWrapper(
-		_CappedBytes(), encoding="utf-8", errors="backslashreplace", write_through=True
-	)
+	"""A stdout that behaves like a real one — `buffer`, `reconfigure`, `print(flush=True)` —
+	and the bytes behind it, kept apart so a detached or closed wrapper cannot lose them."""
+	raw = _CappedBytes()
+	return io.TextIOWrapper(raw, encoding="utf-8", errors="backslashreplace", write_through=True), raw
 
 
-def captured(stream):
-	stream.flush()
-	raw = stream.buffer
+def captured(stream, raw):
+	try:
+		stream.flush()
+	except (ValueError, OSError):  # detached or closed by the student
+		pass
 	return raw.getvalue().decode("utf-8", "replace"), raw.truncated
 
 
@@ -170,13 +182,14 @@ def to_json(value, depth=0, seen=None):
 		return value
 	if isinstance(value, int):
 		if -(2**63) <= value < 2**64:
-			return value
-		# Past what the grader's JSON can hold exactly: tag it, so it is never mistaken
-		# for a number and a record always parses.
+			return int(value)
+		# Past what the grader's JSON can hold exactly: tag it, exactly and with its sign, so
+		# it is never mistaken for a number and a record always parses. Decimal where Python
+		# will print it, hexadecimal past its 4300-digit limit.
 		try:
-			return {"$bigint": str(value)}
-		except ValueError:  # more digits than str() will convert
-			return {"$bigint": f"<{value.bit_length()}-bit integer>"}
+			return {"$bigint": int.__repr__(value)}
+		except ValueError:
+			return {"$bigint": hex(value)}
 	if isinstance(value, float):
 		return value if math.isfinite(value) else repr(value)
 	if depth >= DEPTH_LIMIT:
@@ -209,7 +222,7 @@ def text_of(value):
 	"""`str(value)`, or the type's name when the value's own `__str__` fails."""
 	try:
 		text = str(value)
-	except Exception:
+	except BaseException:  # never under a live timer: this is harness bookkeeping
 		return f"<{type(value).__name__}>"
 	return text if isinstance(text, str) else f"<{type(value).__name__}>"
 
@@ -221,8 +234,13 @@ def error_of(exc):
 		"message": text_of(exc),
 	}
 	if isinstance(exc, SystemExit):
-		# The exit status CPython would report: `exit()`, `exit(0)` and `exit(False)` succeed.
-		info["clean"] = exc.code is None or exc.code == 0
+		# The exit status CPython would report: `exit()`, `exit(0)` and `exit(False)` succeed;
+		# any other code, `exit(0.0)` included, fails.
+		try:
+			code = exc.code
+			info["clean"] = code is None or (type(code) in (int, bool) and int(code) == 0)
+		except BaseException:
+			info["clean"] = False
 	return info
 
 
@@ -242,7 +260,7 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 	"""Run one call — its lookup, its body and its serialisation — under its timer and guard.
 
 	Returns (outcome, stdout, truncated, elapsed_ms, live_value)."""
-	out = capture()
+	out, raw = capture()
 	sys.stdout = out
 	sys.stdin = stdin_stream(stdin) if stdin is not False else _real_stdin
 	if guarded:
@@ -255,7 +273,10 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 			signal.setitimer(signal.ITIMER_REAL, timeout, 0.05)
 		try:
 			value = fn()
-			outcome = {"returned": {"value": to_json(value) if serialise else None, "type": type(value).__name__}}
+			if sys.stdout is not out:
+				# The student replaced stdout with their own wrapper: flush it in their scope.
+				sys.stdout.flush()
+			outcome = {"returned": {"value": wire(value) if serialise else None, "type": type(value).__name__}}
 		finally:
 			if _HAS_TIMER:
 				signal.setitimer(signal.ITIMER_REAL, 0)
@@ -271,14 +292,24 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 		outcome = {"raised": error_of(exc)}
 	finally:
 		builtins.__import__ = _original_import
-		sys.stdout = _real_stdout
+		sys.stdout = _quiet
 		sys.stdin = _real_stdin
 	if _fired[0]:
 		# The timer went off even if the code swallowed it with a bare `except:`.
 		outcome = {"timeout": {}}
 	elapsed = int((time.perf_counter() - start) * 1000)
-	stdout, truncated = captured(out)
+	stdout, truncated = captured(out, raw)
 	return outcome, stdout, truncated, elapsed, value
+
+
+def wire(value):
+	"""The value as a record carries it. One too large to report is replaced by its size:
+	the call still returned, and a function checker still judges the live value."""
+	value = to_json(value)
+	size = len(json.dumps(value, ensure_ascii=False))
+	if size > VALUE_LIMIT:
+		return {"$too_large": f"{size} bytes of JSON"}
+	return value
 
 
 # --- Teacher modules -------------------------------------------------------------------
@@ -325,13 +356,23 @@ def load_teacher_modules():
 			sys.modules[spec.name] = module
 			spec.loader.exec_module(module)
 			for name, value in exports_of(module).items():
-				if name in exports and exports[name] is not value:
+				if name in exports and not _same(exports[name], value):
 					duplicates[name] = [owner[name], path]
 				exports[name] = value
 				owner.setdefault(name, path)
 	finally:
 		del builtins.checker
 	return exports, duplicates
+
+
+def _same(a, b):
+	"""One object, or two equal ones: two modules that both define `TOL = 1e-6` agree."""
+	if a is b:
+		return True
+	try:
+		return bool(a == b)
+	except BaseException:
+		return False
 
 
 def params_of(fn):
@@ -523,14 +564,23 @@ def run_calls(phase, calls, student):
 	return True
 
 
+def compiles(path):
+	"""Compile the student's file in memory — writing no __pycache__ beside it — and record a
+	syntax error as the load call's outcome."""
+	try:
+		with open(path, "rb") as fh:
+			compile(fh.read(), path, "exec")
+		return True
+	except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+		emit({"kind": "call", "phase": "load", "index": 0,
+			"outcome": {"raised": {"type": "SyntaxError", "types": ["SyntaxError"], "message": text_of(exc)}},
+			"stdout": "", "stdout_truncated": False, "elapsed_ms": 0})
+		return False
+
+
 def load_student():
 	path = PAYLOAD["student"]
-	try:
-		py_compile.compile(path, doraise=True)
-	except py_compile.PyCompileError as exc:
-		emit({"kind": "call", "phase": "load", "index": 0,
-			"outcome": {"raised": {"type": "SyntaxError", "types": ["SyntaxError"], "message": str(exc)}},
-			"stdout": "", "stdout_truncated": False, "elapsed_ms": 0})
+	if not compiles(path):
 		return None
 	module_holder = []
 
@@ -562,12 +612,7 @@ def load_student():
 
 def run_script():
 	script, path = PAYLOAD["script"], PAYLOAD["student"]
-	try:
-		py_compile.compile(path, doraise=True)
-	except py_compile.PyCompileError as exc:
-		emit({"kind": "call", "phase": "load", "index": 0,
-			"outcome": {"raised": {"type": "SyntaxError", "types": ["SyntaxError"], "message": str(exc)}},
-			"stdout": "", "stdout_truncated": False, "elapsed_ms": 0})
+	if not compiles(path):
 		return
 	init = {STUDENT_MARK: True, **PAYLOAD.get("vars", {})}
 	sys.argv = [path]  # as `python student.py` would see it, not the harness's payload

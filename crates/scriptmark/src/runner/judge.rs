@@ -353,23 +353,35 @@ fn describe(outcome: &Outcome, timeout: u64) -> String {
 	}
 }
 
-/// The harness itself broke — a crash of its own, or a record it could not have meant —
-/// after which nothing it would have reported can be known.
+/// The record stream stopped meaning anything part-way: the harness crashed, wrote a
+/// record it could not have meant, or somebody flooded the channel. What was recorded
+/// before that stands; nothing after it can be known.
 fn stream_break(obs: &UnitObservation) -> Option<Blanket> {
-	let message = match (&obs.fatal, &obs.protocol_error) {
-		(Some(fatal), _) if fatal.stage != "teacher_import" => format!(
-			"the harness failed: {}: {}",
-			fatal.error.type_name, fatal.error.message
+	let (fault, cause, message) = match (&obs.fatal, &obs.protocol_error) {
+		(_, Some(ProtocolError::Flooded(problem))) => (
+			Fault::Student,
+			Cause::Protocol,
+			format!("the unit's output could not be read past this point: {problem}"),
 		),
-		(_, Some(ProtocolError::Unreadable(problem))) => {
-			format!("the harness wrote a record it could not have meant: {problem}")
-		}
+		(Some(fatal), _) if fatal.stage != "teacher_import" => (
+			Fault::Environment,
+			Cause::Harness,
+			format!(
+				"the harness failed: {}: {}",
+				fatal.error.type_name, fatal.error.message
+			),
+		),
+		(_, Some(ProtocolError::Unreadable(problem))) => (
+			Fault::Environment,
+			Cause::Harness,
+			format!("the harness wrote a record it could not have meant: {problem}"),
+		),
 		_ => return None,
 	};
 	Some(Blanket {
 		status: TestStatus::Error,
-		fault: Fault::Environment,
-		cause: Cause::Harness,
+		fault,
+		cause,
 		message,
 	})
 }
@@ -465,12 +477,11 @@ fn judge_call(
 		},
 		judged: false,
 	};
-	// A script is judged on what it printed; a truncated capture cannot be judged.
-	if script && record.stdout_truncated && (case.expected_stdout.is_some() || case.check.is_some())
-	{
-		return verdict
-			.wrong("printed more than the 64 KiB kept, so its output cannot be compared".into());
-	}
+	// A script is judged on what it printed, and a truncated capture cannot be judged — but
+	// only once the script finished: one that timed out or crashed is judged on that.
+	let output_unjudgeable = script
+		&& record.stdout_truncated
+		&& (case.expected_stdout.is_some() || case.check.is_some());
 	// 1. The outcome, against `expect_error`.
 	match &record.outcome {
 		Outcome::Missing { message } => {
@@ -511,6 +522,12 @@ fn judge_call(
 				Some(want) if e.is_a(want) => {
 					verdict.judged = true;
 					// A script that exits with the expected error still owes its output.
+					if output_unjudgeable {
+						return verdict.wrong(
+							"printed more than the 64 KiB kept, so its output cannot be compared"
+								.into(),
+						);
+					}
 					if script
 						&& let Some(failed) = check_value(
 							&mut verdict,
@@ -548,6 +565,11 @@ fn judge_call(
 				return verdict.wrong(format!("expected {want}, but the call returned {value}"));
 			}
 			// 2. The value check. In script mode the value is what it printed.
+			if output_unjudgeable {
+				return verdict.wrong(
+					"printed more than the 64 KiB kept, so its output cannot be compared".into(),
+				);
+			}
 			let (value, expected) = if script {
 				verdict.result.actual = Some(record.stdout.clone());
 				(
@@ -1343,5 +1365,53 @@ mod tests {
 		let obs = UnitObservation::not_started(Exit::Spawn("no python".into()));
 		let r = one(&case("expect = 1"), &plan(1), &obs);
 		assert_eq!(r.input.unwrap().target.as_deref(), Some("f"));
+	}
+
+	#[test]
+	fn test_a_runaway_script_is_a_timeout_not_a_wrong_answer() {
+		let mut flood = record(0, Outcome::Timeout {});
+		flood.stdout = "x".repeat(10);
+		flood.stdout_truncated = true;
+		assert_eq!(
+			verdict(&one(
+				&case("script = true\nexpected_stdout = \"x\""),
+				&script_plan(),
+				&finished(vec![flood])
+			)),
+			(
+				TestStatus::Timeout,
+				Some(Fault::Student),
+				Some(Cause::Timeout)
+			)
+		);
+	}
+
+	#[test]
+	fn test_a_flooded_channel_keeps_what_arrived() {
+		let p = plan(2);
+		let c = case("expect = 1");
+		let scored = [
+			Scored {
+				name: "a",
+				case: &c,
+			},
+			Scored {
+				name: "b",
+				case: &c,
+			},
+		];
+		let mut obs = finished(vec![record(0, returned(json!(1)))]);
+		obs.done = false;
+		obs.protocol_error = Some(ProtocolError::Flooded("64 MiB".into()));
+		let r = judge(&p, &scored, &obs, "python3");
+		assert_eq!(r[0].status, TestStatus::Passed);
+		assert_eq!(
+			verdict(&r[1]),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Protocol)
+			)
+		);
 	}
 }

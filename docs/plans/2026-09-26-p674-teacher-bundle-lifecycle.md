@@ -715,3 +715,35 @@ missing path is `FileNotFoundError`.
   teacher's `checker` error, by design (D9). Attributing it by traceback frame is a
   follow-up.
 - Reference oracles still resolve one at a time; making them concurrent belongs to P-676.
+
+### Re-review of the fix commit
+
+A narrow two-lens re-review of `972f42e`, each lens refuted, found ten more issues.
+They are all fixed and tested:
+
+- **A student who re-wraps, detaches or closes `sys.stdout` crashed the harness.**
+  Re-wrapping is the usual UTF-8 idiom. The capture's bytes are now held apart from the
+  wrapper, cannot be closed, and are flushed in the student's own scope.
+- **Past 4300 digits, `$bigint` dropped the sign and the digits.** It is now exact
+  decimal, or `hex()` beyond Python's digit limit.
+- **`error_of` still ran student code.** It called an exit code's `__eq__` and a
+  `__str__` that raises `BaseException`. `exit(0.0)` also counted as clean.
+- **The syntax check wrote `__pycache__`** into the script's directory. It now compiles
+  in memory.
+- **Equal constants in two teacher modules counted as duplicates.** They are now
+  compared by equality, not identity.
+- **The `sys.path` scrub stopped students importing staged helper modules.** The work
+  directory now goes back on the path, after the standard library.
+- **A legitimately large return value was taken for tampering.** A value over 4 MiB is
+  now `{"$too_large": …}`, still returned, and still judged live by a function checker.
+  A flooded channel keeps the records that arrived and blames the student for the rest.
+- **In script mode, truncated output hid a timeout or crash.** The truncation check now
+  applies only once the script has finished.
+- **A student thread printing between calls could garble a record,** and the
+  environment would be blamed. Between calls `sys.stdout` is now `/dev/null`, so only a
+  deliberate write to fd 1 can reach the record pipe. A dedicated record descriptor
+  would close that last gap.
+- **Ctrl-C no longer reached the units** once they had their own process groups. The CLI
+  now kills every live unit group on interrupt, and a guard kills a unit's group if its
+  run is dropped.
+

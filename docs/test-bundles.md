@@ -100,8 +100,10 @@ A case must declare at least one, and passes only if every one it declares holds
 
 What a returned value looks like to `expect`: tuples are lists, sets are lists in sorted
 order (mixed types fall back to a stable order), dict keys are strings, and an integer too
-large for a 64-bit number is `{ "$bigint" = "123…" }` — judge those with a function
-checker, which gets the real value.
+large for a 64-bit number is `{ "$bigint" = "123…" }` — its exact decimal digits, or
+`hex()` past Python's 4300-digit limit. A value whose JSON would exceed 4 MiB is reported
+as `{ "$too_large" = "… bytes of JSON" }`. Judge either with a function checker, which
+always gets the real value.
 
 ## Checkers
 
@@ -154,7 +156,12 @@ working directory nor the import allowlist is a security boundary: an absolute p
 Teacher modules are loaded from the bundle, not the working directory. Find your own
 files with `Path(__file__).parent`, not a relative path; a module may import a sibling
 module from its own directory. A reference implementation runs as teacher code: the
-import allowlist does not apply to it.
+import allowlist does not apply to it. Student code can import a `.py` file you staged
+through `data_files`, if its name is in `allowed_imports`; the standard library always
+wins over a file of the same name.
+
+What a student prints outside any call — from a thread they left running, say — is
+discarded. Only output during a call is evidence.
 
 ## Timeouts
 

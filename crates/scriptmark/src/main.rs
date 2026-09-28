@@ -618,7 +618,15 @@ async fn run_bundles(
 		concurrency: concurrency.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
 		python: executor.python_cmd().to_string(),
 	};
-	Ok(orchestrator::run_all(students, bundles.into(), executor, &options).await)
+	// Units run in their own process groups, so the terminal's Ctrl-C reaches only the
+	// grader: take them down with it rather than leave them running to their timeouts.
+	tokio::select! {
+		reports = orchestrator::run_all(students, bundles.into(), executor, &options) => Ok(reports),
+		_ = tokio::signal::ctrl_c() => {
+			scriptmark::runner::python::kill_all_units();
+			anyhow::bail!("interrupted: every running unit was stopped")
+		}
+	}
 }
 
 async fn cmd_grade(args: GradeArgs) -> Result<()> {
