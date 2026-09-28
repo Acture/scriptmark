@@ -96,7 +96,11 @@ the teacher's when it called a `teacher` function.
 | `expect_files = { "out.txt" = "..." }` | the call left this file with this content |
 | `check = ...` | the checker says yes |
 
-A case must declare at least one, and passes only if every one it declares holds.
+A case must declare at least one, and passes only if every one it declares holds. A
+checker that compares against `expect` decides how it holds: `approx`, `set_eq`,
+`contains`, `text`, a Rhai check that uses `expected`, and every Python or function
+checker, which always receive it. Beside any other check — `sorted`, or a Rhai check that
+never mentions `expected` — the value must also equal `expect` exactly.
 
 What a returned value looks like to `expect`: tuples are lists, sets are lists in sorted
 order (mixed types fall back to a stable order), dict keys are strings, and an integer too
@@ -110,7 +114,7 @@ always gets the real value.
 
 | Spelling | |
 | -- | -- |
-| `check = "approx"` (with `expect`) | `exact`, `approx`, `set_eq`, `contains`, `text` compare against `expect`; `sorted` checks order only and takes no `expect` |
+| `check = "approx"` (with `expect`) | `exact`, `approx`, `set_eq`, `contains`, `text` compare against `expect`; `sorted` checks order; beside `expect`, the value must also equal it |
 | `check = { builtin = "approx", tolerance = 0.01 }` | |
 | `check = { rhai = "result != () && result.len() > 2" }` | `result`, `expected`, `context.stdout`, `context.files` |
 | `check = { python = "verifiers/check.py" }` | reads `{result, expected, context}` as JSON on stdin; prints `{"pass": ..., "message": ...}` |
@@ -193,7 +197,8 @@ Every case that does not pass says whose it is (`fault`) and why (`cause`):
 | `error` | teacher | `checker` / `teacher_import` / `nothing_to_judge` | the bundle's fault |
 | `error` | environment | `spawn` / `harness` | the machine's, or the grader's own, fault |
 
-An error or checker message longer than 64 KiB is cut, and says how long it was.
+An error message, or a function checker's message, longer than 65,536 characters is cut,
+and says how long it was.
 
 ## What grading does not defend against
 
@@ -228,8 +233,9 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 - a checker function that does not exist or asks for a name that means nothing;
 - a Rhai check that cannot judge `None`;
 - a function checker on a script case; `check` together with `oracle.check`;
-- `sorted` together with the `expect`, `expected_stdout` or oracle it would ignore;
-  `oracle.check` together with `expect` or `expect_error`;
+- `sorted` on a script case, whose value is text; `sorted` beside an `expect` that is
+  not itself sorted, which no value could pass; `oracle.check` together with
+  `expect_error`;
 - an `expect` of the wrong shape for its checker (`approx` needs a number, `set_eq` an
   array, `text` a string);
 - `inf` or `nan` in `args`; `expected_stdout` longer than the 64 KiB of output kept;
@@ -248,10 +254,9 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 | `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module |
 | stdin → stdout cases with no function | add `script = true` |
 | a Rhai check like `result.len() > 0` | `result != () && result.len() > 0` |
-| `check = "sorted"` beside `expect = [...]` | drop `check`: `expect` alone already requires that exact list; or drop `expect` if any sorted list will do |
 
 Results can change on regrading. Students who printed inside a graded function, or who
 imported an allowed module such as `random` or `csv`, used to fail every case and now
 pass. Cases that a name-bound `@checker` used to judge silently are now judged by what
-they declare. A case that paired `sorted` with `expect` used to pass any sorted list; it
-is now refused until one of the two goes.
+they declare. A case that paired `sorted` with `expect` used to pass any sorted list; the
+value must now equal `expect` too.

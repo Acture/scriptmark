@@ -4,7 +4,18 @@ pub mod rhai_checker;
 
 use serde::{Deserialize, Serialize};
 
-use crate::models::Fault;
+use crate::models::{Check, Fault};
+
+/// Whether `check` itself compares against the expectation it is handed. When it does not,
+/// a declared expectation is compared exactly as well, so every one the case declares holds.
+/// Python and function checkers always receive it, and are taken to use it.
+pub fn reads_expectation(check: &Check) -> bool {
+	match check {
+		Check::Builtin { .. } => check.needs_expectation(),
+		Check::Rhai(expr) => rhai_checker::refers_to(expr, "expected"),
+		Check::Python(_) | Check::Function(_) => true,
+	}
+}
 
 /// Input to a checker.
 #[derive(Debug, Clone, Serialize, Deserialize)]

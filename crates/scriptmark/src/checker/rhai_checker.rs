@@ -18,6 +18,31 @@ impl RhaiChecker {
 	}
 }
 
+/// The names a Rhai check sees.
+pub const VARIABLES: [&str; 3] = ["result", "expected", "context"];
+
+/// Compile a Rhai expression with strict variables, so an undefined name is refused now
+/// rather than failing on every student later.
+pub fn compile(expr: &str, names: &[&str]) -> Result<(), String> {
+	let mut engine = engine();
+	engine.set_strict_variables(true);
+	let mut scope = Scope::new();
+	for name in names {
+		scope.push_dynamic(*name, Dynamic::UNIT);
+	}
+	engine
+		.compile_with_scope(&scope, expr)
+		.map(|_| ())
+		.map_err(|e| e.to_string())
+}
+
+/// Whether a check's expression refers to `name`: with every other variable in scope it
+/// no longer compiles.
+pub fn refers_to(expr: &str, name: &str) -> bool {
+	let others: Vec<&str> = VARIABLES.into_iter().filter(|v| *v != name).collect();
+	compile(expr, &VARIABLES).is_ok() && compile(expr, &others).is_err()
+}
+
 /// The one Rhai engine configuration: bounded, so a teacher expression that loops cannot
 /// hang a run — it fails, and a check that cannot finish is the teacher's to fix.
 pub fn engine() -> Engine {
@@ -124,6 +149,21 @@ mod tests {
 			.unwrap();
 		assert!(!output.pass);
 		assert!(output.message.contains("is false"));
+	}
+
+	#[test]
+	fn test_refers_to_sees_a_variable_only_where_it_is_used() {
+		assert!(refers_to("result == expected", "expected"));
+		assert!(refers_to("let e = expected; result == e", "expected"));
+		assert!(!refers_to("result.len() > 2", "expected"));
+		assert!(
+			!refers_to("\"expected\" == result", "expected"),
+			"a string is not the variable"
+		);
+		assert!(
+			!refers_to("result ==", "expected"),
+			"what does not compile refers to nothing"
+		);
 	}
 
 	#[test]

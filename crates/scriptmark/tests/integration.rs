@@ -182,6 +182,45 @@ async fn test_a_fixed_bundle_grades_without_generator_oracle_or_seed() {
 /// student's delivery outcome and Canvas id reach `StudentReport`, and it is what makes
 /// "a non-submitter is never scored zero" work end to end.
 #[tokio::test]
+async fn test_a_check_that_ignores_expect_still_has_expect_hold() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "lists"
+file = "lab.py"
+function = "f"
+language = "python"
+
+[[cases]]
+name = "sorted"
+check = "sorted"
+expect = [1, 2, 3]
+
+[[cases]]
+name = "length"
+check = { rhai = "result != () && result.len() == 3" }
+expect = [1, 2, 3]
+"#,
+	);
+	let students = [
+		bench.student("alice", "lab.py", "def f():\n    return [1, 2, 3]\n"),
+		// Sorted, and three long, but not what expect says.
+		bench.student("bob", "lab.py", "def f():\n    return [0, 5, 9]\n"),
+	];
+	let results = grade(vec![spec], &students).await;
+	assert_eq!(by_id(&results, "alice").total_passed(), 2);
+	let bob = by_id(&results, "bob");
+	for name in ["sorted", "length"] {
+		assert_eq!(
+			verdict(case(bob, name)),
+			(TestStatus::Failed, Some(Fault::Student), Some(Cause::Wrong)),
+			"{name}"
+		);
+	}
+}
+
+#[tokio::test]
 async fn test_a_concurrency_a_semaphore_cannot_hold_still_runs() {
 	let bench = Bench::new();
 	let students = [bench.student("alice", "lab5.py", ALICE)];

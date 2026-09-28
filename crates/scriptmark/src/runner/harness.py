@@ -155,6 +155,11 @@ class _CappedBytes(io.BytesIO):
 			super().write(bytes(b[:room]))
 		return len(b)
 
+	def writelines(self, lines):
+		# The C method would write past the limit without calling `write`.
+		for line in lines:
+			self.write(line)
+
 	def close(self):
 		"""A student's wrapper around `sys.stdout.buffer` closes it when it is collected:
 		what was written must survive that."""
@@ -172,7 +177,9 @@ def captured(stream, raw):
 		stream.flush()
 	except (ValueError, OSError):  # detached or closed by the student
 		pass
-	return raw.getvalue().decode("utf-8", "replace"), raw.truncated
+	# `io.BytesIO.write(buffer, b)` still reaches past `write`: cut here too.
+	data = raw.getvalue()
+	return data[:STDOUT_LIMIT].decode("utf-8", "replace"), raw.truncated or len(data) > STDOUT_LIMIT
 
 
 # --- The one value serialiser ----------------------------------------------------------
@@ -313,11 +320,18 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 	return outcome, stdout, truncated, elapsed, value
 
 
+def utf8_size(text):
+	"""The bytes `text` takes on the channel, counted a slice at a time rather than through
+	a second full copy of a value that may already fill most of the memory limit."""
+	step = 1 << 20
+	return sum(len(text[i : i + step].encode("utf-8", "replace")) for i in range(0, len(text), step))
+
+
 def wire(value):
 	"""The value as a record carries it. One too large to report is replaced by its size:
 	the call still returned, and a function checker still judges the live value."""
 	value = to_json(value)
-	size = len(json.dumps(value, ensure_ascii=False).encode("utf-8", "replace"))
+	size = utf8_size(json.dumps(value, ensure_ascii=False))
 	if size > VALUE_LIMIT:
 		return {"$too_large": f"{size} bytes of JSON"}
 	return value

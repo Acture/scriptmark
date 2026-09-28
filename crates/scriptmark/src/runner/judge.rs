@@ -702,6 +702,13 @@ fn check_value(
 		}
 		Some(kind) => {
 			verdict.judged = true;
+			// A check that does not compare against the expectation leaves it to hold exactly.
+			if !crate::checker::reads_expectation(&kind)
+				&& let Some(want) = &expected
+				&& !same(value, want)
+			{
+				return Some(take(verdict).wrong(format!("expected {want}, got {value}")));
+			}
 			let checker: Box<dyn Checker> = match &kind {
 				Check::Builtin { name, tolerance } => {
 					resolve_builtin(name, *tolerance).expect("validated at load")

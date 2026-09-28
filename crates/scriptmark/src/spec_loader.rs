@@ -3,6 +3,8 @@ use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::checker::rhai_checker;
+
 use crate::models::{
 	AssignmentConfig, Check, CourseConfig, Scenario, SetupStep, Target, TestCase, TestSpec,
 };
@@ -537,25 +539,50 @@ impl Validator<'_> {
 		}
 	}
 
+	/// A property built-in beside `expect` must hold of `expect` too: the value has to equal
+	/// it and pass the check, so an `expect` that fails the check fails every student.
+	fn both_can_hold(&mut self, check: &Check, expect: Option<&Value>, at: &str) {
+		let (Check::Builtin { name, tolerance }, Some(expect)) = (check, expect) else {
+			return;
+		};
+		if check.needs_expectation() {
+			return;
+		}
+		let checker = crate::checker::builtin::resolve_builtin(name, *tolerance)
+			.expect("a resolved built-in exists");
+		let input = crate::checker::CheckInput {
+			result: expect.clone(),
+			expected: Value::Null,
+			context: Value::Null,
+		};
+		if let Ok(out) = checker.check(&input)
+			&& !out.pass
+		{
+			self.problem(
+				at,
+				format!(
+					"expect fails the {name} check itself, so no value can pass both: {}",
+					out.message
+				),
+			);
+		}
+	}
+
 	fn check(&mut self, check: &Check, case: &TestCase, oracle_expects: bool, at: &str) {
-		// A built-in that judges a property never reads the expectation it is handed, so
-		// the case would pass without keeping it.
-		if let Check::Builtin { name, .. } = check
+		// A property built-in judges a list; a script's value is the text it printed.
+		if case.script
+			&& let Check::Builtin { name, .. } = check
 			&& !check.needs_expectation()
 		{
-			let ignored = if case.script {
-				case.expected_stdout.is_some().then_some("expected_stdout")
-			} else if case.expect.is_some() {
-				Some("expect")
-			} else {
-				oracle_expects.then_some("the oracle's expectation")
-			};
-			if let Some(ignored) = ignored {
-				self.problem(
-					at,
-					format!("the {name} checker ignores {ignored}; drop one of them"),
-				);
-			}
+			self.problem(
+				at,
+				format!(
+					"the {name} checker judges a list, but a script's value is its printed text"
+				),
+			);
+		}
+		if !case.script {
+			self.both_can_hold(check, case.expect.as_ref(), at);
 		}
 		if check.needs_expectation() {
 			let has = if case.script {
@@ -596,7 +623,7 @@ impl Validator<'_> {
 		}
 		match check {
 			Check::Rhai(expr) => {
-				if let Err(e) = compile_rhai(expr, &["result", "expected", "context"]) {
+				if let Err(e) = rhai_checker::compile(expr, &rhai_checker::VARIABLES) {
 					self.problem(at, format!("rhai check does not compile: {e}"));
 				}
 			}
@@ -647,12 +674,6 @@ impl Validator<'_> {
 				"check conflicts with oracle.check, which would replace it",
 			);
 		}
-		if oracle.check.is_some() && case.expect.is_some() {
-			self.problem(
-				at,
-				"expect is ignored: oracle.check judges a property, not a value",
-			);
-		}
 		if oracle.check.is_some() && case.expect_error.is_some() {
 			self.problem(
 				at,
@@ -680,12 +701,12 @@ impl Validator<'_> {
 						"oracle.check '{name}' compares against an expectation, which a check oracle does not provide"
 					),
 				),
-				Ok(_) => {}
+				Ok(check) => self.both_can_hold(&check, case.expect.as_ref(), at),
 			}
 		}
 		if let Some(expr) = &oracle.rhai {
 			let names: Vec<&str> = param.args.keys().map(String::as_str).collect();
-			if let Err(e) = compile_rhai(expr, &names) {
+			if let Err(e) = rhai_checker::compile(expr, &names) {
 				self.problem(at, format!("rhai oracle does not compile: {e}"));
 			}
 		}
@@ -698,21 +719,6 @@ impl Validator<'_> {
 			);
 		}
 	}
-}
-
-/// Compile a Rhai expression with strict variables, so an undefined name is refused now
-/// rather than failing on every student later.
-pub fn compile_rhai(expr: &str, names: &[&str]) -> Result<(), String> {
-	let mut engine = crate::checker::rhai_checker::engine();
-	engine.set_strict_variables(true);
-	let mut scope = rhai::Scope::new();
-	for name in names {
-		scope.push_dynamic(*name, rhai::Dynamic::UNIT);
-	}
-	engine
-		.compile_with_scope(&scope, expr)
-		.map(|_| ())
-		.map_err(|e| e.to_string())
 }
 
 /// A relative path that cannot climb out of the directory it is joined to.
@@ -937,11 +943,15 @@ reference = "solutions/lab5.py"
 	}
 
 	#[test]
-	fn test_a_property_checker_is_refused_only_an_expectation_it_would_ignore() {
+	fn test_a_property_checker_beside_an_expectation_both_can_hold() {
 		for body in [
 			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n",
+			// Both are judged: the value must equal expect and be sorted.
+			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpect = [1, 2, 3]\n",
+			"[[cases]]\nname = \"x\"\ncheck = { rhai = \"result.len() == 3\" }\nexpect = [1, 2, 3]\n",
 			// In call mode stdout is judged on its own, beside the checker.
 			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpected_stdout = \"hi\\n\"\n",
+			"[[cases]]\nname = \"x\"\nexpect = [1]\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 		] {
 			assert_eq!(problems(body), Vec::<String>::new(), "{body}");
 		}
@@ -1060,20 +1070,16 @@ expect = 150
 			"check and expect_error contradict",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpect = [1, 2, 3]\n",
-			"the sorted checker ignores expect",
+			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpect = [3, 1, 2]\n",
+			"expect fails the sorted check itself",
 		);
 		refused(
 			"[[cases]]\nname = \"x\"\nscript = true\ncheck = \"sorted\"\nexpected_stdout = \"1\\n\"\n",
-			"the sorted checker ignores expected_stdout",
+			"the sorted checker judges a list, but a script's value is its printed text",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\ncheck = { builtin = \"sorted\" }\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\nrhai = \"[1]\"\n",
-			"the sorted checker ignores the oracle's expectation",
-		);
-		refused(
-			"[[cases]]\nname = \"x\"\nexpect = [1]\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
-			"expect is ignored: oracle.check",
+			"[[cases]]\nname = \"x\"\nexpect = [2, 1]\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"expect fails the sorted check itself",
 		);
 		refused(
 			"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",

@@ -848,4 +848,29 @@ async fn test_a_long_scenario_of_large_legal_values_is_not_a_flood() {
 	assert!(obs.done, "{obs:?}");
 	assert_eq!(obs.steps.len(), 7);
 	assert_eq!(obs.checks.len(), 7);
+	for step in &obs.steps {
+		// The value itself arrived, at the limit rather than replaced by its size.
+		assert_eq!(
+			returned(&step.outcome).as_str().map(str::len),
+			Some(4 * 1024 * 1024 - 2)
+		);
+	}
+}
+
+#[tokio::test]
+async fn test_every_way_of_writing_stdout_is_held_to_its_limit() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import io, sys\n\ndef lines():\n    sys.stdout.buffer.writelines([b'x' * 200_000])\n    return 1\n\ndef direct():\n    io.BytesIO.write(sys.stdout.buffer, b'y' * 200_000)\n    return 2\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("lines", vec![]), function("direct", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
+	for step in &obs.steps {
+		assert_eq!(step.stdout.len(), 64 * 1024);
+		assert!(step.stdout_truncated);
+	}
 }

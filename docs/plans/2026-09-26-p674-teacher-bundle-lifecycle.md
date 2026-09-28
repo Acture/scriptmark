@@ -779,11 +779,14 @@ design, now stated where teachers read it.
   are cut at 64 KiB, so each call really is bounded. A test runs seven such calls,
   75 MiB in all; it floods under a fixed cap.
 - **`expect` beside `check = "sorted"` was silently ignored,** so the case passed any
-  sorted list. `sorted` beside the expectation it would ignore (`expect`, a script's
-  `expected_stdout`, an oracle's) is refused, as is `oracle.check` beside `expect`.
-  Checking this found `oracle.check` beside `expect_error`, whose check never ran; it
-  is refused too. Two real specs, three cases, pair `sorted` with `expect` and need the
-  migration note.
+  sorted list. The first fix refused the pair. The owner overruled it: the documented
+  rule is that every declared expectation holds, and it can. A check that does not
+  compare against the expectation (`sorted`, a Rhai check that never mentions
+  `expected`) now leaves it to hold exactly as well, so the value must equal `expect`
+  and pass the check. Only pairs that can never both hold are refused: `sorted` on a
+  script's text, `sorted` beside an `expect` that is not itself sorted, and
+  `oracle.check` beside `expect_error`, whose check never ran. The three real cases
+  that pair `sorted` with `expect` keep loading, and now mean what they say.
 - **`RunOptions::concurrency` of 0 hung `run_all`,** and one past the semaphore's
   maximum panicked. It is clamped to what a semaphore can hold; 0 runs one unit at a
   time.
@@ -794,3 +797,26 @@ design, now stated where teachers read it.
   Closing it takes OS-level isolation, which is not P-674's. `docs/test-bundles.md`
   now says plainly what grading does not defend against, and the README no longer calls
   the runner a sandbox.
+
+### Re-review of the CodeRabbit fixes, and the owner's corrections
+
+A two-lens re-review of `198ec6b`, each lens refuted, left nine minor findings standing.
+
+- **`sys.stdout.buffer.writelines` and `io.BytesIO.write` wrote past the 64 KiB stdout
+  limit,** which only `write` enforced, so a buggy loop could flood the channel. Both
+  are now held to it, and the capture is cut again when it is read. A test writes
+  through each.
+- **Counting a value's bytes made a full UTF-8 copy,** which could exhaust the memory
+  limit on a value a function checker should have judged live. It is counted a slice at
+  a time.
+- **The flood test did not check that the 4 MiB values arrived.** It does now.
+- **The docs overstated the message limit.** It is 65,536 characters, for error and
+  function checker messages; a Python-script checker's message is not the harness's.
+- **Teacher and student imports still share one namespace.** With the work directory
+  after the teacher modules' directories, a teacher helper named like a staged student
+  helper now shadows it for the student, and a teacher module no longer sees `.py` files
+  staged in the work directory (never documented). The owner's call: teacher and student
+  code belong in separate namespaces. That, the record channel read as a stream with a
+  per-record bound instead of a guessed total, and isolating the student in a sandbox are
+  designed together, since a student process of its own separates the namespaces by
+  construction.
