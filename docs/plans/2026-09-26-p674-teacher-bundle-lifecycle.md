@@ -445,44 +445,53 @@ stdout and files, all on this interface.
 
 ### D12 — The interface types
 
+As built (`runner/executor.rs`, `runner/prepare.rs`, `runner/orchestrator.rs`):
+
 ```rust
 pub trait Executor: Send + Sync + 'static {
 	fn language(&self) -> &str;
 	/// Pick the student's file for a spec. P-673 owns the rule.
 	fn locate<'a>(&self, files: &'a [StudentFile], spec: &TestSpec) -> Option<&'a StudentFile>;
 	/// Import teacher modules in a unit-shaped sandbox and report what they export.
-	fn inspect(&self, spec: &TestSpec) -> impl Future<Output = Result<TeacherRuntime, PrepareError>> + Send;
+	fn inspect(&self, spec: &TestSpec, timeout_secs: u64) -> impl Future<Output = Result<TeacherRuntime, String>> + Send;
 	fn run(&self, plan: &UnitPlan) -> impl Future<Output = UnitObservation> + Send;
 }
 
 pub struct UnitPlan {
-	pub subject: Subject,                 // Student | Reference — decides fault ownership and lookup
+	pub subject: Subject,                 // Student | Reference — decides lookup (fuzzy | exact)
 	pub file: PathBuf,                    // copied into the unit's cwd before running
-	pub script: Option<ScriptRun>,        // stdin + timeout; None = call mode
-	pub imports: Vec<PathBuf>,
+	pub script: Option<ScriptRun>,        // {stdin, timeout, files}; None = call mode
+	pub imports: Vec<String>,             // absolute teacher module paths
 	pub vars: Arc<BTreeMap<String, Value>>,
-	pub data_files: Vec<StagedFile>,
+	pub data_files: Vec<(PathBuf, String)>, // (source, relative destination)
 	pub allowed_imports: Vec<String>,
-	pub load_timeout: Duration,
+	pub load_timeout: u64,
 	pub setup: Vec<CallPlan>,
 	pub steps: Vec<CallPlan>,
 }
 pub struct CallPlan {
-	pub target: Target,                   // Function{name, lookup: Fuzzy|Exact} | Method{object,name} | Attribute{object,name} | Teacher{name}
-	pub args: Vec<Value>, pub stdin: Option<String>, pub timeout: Duration,
-	pub id: Option<String>, pub observe_files: Vec<String>, pub check: Option<InProcessCheck>,
+	pub target: Target,                   // Function{name} | Method{object,name} | Attribute{object,name} | Teacher{name}
+	pub args: Vec<Value>, pub stdin: Option<String>, pub timeout: u64,
+	pub id: Option<String>, pub files: Vec<String>, pub check: Option<InProcessCheck>, // {function, expected}
 }
 pub struct UnitObservation {                            // Serialize + Deserialize
 	pub ready: bool,
-	pub calls: Vec<CallObservation>,                    // in plan order; phase + index
-	pub checks: Vec<(usize, CheckObservation)>,
+	pub load: Option<CallObservation>,
+	pub setup: Vec<CallObservation>,                    // in plan order, a prefix of the plan
+	pub steps: Vec<CallObservation>,
+	pub checks: BTreeMap<usize, CheckObservation>,      // Verdict | Rejected | Error
 	pub fatal: Option<Fatal>,
-	pub exit: ExitStatus,                               // code / signal / killed_at_deadline / spawn error
+	pub done: bool,
+	pub exit: Exit,                                     // Code | Signal | Deadline | Spawn
+	pub protocol_error: Option<String>,
+	pub stderr: String,                                 // tail, for diagnosing a crash
 }
-pub struct Bundle {                                     // Serialize + Deserialize
+pub struct Bundle {                                     // Serialize
 	pub spec: TestSpec,                                 // validated, paths absolute, cases expanded, oracles resolved
 	pub teacher: TeacherRuntime,                        // exports and their parameters
+	#[serde(skip)] pub units: Vec<Unit>,                // derived: {plan, scored: [(name, case)]}
 }
+pub struct RunOptions { pub concurrency: Option<usize>, pub python: String } // python runs checker scripts
 ```
 
 `vars` and `parametrize.args` become `BTreeMap`, so a `Bundle` serialises
