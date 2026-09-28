@@ -179,6 +179,9 @@ struct Staged {
 	/// Removed on drop.
 	root: tempfile::TempDir,
 	work: PathBuf,
+	/// The unit's own `HOME` and `TMPDIR`, so nothing one unit leaves there reaches another.
+	home: PathBuf,
+	tmp: PathBuf,
 	payload: PathBuf,
 	/// The subject file's copy inside `work`.
 	subject: PathBuf,
@@ -210,7 +213,11 @@ fn stage(
 		.prefix("scriptmark-unit-")
 		.tempdir()?;
 	let work = root.path().join("work");
-	std::fs::create_dir(&work)?;
+	let home = root.path().join("home");
+	let tmp = root.path().join("tmp");
+	for dir in [&work, &home, &tmp] {
+		std::fs::create_dir(dir)?;
+	}
 	for (src, rel) in data_files {
 		copy_into(src, &work.join(rel))?;
 	}
@@ -229,6 +236,8 @@ fn stage(
 	std::fs::write(&payload_path, payload(copied.as_deref()).to_string())?;
 	Ok(Staged {
 		work,
+		home,
+		tmp,
 		payload: payload_path,
 		subject: copied.unwrap_or_default(),
 		root,
@@ -264,11 +273,12 @@ impl PythonExecutor {
 		let mut cmd = Command::new(&self.python_cmd);
 		cmd.env_clear()
 			.env("PATH", "/usr/bin:/usr/local/bin:/opt/homebrew/bin")
-			.env("HOME", "/tmp")
-			.env("PYTHONDONTWRITEBYTECODE", "1")
-			.env("PYTHONIOENCODING", "utf-8")
-			// Keep the unit's directory, which holds the student's file, off sys.path.
-			.env("PYTHONSAFEPATH", "1")
+			.env("HOME", &staged.home)
+			.env("TMPDIR", &staged.tmp)
+			// Isolated: no user site-packages, whose `.pth` files run before the harness, no
+			// PYTHON* variables, and the unit's directory, which holds the student's file,
+			// off sys.path. What those variables used to set is spelled as flags.
+			.args(["-I", "-B", "-X", "utf8"])
 			.arg("-c")
 			.arg(HARNESS)
 			.arg(&staged.payload)

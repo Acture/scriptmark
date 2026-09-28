@@ -53,6 +53,8 @@ pub fn apply_sandbox(cmd: &mut tokio::process::Command, config: &SandboxConfig) 
 			// SIGXCPU only at the soft one, and SIGXCPU is what says "ran out of CPU time".
 			let _ = set_rlimits(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1));
 			let _ = set_rlimit(libc::RLIMIT_FSIZE, fsize);
+			// A crash must not write the process's memory, teacher values included, to disk.
+			let _ = set_rlimit(libc::RLIMIT_CORE, 0);
 			let _ = set_rlimit(libc::RLIMIT_NOFILE, nofile);
 			let _ = set_rlimit(libc::RLIMIT_NPROC, nproc);
 			// RLIMIT_AS: skip on macOS where it's unreliable

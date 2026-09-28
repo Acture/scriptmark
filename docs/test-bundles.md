@@ -154,7 +154,11 @@ data_files = ["data/poem.txt", "fixtures/"]   # copied into every unit's working
 Every case and every scenario runs in its own temporary directory with your data files
 staged in it and the student's file copied beside them. `open("data/poem.txt")` and
 `Path(__file__).parent / "data" / "poem.txt"` both work. Relative writes land in that
-directory, which is removed afterwards; `expect_files` reads them back. Neither the
+directory, which is removed afterwards; `expect_files` reads them back. Each unit also
+gets a `HOME` and a `TMPDIR` of its own there, so nothing one unit leaves behind reaches
+another. Python runs isolated (`python -I`): user site-packages and `PYTHON*` environment
+variables are ignored, so install what your modules need into the interpreter itself, or
+into a virtual environment you pass with `--python`. Neither the
 working directory nor the import allowlist is a security boundary; see
 [What grading does not defend against](#what-grading-does-not-defend-against).
 

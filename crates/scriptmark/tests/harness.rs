@@ -874,3 +874,58 @@ async fn test_every_way_of_writing_stdout_is_held_to_its_limit() {
 		assert!(step.stdout_truncated);
 	}
 }
+
+/// Removes the probe a student planted, wherever it landed, even when an assertion fails.
+struct Planted(Option<String>);
+
+impl Drop for Planted {
+	fn drop(&mut self) {
+		if let Some(path) = &self.0 {
+			let _ = std::fs::remove_file(path);
+		}
+	}
+}
+
+#[tokio::test]
+async fn test_a_unit_cannot_leave_anything_behind_for_the_next_one() {
+	let dir = tempfile::tempdir().unwrap();
+	let marker = dir.path().join("ran");
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib\nos = importlib.import_module('os')\nsite = importlib.import_module('site')\nresource = importlib.import_module('resource')\nimport tempfile\n\ndef where():\n    return [os.environ.get('HOME'), tempfile.gettempdir()]\n\ndef plant(marker):\n    path = site.getusersitepackages()\n    os.makedirs(path, exist_ok=True)\n    pth = os.path.join(path, 'scriptmark_probe.pth')\n    with open(pth, 'w') as fh:\n        fh.write(f\"import os; open({marker!r}, 'w').close()\\n\")\n    return pth\n\ndef core():\n    return list(resource.getrlimit(resource.RLIMIT_CORE))\n",
+	);
+	let mut first = unit(&student);
+	first.steps = vec![
+		function("where", vec![]),
+		function("plant", vec![json!(marker.to_string_lossy())]),
+		function("core", vec![]),
+	];
+	let a = run(&first).await;
+	let _planted = Planted(returned(&a.steps[1].outcome).as_str().map(String::from));
+	let mut second = unit(&student);
+	second.steps = vec![function("where", vec![])];
+	let b = run(&second).await;
+
+	// A user-site `.pth` runs at interpreter start, before the harness: it must not reach
+	// the next unit, of this student or any other.
+	assert!(
+		!marker.exists(),
+		"a later unit ran what an earlier one planted"
+	);
+	let (here, there) = (returned(&a.steps[0].outcome), returned(&b.steps[0].outcome));
+	for place in 0..2 {
+		let path = here[place].as_str().unwrap();
+		assert_ne!(Some(path), there[place].as_str(), "shared between units");
+		assert!(
+			path.contains("scriptmark-unit-"),
+			"{path} is not the unit's own"
+		);
+		assert!(!Path::new(path).exists(), "{path} outlived its unit");
+	}
+	assert_eq!(
+		returned(&a.steps[2].outcome),
+		&json!([0, 0]),
+		"no core dumps"
+	);
+}

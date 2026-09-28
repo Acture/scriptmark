@@ -820,3 +820,18 @@ A two-lens re-review of `198ec6b`, each lens refuted, left nine minor findings s
   per-record bound instead of a guessed total, and isolating the student in a sandbox are
   designed together, since a student process of its own separates the namespaces by
   construction.
+
+### From the isolation research
+
+Research into sandboxing student code (the design goes to a ticket of its own) found
+three gaps that needed no sandbox to close:
+
+- **Every unit shared `HOME=/tmp`, and Python loaded user site-packages.** A student
+  could plant a `.pth` file there that ran at the start of every later unit, any
+  student's and any later run's, before the harness. Each unit now gets its own `HOME`
+  and `TMPDIR` inside its private directory, and Python runs with `-I`, so no user
+  site-packages load and no `PYTHON*` variable applies; `-B` and `-X utf8` replace the
+  two variables that were set. A test plants a `.pth` and runs a second unit; on the old
+  code the second unit ran it.
+- **Core dumps were allowed.** A crash could write the process's memory to disk.
+  `RLIMIT_CORE` is now 0.
