@@ -1,0 +1,42 @@
+# A shared object: one account, built once in scenario setup, driven step by step.
+# Steps in a scenario share one process, so each sees what the previous left behind.
+
+[meta]
+name = "account"
+file = "bank.py"
+language = "python"
+imports = ["helpers/checks.py"]
+
+[[scenarios]]
+name = "ada's account"
+
+[[scenarios.setup]]
+id = "acct"
+function = "Account"
+args = ["ada", 100]
+
+[[scenarios.steps]]
+name = "deposit returns the new balance"
+method = "deposit"
+object = "acct"
+args = [50]
+expect = 150
+
+[[scenarios.steps]]
+name = "overdrawing is refused"
+method = "withdraw"
+object = "acct"
+args = [500]
+expect_error = "ValueError"
+
+[[scenarios.steps]]
+name = "a refused withdrawal leaves the balance alone"
+attribute = "balance"
+object = "acct"
+expect = 150
+
+[[scenarios.steps]]
+name = "history records every change"
+method = "history"
+object = "acct"
+check = { function = "is_history_of" }

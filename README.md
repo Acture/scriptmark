@@ -121,17 +121,50 @@ nums = "list(int(-100, 100), 5, 20)"
 rhai = "nums.sort(); nums[nums.len() - 1]"
 ```
 
+Every case runs in its own process and working directory. When state should carry over —
+an object built once and driven step by step — say so with a scenario:
+
+```toml
+[[scenarios]]
+name = "ada's account"
+
+[[scenarios.setup]]
+id = "acct"
+function = "Account"
+args = ["ada", 100]
+
+[[scenarios.steps]]
+name = "deposit"
+method = "deposit"
+object = "acct"
+args = [50]
+expect = 150
+
+[[scenarios.steps]]
+name = "balance kept"
+attribute = "balance"
+object = "acct"
+expect = 150
+```
+
+Anything a bundle cannot honour — an unknown field, a checker that does not exist, a
+case with nothing to judge — is refused before a single student runs. Every failure says
+whose it is: the student's, the teacher's, or the machine's. See
+[docs/test-bundles.md](docs/test-bundles.md) for the full contract, and
+[examples/bundles](examples/bundles) for a pure function, a shared object and file I/O.
+
 ### Checkers
 
 | Checker | Usage |
 |---------|-------|
 | `exact` (default) | `expect = 42` |
-| `approx` | `expect = 3.14` with `tolerance = 0.01` |
+| `approx` | `check = { builtin = "approx", tolerance = 0.01 }` with `expect` |
 | `text` | Normalized multiline comparison |
 | `sorted` / `set_eq` / `contains` | Collection checks |
-| `regex` | `check = { regex = "^\\d+$" }` |
-| Rhai expression | `check = { rhai = "result > 0" }` |
+| Rhai expression | `check = { rhai = "result != () && result > 0" }` |
 | Python script | `check = { python = "verifiers/check.py" }` |
+| Teacher function | `check = { function = "is_valid" }`, run on the live value |
+| Output and files | `expected_stdout = "..."`, `expect_files = { "out.txt" = "..." }` |
 
 ## Features
 
