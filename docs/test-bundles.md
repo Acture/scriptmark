@@ -134,6 +134,9 @@ check = { rhai = "result != () && result.len() > 2" }
 check = { rhai = "type_of(result) == \"array\" && result.contains(5)" }
 ```
 
+A Rhai expression may run at most a million operations; one that loops past that has not
+decided, and is a `checker` error like any other.
+
 ## Files
 
 ```toml

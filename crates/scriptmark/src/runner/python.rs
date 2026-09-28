@@ -566,3 +566,18 @@ impl Default for PythonExecutor {
 		Self::new()
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The CPU limit is derived from the unit's own deadline — never the fixed 30 s it used
+	/// to be, which a scenario of several long steps would outrun and be killed by.
+	#[test]
+	fn test_the_cpu_limit_sits_above_any_units_deadline() {
+		for deadline in [3, 45, 4 * 10 + 2, 86_400 * 4] {
+			assert!(sandbox_for(deadline).cpu_secs > deadline);
+		}
+		assert_eq!(sandbox_for(u64::MAX).cpu_secs, u64::MAX, "saturates");
+	}
+}

@@ -4,7 +4,8 @@
 //! unchecked; imports the teacher modules to learn their exports; expands parametrized
 //! cases and resolves their oracles; checks every name a call uses; dry-runs Rhai checks
 //! against the most common wrong answer; and plans the units. `run_all` takes only
-//! `Bundle`s, so there is no path to execution around it.
+//! `Bundle`s, and the CLI and bindings build them only here: every bundle they run has
+//! been through all of it.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
