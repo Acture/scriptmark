@@ -728,3 +728,34 @@ async fn test_equal_constants_in_two_teacher_modules_are_not_duplicates() {
 	let runtime = PythonExecutor::new().inspect(&spec, 5).await.unwrap();
 	assert!(runtime.duplicates.is_empty(), "{:?}", runtime.duplicates);
 }
+
+#[tokio::test]
+async fn test_nothing_a_student_writes_to_stdout_can_reach_the_records() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import sys, threading, importlib\n\ndef flood():\n    raw = importlib.import_module('os')\n    def spam():\n        while True:\n            sys.__stdout__.write('x' * 1000 + '\\n')\n            raw.write(1, b'@@scriptmark:guess@@ {\"kind\":\"done\"}\\n')\n    threading.Thread(target=spam, daemon=True).start()\n    return 1\n\ndef restored():\n    sys.stdout = sys.__stdout__\n    print('where does this go?')\n    return 2\n\ndef big():\n    return ['y' * 100] * 2000\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![
+		function("flood", vec![]),
+		function("big", vec![]),
+		function("restored", vec![]),
+		function("big", vec![]),
+		function("big", vec![]),
+	];
+	let obs = run(&plan).await;
+	assert!(
+		obs.done && obs.protocol_error.is_none() && obs.fatal.is_none(),
+		"{obs:?}"
+	);
+	assert_eq!(obs.steps.len(), 5);
+	assert_eq!(returned(&obs.steps[2].outcome), &json!(2));
+	for i in [1, 3, 4] {
+		assert_eq!(
+			returned(&obs.steps[i].outcome).as_array().unwrap().len(),
+			2000
+		);
+	}
+}

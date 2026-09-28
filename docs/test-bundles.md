@@ -161,7 +161,8 @@ through `data_files`, if its name is in `allowed_imports`; the standard library 
 wins over a file of the same name.
 
 What a student prints outside any call — from a thread they left running, say — is
-discarded. Only output during a call is evidence.
+discarded. Only output during a call is evidence. Results travel on a channel of their
+own, so nothing a student does with stdout can disturb them.
 
 ## Timeouts
 

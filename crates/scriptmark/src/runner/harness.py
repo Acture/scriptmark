@@ -34,10 +34,15 @@ with open(sys.argv[1], encoding="utf-8") as _fh:
 os.unlink(sys.argv[1])
 
 _PREFIX = f"\n@@scriptmark:{PAYLOAD['nonce']}@@ "
-# `replace`: a lone surrogate a student printed or returned must not crash the channel.
-_channel = os.fdopen(os.dup(1), "w", encoding="utf-8", errors="replace")
-# Between calls, stdout is a sink: a student's thread printing then must not share a pipe
-# with the records. Only a deliberate write to fd 1 still reaches it.
+# The record channel: a descriptor of its own where the grader provides one (fd 3 on unix),
+# which no student output setting can reach; otherwise a private copy of stdout, where the
+# nonce framing keeps accidental output out. `replace`: a lone surrogate a student printed or
+# returned must not crash it.
+_CHANNEL_FD = PAYLOAD.get("channel", 1)
+_channel = os.fdopen(
+	_CHANNEL_FD if _CHANNEL_FD != 1 else os.dup(1), "w", encoding="utf-8", errors="replace"
+)
+# Between calls, stdout is a sink: what a student's leftover thread prints is not evidence.
 _quiet = open(os.devnull, "w", encoding="utf-8")
 sys.stdout = _quiet
 _real_stdin = sys.stdin

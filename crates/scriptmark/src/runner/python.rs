@@ -144,6 +144,14 @@ const HARNESS: &str = include_str!("harness.py");
 /// The tail of stderr kept for diagnosing a crash.
 const STDERR_TAIL: usize = 4096;
 
+/// The descriptor the harness writes records to. On unix it is a pipe of its own, so
+/// nothing a student does to stdout — rewrapping it, writing to `sys.__stdout__`, printing
+/// from a thread — can reach the records. Elsewhere it is stdout, framed by the nonce.
+#[cfg(unix)]
+const RECORD_FD: i32 = 3;
+#[cfg(not(unix))]
+const RECORD_FD: i32 = 1;
+
 /// More than this on the record channel is not the harness writing: its records carry at
 /// most a 4 MiB value, 64 KiB of stdout and 1 MiB per observed file per call.
 const STDOUT_CAP: usize = 64 * 1024 * 1024;
@@ -251,27 +259,46 @@ impl PythonExecutor {
 			} else {
 				std::process::Stdio::null()
 			})
-			.stdout(std::process::Stdio::piped())
 			.stderr(std::process::Stdio::piped())
 			.kill_on_drop(true);
+		let spawn_failed = |message: String| Finished {
+			stdout: String::new(),
+			stdout_overflow: false,
+			stderr: String::new(),
+			exit: Exit::Spawn(message),
+		};
 		#[cfg(unix)]
-		{
+		let records = {
 			// Its own process group, so anything it spawns dies with it.
 			cmd.process_group(0);
 			apply_sandbox(&mut cmd, &sandbox_for(deadline_secs));
-		}
+			// The student's stdout goes nowhere: what they print during a call is captured
+			// in-process, and the records have a pipe of their own.
+			cmd.stdout(std::process::Stdio::null());
+			match record_pipe(&mut cmd) {
+				Ok(pipe) => pipe,
+				Err(e) => return spawn_failed(format!("could not open the record channel: {e}")),
+			}
+		};
+		#[cfg(not(unix))]
+		cmd.stdout(std::process::Stdio::piped());
 
 		let mut child = match cmd.spawn() {
 			Ok(child) => child,
-			Err(e) => {
-				return Finished {
-					stdout: String::new(),
-					stdout_overflow: false,
-					stderr: String::new(),
-					exit: Exit::Spawn(format!("could not start {}: {e}", self.python_cmd)),
-				};
+			Err(e) => return spawn_failed(format!("could not start {}: {e}", self.python_cmd)),
+		};
+		// The parent's copy of the write end goes, so the channel ends when the unit does.
+		#[cfg(unix)]
+		let records = {
+			let (reader, writer) = records;
+			drop(writer);
+			match tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into()) {
+				Ok(receiver) => receiver,
+				Err(e) => return spawn_failed(format!("could not read the record channel: {e}")),
 			}
 		};
+		#[cfg(not(unix))]
+		let records = child.stdout.take();
 		// Killed however this future ends: finished, timed out, or dropped by a caller.
 		let _group = GroupGuard::new(child.id());
 
@@ -284,7 +311,10 @@ impl PythonExecutor {
 		let stdout = Arc::new(Mutex::new(Sink::head(STDOUT_CAP)));
 		let stderr = Arc::new(Mutex::new(Sink::tail(STDERR_TAIL)));
 		let mut pumps = tokio::task::JoinSet::new();
-		if let Some(pipe) = child.stdout.take() {
+		#[cfg(unix)]
+		pumps.spawn(pump(records, stdout.clone()));
+		#[cfg(not(unix))]
+		if let Some(pipe) = records {
 			pumps.spawn(pump(pipe, stdout.clone()));
 		}
 		if let Some(pipe) = child.stderr.take() {
@@ -332,6 +362,32 @@ impl PythonExecutor {
 			exit,
 		}
 	}
+}
+
+/// A pipe whose write end the child sees as `RECORD_FD`. The write end stays open in the
+/// parent until spawn, then must be dropped.
+#[cfg(unix)]
+fn record_pipe(cmd: &mut Command) -> std::io::Result<(std::io::PipeReader, std::io::PipeWriter)> {
+	use std::os::fd::AsRawFd;
+	let (reader, writer) = std::io::pipe()?;
+	let fd = writer.as_raw_fd();
+	// SAFETY: dup2 and fcntl are async-signal-safe, and this runs in the child between fork
+	// and exec. std's pipe is close-on-exec; dup2 clears that on the copy, and when the pipe
+	// already sits at RECORD_FD the flag is cleared directly.
+	unsafe {
+		cmd.pre_exec(move || {
+			if fd == RECORD_FD {
+				let flags = libc::fcntl(fd, libc::F_GETFD);
+				if flags < 0 || libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0 {
+					return Err(std::io::Error::last_os_error());
+				}
+			} else if libc::dup2(fd, RECORD_FD) < 0 {
+				return Err(std::io::Error::last_os_error());
+			}
+			Ok(())
+		});
+	}
+	Ok((reader, writer))
 }
 
 /// The sandbox for a unit: its CPU limit sits above its deadline, a backstop for one busy
@@ -501,6 +557,7 @@ impl Executor for PythonExecutor {
 			.collect::<Vec<_>>();
 		let payload = serde_json::json!({
 			"nonce": nonce,
+			"channel": RECORD_FD,
 			"mode": "inspect",
 			"imports": spec.meta.imports,
 		});
@@ -543,6 +600,7 @@ impl Executor for PythonExecutor {
 			move |subject: Option<&Path>| {
 				serde_json::json!({
 					"nonce": nonce,
+					"channel": RECORD_FD,
 					"mode": "unit",
 					"student": subject,
 					"script": plan.script.as_ref().map(|s| serde_json::json!({

@@ -740,9 +740,13 @@ They are all fixed and tested:
 - **In script mode, truncated output hid a timeout or crash.** The truncation check now
   applies only once the script has finished.
 - **A student thread printing between calls could garble a record,** and the
-  environment would be blamed. Between calls `sys.stdout` is now `/dev/null`, so only a
-  deliberate write to fd 1 can reach the record pipe. A dedicated record descriptor
-  would close that last gap.
+  environment would be blamed. Records now have a pipe of their own: fd 3 in the
+  harness, created by the grader. The student's stdout is `/dev/null` at the process
+  level, and a capture during each call. Nothing a student does to stdout — rewrapping
+  it, writing to `sys.__stdout__` or fd 1, printing from a thread — can reach the
+  records. A test floods `sys.__stdout__` and fd 1 from a thread while large records are
+  written; it fails on the old shared channel. Windows builds keep the nonce-framed
+  stdout channel, because inheriting a handle there is not portable.
 - **Ctrl-C no longer reached the units** once they had their own process groups. The CLI
   now kills every live unit group on interrupt, and a guard kills a unit's group if its
   run is dropped.
