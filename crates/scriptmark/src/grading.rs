@@ -121,12 +121,14 @@ mod tests {
 				expected: None,
 				failure: None,
 				elapsed_ms: None,
+				..Default::default()
 			})
 			.collect();
 
 		StudentReport {
 			student_id: "test".to_string(),
 			test_results: vec![TestResult {
+				file: None,
 				item_id: "test".to_string(),
 				cases,
 			}],

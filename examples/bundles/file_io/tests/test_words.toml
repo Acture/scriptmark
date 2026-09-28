@@ -1,0 +1,31 @@
+# Reading and writing files. data_files are copied into every unit's own working
+# directory, so a student reads them by relative path and writes wherever they like
+# without touching anybody else's run.
+
+[meta]
+name = "words"
+file = "words.py"
+language = "python"
+data_files = ["data/poem.txt"]
+
+[[cases]]
+name = "counts words in a staged file"
+function = "count_words"
+args = ["data/poem.txt"]
+expect = { "a" = 2, "rose" = 3, "is" = 2 }
+
+[[scenarios]]
+name = "report"
+
+[[scenarios.steps]]
+name = "count"
+id = "counts"
+function = "count_words"
+args = ["data/poem.txt"]
+check = { rhai = "type_of(result) == \"map\" && result.rose == 3" }
+
+[[scenarios.steps]]
+name = "write the report"
+function = "save_report"
+args = ["$counts", "report.txt"]
+expect_files = { "report.txt" = "rose 3\na 2\nis 2\n" }

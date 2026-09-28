@@ -187,3 +187,8 @@ tests_submission/
 crates/scriptmark/tests/fixtures/**/__pycache__/
 crates/scriptmark/tests/fixtures/**/.scriptmark_extracted/
 crates/scriptmark/tests/fixtures/**/.DS_Store
+
+# P-674 example bundles ship their students; `submissions` above would drop them.
+!examples/bundles/*/submissions/
+!examples/bundles/*/submissions/**
+examples/bundles/**/__pycache__/

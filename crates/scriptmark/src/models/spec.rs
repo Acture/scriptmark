@@ -1,7 +1,14 @@
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fmt;
+use std::path::PathBuf;
+
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
 
 /// Configuration for lint-based code style scoring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LintConfig {
 	/// Lint command template. `{file}` is replaced with student file path.
 	pub command: String,
@@ -21,52 +28,147 @@ fn default_weight() -> f64 {
 	0.1
 }
 
-/// How to check the result of a test case.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The built-in value checkers.
+pub const BUILTIN_CHECKERS: &[&str] = &["exact", "approx", "sorted", "set_eq", "contains", "text"];
+
+/// Built-ins that compare against an expectation, and so mean nothing without one.
+pub const EXPECT_DEPENDENT_CHECKERS: &[&str] = &["exact", "approx", "set_eq", "contains", "text"];
+
+/// How to check the result of a test case: a built-in's name, or a table naming one kind.
+///
+/// Deserialised by hand rather than `#[serde(untagged)]`, so that an unknown key such as
+/// `regex` is named in the error instead of "did not match any variant".
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum CheckMethod {
-	/// Shorthand: just a string like "sorted", "exact", "contains"
 	Builtin(String),
-	/// Detailed spec with parameters
 	Detailed(CheckSpec),
 }
 
-impl Default for CheckMethod {
-	fn default() -> Self {
-		Self::Builtin("exact".to_string())
+impl<'de> Deserialize<'de> for CheckMethod {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		struct CheckVisitor;
+
+		impl<'de> Visitor<'de> for CheckVisitor {
+			type Value = CheckMethod;
+
+			fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+				f.write_str("a built-in checker name or a table such as { rhai = \"...\" }")
+			}
+
+			fn visit_str<E: de::Error>(self, v: &str) -> Result<CheckMethod, E> {
+				Ok(CheckMethod::Builtin(v.to_string()))
+			}
+
+			fn visit_map<M: MapAccess<'de>>(self, map: M) -> Result<CheckMethod, M::Error> {
+				CheckSpec::deserialize(de::value::MapAccessDeserializer::new(map))
+					.map(CheckMethod::Detailed)
+			}
+		}
+
+		deserializer.deserialize_any(CheckVisitor)
 	}
 }
 
-/// Detailed checker specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// A checker written as a table. Exactly one kind may be named.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckSpec {
-	/// Built-in checker name
+	/// Built-in checker name.
 	#[serde(default)]
 	pub builtin: Option<String>,
-	/// Rhai inline expression
+	/// Rhai expression over `result`, `expected` and `context`; must evaluate to a bool.
 	#[serde(default)]
 	pub rhai: Option<String>,
-	/// Path to Python verifier script
+	/// Python script speaking the JSON checker protocol on stdin/stdout.
 	#[serde(default)]
 	pub python: Option<String>,
-	/// Path to executable verifier
-	#[serde(default)]
-	pub exec: Option<String>,
-	/// Path to WASM verifier module
-	#[serde(default)]
-	pub wasm: Option<String>,
-	/// Tolerance for approx checker
+	/// Tolerance for the `approx` built-in.
 	#[serde(default)]
 	pub tolerance: Option<f64>,
-	/// In-process checker function name (looked up in teacher imports / _ctx).
-	/// Used in chain mode — runs in the same Python process as student code.
+	/// A function exported by a teacher module, called in the unit's process with the
+	/// live result: `fn(result, expected, **names_in_scope)`.
 	#[serde(default)]
 	pub function: Option<String>,
 }
 
+/// A check, once its spelling has been validated.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Check {
+	Builtin {
+		name: String,
+		tolerance: Option<f64>,
+	},
+	Rhai(String),
+	Python(String),
+	Function(String),
+}
+
+impl Check {
+	/// Whether the check compares against an expectation rather than testing a property.
+	pub fn needs_expectation(&self) -> bool {
+		matches!(self, Check::Builtin { name, .. } if EXPECT_DEPENDENT_CHECKERS.contains(&name.as_str()))
+	}
+}
+
+impl CheckMethod {
+	/// The one kind this spelling names, or why it names none.
+	pub fn resolve(&self) -> Result<Check, String> {
+		let builtin = |name: &str, tolerance: Option<f64>| {
+			if BUILTIN_CHECKERS.contains(&name) {
+				Ok(Check::Builtin {
+					name: name.to_string(),
+					tolerance,
+				})
+			} else {
+				Err(format!(
+					"unknown checker '{name}'; the built-ins are {}",
+					BUILTIN_CHECKERS.join(", ")
+				))
+			}
+		};
+		match self {
+			CheckMethod::Builtin(name) => builtin(name, None),
+			CheckMethod::Detailed(spec) => {
+				let kinds: Vec<&str> = [
+					spec.builtin.as_ref().map(|_| "builtin"),
+					spec.rhai.as_ref().map(|_| "rhai"),
+					spec.python.as_ref().map(|_| "python"),
+					spec.function.as_ref().map(|_| "function"),
+				]
+				.into_iter()
+				.flatten()
+				.collect();
+				if kinds.len() != 1 {
+					return Err(format!(
+						"a check must name exactly one of builtin, rhai, python, function; this one names {}",
+						if kinds.is_empty() {
+							"none".to_string()
+						} else {
+							kinds.join(" and ")
+						}
+					));
+				}
+				if spec.tolerance.is_some() && spec.builtin.as_deref() != Some("approx") {
+					return Err("tolerance only applies to builtin = \"approx\"".to_string());
+				}
+				if let Some(name) = &spec.builtin {
+					builtin(name, spec.tolerance)
+				} else if let Some(expr) = &spec.rhai {
+					Ok(Check::Rhai(expr.clone()))
+				} else if let Some(script) = &spec.python {
+					Ok(Check::Python(script.clone()))
+				} else {
+					Ok(Check::Function(spec.function.clone().unwrap_or_default()))
+				}
+			}
+		}
+	}
+}
+
 /// Oracle — how to determine the expected output for generated inputs.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct Oracle {
 	/// Teacher's reference implementation file. Same function name, compare outputs.
 	#[serde(default)]
@@ -77,13 +179,11 @@ pub struct Oracle {
 	/// Built-in checker name (just verifies a property, no expected value).
 	#[serde(default)]
 	pub check: Option<String>,
-	/// Python script oracle.
-	#[serde(default)]
-	pub python: Option<String>,
 }
 
 /// Parametrize configuration — auto-generate test cases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Parametrize {
 	/// Number of test cases to generate.
 	pub count: usize,
@@ -92,132 +192,272 @@ pub struct Parametrize {
 	pub seed: Option<u64>,
 	/// Generator expressions per argument. Key = arg name, Value = generator string.
 	#[serde(default)]
-	pub args: std::collections::HashMap<String, String>,
+	pub args: BTreeMap<String, String>,
 	/// How to determine the expected output.
 	#[serde(default)]
 	pub oracle: Oracle,
 }
 
-/// A single test case within a test spec.
+/// What a call runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Target {
+	/// A callable on the student module, found by today's fuzzy lookup (P-673 owns it).
+	Function { name: String },
+	/// A method of a live object an earlier student call produced in the same unit.
+	Method { object: String, name: String },
+	/// An attribute of such an object.
+	Attribute { object: String, name: String },
+	/// A function exported by a teacher module.
+	Teacher { name: String },
+}
+
+impl Target {
+	/// Whether the call runs the student's code — which decides who owns its failures.
+	pub fn is_student(&self) -> bool {
+		!matches!(self, Target::Teacher { .. })
+	}
+}
+
+/// A test case (`[[cases]]`) or a scenario step (`[[scenarios.steps]]`).
+///
+/// A case runs in its own process and working directory; a step shares its scenario's.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct TestCase {
 	pub name: String,
 
-	/// Optional ID for this case (allows other cases/fixtures to reference its result).
+	/// On a scenario step: store the step's value under this id for later steps. Refused
+	/// on a case — nothing outlives a case.
 	#[serde(default)]
 	pub id: Option<String>,
 
-	/// Arguments to pass to the function (for function-call tests).
-	/// May contain `$ref` strings referencing fixture results.
+	/// Call a student function. Defaults to `[meta] function`.
 	#[serde(default)]
-	pub args: Vec<serde_json::Value>,
+	pub function: Option<String>,
 
-	/// Expected return value (for exact/approx matching).
+	/// Call a method on `object`.
 	#[serde(default)]
-	pub expect: Option<serde_json::Value>,
+	pub method: Option<String>,
 
-	/// Expected error type (e.g. "TypeError").
+	/// Read an attribute of `object`.
 	#[serde(default)]
-	pub expect_error: Option<String>,
+	pub attribute: Option<String>,
 
-	/// Stdin input (for IO-based tests).
+	/// The id of a live object an earlier student call produced in this unit.
+	#[serde(default)]
+	pub object: Option<String>,
+
+	/// Run the student file as `__main__` instead of calling a function.
+	#[serde(default)]
+	pub script: bool,
+
+	/// Arguments for the call. A string `"$id"` is replaced by the value named `id`;
+	/// `"$$..."` passes a literal leading `$`.
+	#[serde(default)]
+	pub args: Vec<Value>,
+
+	/// What the call reads from stdin.
 	#[serde(default)]
 	pub stdin: Option<String>,
 
-	/// Expected stdout (for IO-based tests).
+	/// Expected return value.
+	#[serde(default)]
+	pub expect: Option<Value>,
+
+	/// Expected exception type; a subclass also matches.
+	#[serde(default)]
+	pub expect_error: Option<String>,
+
+	/// Expected stdout of the call, compared exactly (in script mode, by `check`).
 	#[serde(default)]
 	pub expected_stdout: Option<String>,
 
-	/// How to check the result. Defaults to exact match.
+	/// Files the call must leave in the working directory, with their exact contents.
+	#[serde(default)]
+	pub expect_files: BTreeMap<String, String>,
+
+	/// How to check the value. Defaults to exact comparison against `expect`.
 	#[serde(default)]
 	pub check: Option<CheckMethod>,
 
-	/// Per-case timeout override in seconds.
+	/// Timeout in seconds for this call.
 	#[serde(default)]
 	pub timeout: Option<u64>,
 
-	/// Parametrize configuration for auto-generating test cases.
+	/// Generate concrete cases from this one.
 	#[serde(default)]
 	pub parametrize: Option<Parametrize>,
+}
 
-	/// Per-case function name override (used in chain mode where different
-	/// cases may call different functions).
-	#[serde(default)]
-	pub function: Option<String>,
+impl TestCase {
+	/// The call this case makes, or `None` for a script run. Assumes a validated spec.
+	pub fn target(&self, default_function: Option<&str>) -> Option<Target> {
+		if self.script {
+			return None;
+		}
+		let object = || self.object.clone().unwrap_or_default();
+		if let Some(name) = &self.method {
+			Some(Target::Method {
+				object: object(),
+				name: name.clone(),
+			})
+		} else if let Some(name) = &self.attribute {
+			Some(Target::Attribute {
+				object: object(),
+				name: name.clone(),
+			})
+		} else {
+			self.function
+				.as_deref()
+				.or(default_function)
+				.map(|name| Target::Function {
+					name: name.to_string(),
+				})
+		}
+	}
 }
 
 /// Metadata for a test spec file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TestMeta {
+	/// The grading item this spec provides evidence for.
 	pub name: String,
 
-	/// Student file to test (suffix match, e.g. "Lab5_1.py").
+	/// Student file to test (suffix match, e.g. "Lab5_1.py"). P-673 owns the matching.
 	pub file: String,
 
-	/// Language of the student code.
+	/// Language of the student code. Only `python` is supported.
 	pub language: String,
 
-	/// Function name to call (for function-call tests).
+	/// Default function for cases and steps that name no target.
 	#[serde(default)]
 	pub function: Option<String>,
 
-	/// Compile command template (for compiled languages).
-	/// Placeholders: {source}, {output}
+	/// Refused: compiled languages are not supported.
 	#[serde(default)]
 	pub compile: Option<String>,
 
-	/// Teacher module paths — loaded before student code in chain mode.
-	/// Exports (public names) populate the `$ref` context as live Python objects.
+	/// Teacher modules, loaded fresh in every unit. Their exports are names in scope.
 	#[serde(default)]
 	pub imports: Vec<String>,
 
-	/// Whether to deepcopy `$ref` args before each case (prevents mutation).
-	/// Defaults to true. Set false for large data where copy is expensive.
-	#[serde(default = "default_copy_refs")]
-	pub copy_refs: bool,
+	/// Teacher files copied into every unit's working directory, at the same relative path.
+	#[serde(default)]
+	pub data_files: Vec<String>,
+
+	/// Refused: every case now has its own process.
+	#[serde(default)]
+	pub copy_refs: Option<bool>,
 
 	/// Extra packages allowed in student code (beyond safe stdlib).
-	/// e.g. `["numpy", "pandas"]`. By default only safe stdlib modules are allowed.
 	#[serde(default)]
 	pub allowed_imports: Vec<String>,
 }
 
-fn default_copy_refs() -> bool {
-	true
-}
-
-/// A setup step — calls a function, stores result for `$ref`. Not scored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A setup call. Top-level setup runs at the start of every case and every scenario;
+/// scenario setup runs once at the start of its scenario. It is not scored.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct SetupStep {
-	/// Required. Used as `$id` in args references.
+	/// The name its value is stored under, for `$id` and `object`.
 	pub id: String,
 
-	/// Call a student function and store the result.
+	/// Call a student function.
 	#[serde(default)]
 	pub function: Option<String>,
 
-	/// Arguments for the function call. May contain `$ref` strings.
+	/// Call a method on `object`.
 	#[serde(default)]
-	pub args: Vec<serde_json::Value>,
+	pub method: Option<String>,
 
-	/// Run a teacher script and use its stdout (JSON) as the value.
+	/// The id of a live object an earlier student call produced in this unit.
+	#[serde(default)]
+	pub object: Option<String>,
+
+	/// Call a function exported by a teacher module.
+	#[serde(default)]
+	pub teacher: Option<String>,
+
+	/// Arguments for the call. May contain `$ref` strings.
+	#[serde(default)]
+	pub args: Vec<Value>,
+
+	/// Timeout in seconds for this call.
+	#[serde(default)]
+	pub timeout: Option<u64>,
+
+	/// Refused: generated inputs belong to P-675.
 	#[serde(default)]
 	pub file: Option<String>,
 }
 
-/// A complete test specification (one TOML file).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestSpec {
-	pub meta: TestMeta,
-	/// Static variables — injected as Python globals + available as `$ref`.
+impl SetupStep {
+	/// The call this step makes. Assumes a validated spec.
+	pub fn target(&self) -> Target {
+		if let Some(name) = &self.teacher {
+			Target::Teacher { name: name.clone() }
+		} else if let Some(name) = &self.method {
+			Target::Method {
+				object: self.object.clone().unwrap_or_default(),
+				name: name.clone(),
+			}
+		} else {
+			Target::Function {
+				name: self.function.clone().unwrap_or_default(),
+			}
+		}
+	}
+}
+
+/// A shared-state scenario: steps run in order in one process and one working directory.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Scenario {
+	pub name: String,
+
+	/// Default timeout in seconds for this scenario's setup and steps.
 	#[serde(default)]
-	pub vars: std::collections::HashMap<String, serde_json::Value>,
-	/// Setup steps — call functions, store results. Not scored.
+	pub timeout: Option<u64>,
+
+	/// Runs once, at the start of the scenario, after the top-level setup.
 	#[serde(default)]
 	pub setup: Vec<SetupStep>,
-	/// Test cases — scored.
+
+	/// Each step is judged and reported as its own case, `"<scenario> / <step>"`.
+	#[serde(default)]
+	pub steps: Vec<TestCase>,
+}
+
+impl Scenario {
+	/// The name a step's result is reported under.
+	pub fn step_name(&self, step: &TestCase) -> String {
+		format!("{} / {}", self.name, step.name)
+	}
+}
+
+/// A complete test specification (one TOML file).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TestSpec {
+	pub meta: TestMeta,
+	/// Constants — student module globals, and names in scope for `$ref`.
+	#[serde(default)]
+	pub vars: BTreeMap<String, Value>,
+	/// Runs at the start of every case and every scenario, inside its process.
+	#[serde(default)]
+	pub setup: Vec<SetupStep>,
+	/// Independent cases.
+	#[serde(default)]
 	pub cases: Vec<TestCase>,
+	/// Shared-state scenarios.
+	#[serde(default)]
+	pub scenarios: Vec<Scenario>,
 	/// Optional lint-based style scoring.
 	#[serde(default)]
 	pub lint: Option<LintConfig>,
+	/// The directory relative teacher paths are resolved against. Set by the loader.
+	#[serde(skip)]
+	pub dir: PathBuf,
 }

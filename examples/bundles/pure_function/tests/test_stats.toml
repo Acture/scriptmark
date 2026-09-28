@@ -1,0 +1,38 @@
+# A pure function: fixed inputs, fixed answers, independent cases.
+# Every case runs in its own process, so nothing one case does can leak into another.
+
+[meta]
+name = "stats"
+file = "stats.py"
+language = "python"
+
+[[cases]]
+name = "mean of three"
+function = "mean"
+args = [[1, 2, 3]]
+expect = 2
+
+[[cases]]
+name = "mean is not rounded"
+function = "mean"
+args = [[1, 2]]
+check = { builtin = "approx", tolerance = 1e-9 }
+expect = 1.5
+
+[[cases]]
+name = "mean of nothing"
+function = "mean"
+args = [[]]
+expect_error = "ValueError"
+
+[[cases]]
+name = "clamp below"
+function = "clamp"
+args = [-5, 0, 10]
+expect = 0
+
+[[cases]]
+name = "clamp inside"
+function = "clamp"
+args = [7, 0, 10]
+expect = 7

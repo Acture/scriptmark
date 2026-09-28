@@ -3,14 +3,87 @@ use serde::{Deserialize, Serialize};
 use crate::models::SubmissionOutcome;
 
 /// Status of a single test case or an overall student report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TestStatus {
+	#[default]
 	Passed,
 	Failed,
 	Missing,
 	Error,
 	Timeout,
+}
+
+/// Whose a non-pass is: who has to act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Fault {
+	/// The student's code did it.
+	Student,
+	/// The teacher's bundle did it: a checker that could not decide, a teacher module or
+	/// setup function that failed, a case with nothing to judge.
+	Teacher,
+	/// Neither: the machine or the grader.
+	Environment,
+}
+
+/// Why a case did not pass, in one word — so a scorer never parses a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+	/// No file matched the spec.
+	NoFile,
+	/// The function, method or attribute does not exist.
+	NoTarget,
+	/// The answer was wrong: value, exception, stdout or file.
+	Wrong,
+	/// A teacher checker raised `AssertionError` on the answer.
+	Rejected,
+	/// An exception nobody expected.
+	Raised,
+	/// The student file does not compile.
+	Syntax,
+	/// The student module raised while loading.
+	Load,
+	/// The value returned cannot be represented.
+	Unserialisable,
+	/// The call exceeded its timeout.
+	Timeout,
+	/// The process died, or was killed at its deadline, during this call.
+	Killed,
+	/// Not run: an earlier call in the unit hung or killed the process.
+	NotRun,
+	/// Not run: a value it needs was never produced.
+	Dependency,
+	/// Not run: a setup call failed.
+	Setup,
+	/// The record stream could not be trusted.
+	Protocol,
+	/// A teacher module failed to import.
+	TeacherImport,
+	/// A checker could not decide.
+	Checker,
+	/// The case declared nothing that was judged.
+	NothingToJudge,
+	/// The process could not be started.
+	Spawn,
+	/// The harness itself failed.
+	Harness,
+}
+
+/// What the call was given: the evidence behind "明确测试输入".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct CaseInput {
+	/// The name asked for, and — when a lookup may have substituted — the one it found.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub target: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub resolved: Option<String>,
+	/// Arguments as declared, with `$ref`s by name.
+	#[serde(default)]
+	pub args: Vec<serde_json::Value>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub stdin: Option<String>,
 }
 
 /// Detail about why a test case failed.
@@ -22,7 +95,10 @@ pub struct FailureDetail {
 }
 
 /// Result of a single test case for a single student.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `fault`, `cause`, `stdout` and `input` are absent from results written before they
+/// existed, and must not be read as "no fault".
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CaseResult {
 	pub case_name: String,
 	pub status: TestStatus,
@@ -34,6 +110,16 @@ pub struct CaseResult {
 	pub failure: Option<FailureDetail>,
 	/// Execution time in milliseconds.
 	pub elapsed_ms: Option<u64>,
+	/// Whose the non-pass is. `None` when passed.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub fault: Option<Fault>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub cause: Option<Cause>,
+	/// What the student printed during the call, when anything.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub stdout: Option<String>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub input: Option<CaseInput>,
 }
 
 /// Aggregated result for one grading item for one student.
@@ -43,6 +129,10 @@ pub struct TestResult {
 	/// `[meta] name`. Read from `spec_name` in results written before items were modelled.
 	#[serde(alias = "spec_name")]
 	pub item_id: String,
+	/// The student file these cases ran against, as submitted. `None` when no file matched,
+	/// or in results written before it was recorded.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub file: Option<String>,
 	pub cases: Vec<CaseResult>,
 }
 

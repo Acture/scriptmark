@@ -3,7 +3,7 @@
 Linear: https://linear.app/acturea/issue/P-670
 Parent: P-663 · Milestone: Canvas 与本地提交可统一导入
 
-Revision 3 — Revision 1 was written against commit `541b259`, then put through a six-lens
+Revision 3 — Revision 1 was written against commit `4d3ab3f`, then put through a six-lens
 adversarial review (60 findings, 28 survived refutation). Revision 1 asserted that
 `normalize` was correct and would not be touched. That was wrong in four places, and the
 sections that carried the most weight — D6, D8, D9, D10 — were the ones that broke.

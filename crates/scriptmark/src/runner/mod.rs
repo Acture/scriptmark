@@ -1,9 +1,11 @@
 pub mod executor;
 pub mod expander;
 pub mod generator;
+pub mod judge;
 pub mod linter;
 pub mod oracle;
 pub mod orchestrator;
+pub mod prepare;
 pub mod python;
-pub mod resolve;
+pub mod records;
 pub mod sandbox;

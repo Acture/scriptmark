@@ -89,6 +89,7 @@ mod tests {
 			student_id: "alice".to_string(),
 			student_name: Some("Alice".to_string()),
 			test_results: vec![TestResult {
+				file: None,
 				item_id: "test".to_string(),
 				cases: vec![CaseResult {
 					case_name: "case1".to_string(),
@@ -97,6 +98,7 @@ mod tests {
 					expected: None,
 					failure: None,
 					elapsed_ms: None,
+					..Default::default()
 				}],
 			}],
 			final_grade: Some(95.0),
