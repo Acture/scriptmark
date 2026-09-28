@@ -723,6 +723,9 @@ missing path is `FileNotFoundError`.
   the result channel, not from pytest as a way to write tests. If pytest comes back, it
   runs inside a unit's harness and reports observations over the record channel, and
   Rust still judges; the frame attribution above comes first.
+- Isolating student code from the teacher's and from the machine belongs to P-745
+  (`docs/plans/2026-09-29-student-isolation.md`); bundles declaring their Python
+  dependencies, through `pyproject.toml` or PEP 723 headers, belong to P-744.
 
 ### Re-review of the fix commit
 
