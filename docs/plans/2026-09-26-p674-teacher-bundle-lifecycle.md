@@ -3,7 +3,7 @@
 Linear: https://linear.app/acturea/issue/P-674
 Parent: P-663 · Blocks: P-675, P-676, P-677
 
-Revision 2. Revision 1 (`b8d0939`, written against `7185534`) went through a six-lens
+Revision 2. Revision 1 (`e406a11`, written against `4e01add`) went through a six-lens
 adversarial review: acceptance, migration of real spec shapes, fault attribution,
 harness robustness, Rust feasibility, and scope. 70 findings were raised; three
 refuters checked three of the lenses. The harness lens, and the refuters for rust and
@@ -30,7 +30,7 @@ experiment instead. What changed, and why:
   now declared by placement, and existing specs keep loading (D2).
 - **The import guard is fixed.** It was vetting the stdlib's own internal imports, so
   `import random`, `csv`, `datetime`, `json` or `pathlib` failed every case for a
-  student. That is reproduced on `7185534` (D5).
+  student. That is reproduced on `4e01add` (D5).
 - **The reference oracle gets a defined path.** "Moves unchanged" was
   unimplementable once `execute_case` goes (D11).
 - **The interface types are specified.** P-675, P-676 and P-678 build on them, and
@@ -67,7 +67,7 @@ P-674 owns four things:
 
 ## What is true today
 
-Checked against `7185534`, with the CLI run on small student files.
+Checked against `4e01add`, with the CLI run on small student files.
 
 **Lifecycle is inferred.** `orchestrator.rs:221` picks "chain mode", one process for
 every case, when `meta.imports` is non-empty **or any case sets `function`**. Adding a
@@ -219,12 +219,15 @@ timed) → top-level setup → scenario setup → steps (each: call, then its ch
 - **Payload.** A JSON file in a private temp directory (not the unit's `cwd`). The path
   is passed in `argv`; the harness reads the file and deletes it before any student code
   loads. fd 0 is the case's `stdin` in script mode and empty otherwise.
-- **Records** go to a private `dup` of fd 1, each prefixed with a newline and a per-run
-  nonce: `\n@@scriptmark:<nonce>@@ {json}`. Rust accepts the prefix anywhere in a line
-  and ignores everything else. The nonce protects against accidental output. It does
-  not stop a determined student inside the same process, who could reach any harness
-  state, so the records carry observations, never verdicts about who is at fault, and
-  a second record for the same call is treated as tampering (D7).
+- **Records** go to a pipe of their own, which the grader creates and the harness sees
+  as fd 3; Windows builds, where inheriting a handle is not portable, use stdout
+  instead. Each record is prefixed with a newline and a per-run nonce:
+  `\n@@scriptmark:<nonce>@@ {json}`. Rust accepts the prefix anywhere in a line and
+  ignores everything else. The separate pipe keeps student output away from the
+  records, and the nonce guards the Windows channel. Neither stops a determined student
+  inside the same process, who could reach any harness state, so the records carry
+  observations, never verdicts about who is at fault, and a second record for the same
+  call is treated as tampering (D7).
 - **Student stdout** is captured per call in a buffer capped at 64 KiB. The record
   carries `stdout_truncated`.
 - **stdin.** During module load `input()` returns `"0"`, as today. During a call,
@@ -603,7 +606,7 @@ run outside it.
 
 ## Code review corrections
 
-The implementation (`1a2bb21..7dd3b9e`) went through a six-lens adversarial code review,
+The implementation (`4437b63..2e58410`) went through a six-lens adversarial code review,
 each lens with its own refuter: harness, judge, contract, Rust, tests, conformance. About
 80 findings survived. Everything below is fixed and has a test. Where the design above
 now reads differently from the code, the code and this section are right.
@@ -715,10 +718,15 @@ missing path is `FileNotFoundError`.
   teacher's `checker` error, by design (D9). Attributing it by traceback frame is a
   follow-up.
 - Reference oracles still resolve one at a time; making them concurrent belongs to P-676.
+- Teacher tests written as pytest files are not supported. The legacy grader's failures
+  came from running the whole class in one in-process pytest session with JUnit XML as
+  the result channel, not from pytest as a way to write tests. If pytest comes back, it
+  runs inside a unit's harness and reports observations over the record channel, and
+  Rust still judges; the frame attribution above comes first.
 
 ### Re-review of the fix commit
 
-A narrow two-lens re-review of `972f42e`, each lens refuted, found ten more issues.
+A narrow two-lens re-review of `2aec8f5`, each lens refuted, found ten more issues.
 They are all fixed and tested:
 
 - **A student who re-wraps, detaches or closes `sys.stdout` crashed the harness.**

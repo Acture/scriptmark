@@ -291,7 +291,8 @@ pub enum ProtocolError {
 	Unreadable(String),
 	/// A record repeated or came out of order — somebody else wrote it.
 	Tampered(String),
-	/// More reached the record channel than the harness ever writes: somebody wrote to fd 1.
+	/// More reached the record channel than the harness ever writes: something other than
+	/// the harness wrote to it.
 	Flooded(String),
 }
 
