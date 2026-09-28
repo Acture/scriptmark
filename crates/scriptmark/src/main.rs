@@ -2,6 +2,7 @@ mod display;
 mod report;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -9,10 +10,12 @@ use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::grading::apply_grading;
 use scriptmark::models::{
 	Assignment, AssignmentInput, AttemptPolicy, DiagnosticSeverity, FormulaPolicy, GradingItem,
-	GradingPolicy, StudentKey, SubmissionOutcome, TemplatePolicy, TestSpec,
+	GradingPolicy, StudentKey, StudentReport, StudentSubmission, SubmissionOutcome, TemplatePolicy,
+	TestSpec,
 };
 use scriptmark::roster::load_roster;
-use scriptmark::runner::orchestrator;
+use scriptmark::runner::orchestrator::{self, RunOptions};
+use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
 use scriptmark::spec_loader::load_specs_from_dir;
 
@@ -583,6 +586,39 @@ async fn main() -> Result<()> {
 	}
 }
 
+/// A fault or cause as the snake_case word the JSON results use; empty when absent.
+fn label<T: serde::Serialize>(value: Option<T>) -> String {
+	value
+		.and_then(|v| serde_json::to_value(v).ok())
+		.and_then(|v| v.as_str().map(str::to_string))
+		.unwrap_or_default()
+}
+
+/// Prepare every test bundle, then run them against every student. A bundle that cannot
+/// be prepared stops the run before any student is graded.
+async fn run_bundles(
+	students: &[StudentSubmission],
+	specs: Vec<TestSpec>,
+	python: &str,
+	timeout: u64,
+	concurrency: Option<usize>,
+) -> Result<Vec<StudentReport>> {
+	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
+	let bundles = prepare(specs, executor.clone(), timeout)
+		.await
+		.context("refusing to grade: the test bundle is not ready")?;
+	println!(
+		"Prepared {} test bundle(s): {} unit(s) per student",
+		bundles.len(),
+		bundles.iter().map(|b| b.units.len()).sum::<usize>()
+	);
+	let options = RunOptions {
+		concurrency,
+		python: executor.python_cmd().to_string(),
+	};
+	Ok(orchestrator::run_all(students, bundles.into(), executor, &options).await)
+}
+
 async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	// 1. Build the unified input — names, roster membership and submission state all come
 	//    from the model, so there is no separate roster merge afterwards.
@@ -604,16 +640,15 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	let mut input = input;
 	reconcile_items(&mut input.assignment, &specs);
 
-	// 3. Run tests
-	let executor = PythonExecutor::with_python_cmd(&args.python);
-	let mut reports = orchestrator::run_all(
+	// 3. Prepare the test bundles once, then run them
+	let mut reports = run_bundles(
 		&input.students,
-		&specs,
-		&executor,
+		specs,
+		&args.python,
 		args.timeout,
 		args.concurrency,
 	)
-	.await;
+	.await?;
 
 	// 4. Apply grading policy
 	let policy = build_grading_policy(&args.grading, args.formula.as_deref(), args.range);
@@ -661,6 +696,8 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 					"expected",
 					"message",
 					"elapsed_ms",
+					"fault",
+					"cause",
 				])?;
 				for report in &reports {
 					let state = report
@@ -685,6 +722,8 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 									.map(|f| f.message.as_str())
 									.unwrap_or(""),
 								&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
+								&label(case.fault),
+								&label(case.cause),
 							])?;
 						}
 					}
@@ -707,6 +746,8 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 							"",
 							"",
 							report.error.as_deref().unwrap_or(""),
+							"",
+							"",
 							"",
 						])?;
 					}
@@ -763,16 +804,15 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 	let mut input = input;
 	reconcile_items(&mut input.assignment, &specs);
 
-	let executor = PythonExecutor::with_python_cmd(&args.python);
 	// A JSON array, the same shape `grade` writes and `summarize` reads.
-	let results = orchestrator::run_all(
+	let results = run_bundles(
 		&input.students,
-		&specs,
-		&executor,
+		specs,
+		&args.python,
 		args.timeout,
 		args.concurrency,
 	)
-	.await;
+	.await?;
 
 	if let Some(parent) = args.output.parent() {
 		std::fs::create_dir_all(parent)?;

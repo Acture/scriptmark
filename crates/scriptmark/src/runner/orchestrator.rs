@@ -1,42 +1,61 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::models::{
-	CaseResult, FailureDetail, StudentFile, StudentReport, StudentSubmission, SubmissionState,
-	TestResult, TestSpec, TestStatus,
-};
 use tokio::sync::Semaphore;
+use tokio::task::JoinSet;
 
-use crate::runner::python::PythonExecutor;
-use crate::runner::resolve::resolve_args;
+use crate::models::{
+	CaseResult, Cause, FailureDetail, Fault, StudentFile, StudentReport, StudentSubmission,
+	SubmissionState, TestResult, TestStatus,
+};
+use crate::runner::executor::Executor;
+use crate::runner::judge::judge;
+use crate::runner::prepare::{Bundle, Unit};
 
-/// Run all test specs for all students in parallel.
+/// How a batch runs.
+#[derive(Debug, Clone)]
+pub struct RunOptions {
+	/// Units running at once. Defaults to the number of CPUs.
+	pub concurrency: Option<usize>,
+	/// The interpreter that runs teacher Python checker scripts.
+	pub python: String,
+}
+
+impl Default for RunOptions {
+	fn default() -> Self {
+		Self {
+			concurrency: None,
+			python: "python3".into(),
+		}
+	}
+}
+
+/// Run every prepared bundle against every student.
 ///
 /// Takes `&[StudentSubmission]` rather than the whole `AssignmentInput` so that the roster,
-/// the unmatched artifacts and the diagnostics stay out of the runner. Canvas-only material
-/// is kept out of the executor itself by `run_student`, which only ever sees a student id
-/// and a file list.
+/// the unmatched artifacts and the diagnostics stay out of the runner.
 ///
 /// Returns one report per student **in input order**, including students with nothing to
 /// run: a roster member who did not submit must not vanish from the results, and a
 /// `HashMap` keyed on student id would additionally drop one of two retained duplicates.
-/// Concurrency is bounded by `max_concurrent` (defaults to number of CPUs).
-pub async fn run_all(
+///
+/// Each unit — an independent case or a scenario — is its own task holding one permit, so
+/// a student's cases run concurrently; results come back in declaration order.
+pub async fn run_all<E: Executor>(
 	students: &[StudentSubmission],
-	specs: &[TestSpec],
-	executor: &PythonExecutor,
-	timeout_secs: u64,
-	max_concurrent: Option<usize>,
+	bundles: Arc<[Bundle]>,
+	executor: Arc<E>,
+	options: &RunOptions,
 ) -> Vec<StudentReport> {
-	let concurrency = max_concurrent.unwrap_or_else(|| {
+	let concurrency = options.concurrency.unwrap_or_else(|| {
 		std::thread::available_parallelism()
 			.map(|n| n.get())
 			.unwrap_or(4)
 	});
 	let semaphore = Arc::new(Semaphore::new(concurrency));
+	let python: Arc<str> = options.python.as_str().into();
 
 	let mut handles = Vec::new();
-
 	for student in students {
 		let identity = student.identity.clone();
 		let outcome = student.outcome();
@@ -45,17 +64,17 @@ pub async fn run_all(
 		// very output a teacher needs to resolve the mismatch.
 		let runnable = student.state == SubmissionState::Executable;
 		let files = student.files().to_vec();
-		let specs = specs.to_vec();
-		let sem = semaphore.clone();
-		let python_cmd = executor.python_cmd().to_string();
-		let timeout = timeout_secs;
+		let (bundles, executor, semaphore, python) = (
+			bundles.clone(),
+			executor.clone(),
+			semaphore.clone(),
+			python.clone(),
+		);
 
 		let handle = tokio::spawn(async move {
 			let sid = identity.key.to_string();
 			let mut report = if runnable {
-				let _permit = sem.acquire().await.unwrap();
-				let exec = PythonExecutor::with_python_cmd(&python_cmd);
-				run_student(&exec, &sid, &files, &specs, timeout).await
+				run_student(sid, files, bundles, executor, semaphore, python).await
 			} else {
 				// Nothing to run, but the student still gets a row.
 				StudentReport {
@@ -68,7 +87,6 @@ pub async fn run_all(
 			report.submission_state = Some(outcome);
 			report
 		});
-
 		handles.push((student, handle));
 	}
 
@@ -89,205 +107,134 @@ pub async fn run_all(
 			}),
 		}
 	}
-
 	reports
 }
 
-/// Run all test specs for a single student.
-async fn run_student(
-	executor: &PythonExecutor,
-	sid: &str,
-	files: &[StudentFile],
-	specs: &[TestSpec],
-	timeout_secs: u64,
+/// Run every unit of every bundle for one student.
+async fn run_student<E: Executor>(
+	sid: String,
+	files: Vec<StudentFile>,
+	bundles: Arc<[Bundle]>,
+	executor: Arc<E>,
+	semaphore: Arc<Semaphore>,
+	python: Arc<str>,
 ) -> StudentReport {
-	let mut test_results = Vec::new();
+	let mut slots: Vec<Vec<Option<Vec<CaseResult>>>> =
+		bundles.iter().map(|b| vec![None; b.units.len()]).collect();
+	let mut tasks = JoinSet::new();
+	let mut where_is = HashMap::new();
 
-	for spec in specs {
-		// 1. Seed context with vars
-		let mut context: HashMap<String, serde_json::Value> = HashMap::new();
-		for (key, value) in &spec.vars {
-			context.insert(key.clone(), value.clone());
-		}
-
-		// 2. Run setup steps
-		let mut setup_failed = false;
-
-		for step in &spec.setup {
-			if setup_failed {
-				break;
+	for (b, bundle) in bundles.iter().enumerate() {
+		// One file per (student, bundle): every unit of a spec runs against the same file.
+		let Some(file) = executor.locate(&files, &bundle.spec) else {
+			for (u, unit) in bundle.units.iter().enumerate() {
+				slots[b][u] = Some(blanket(
+					unit,
+					TestStatus::Missing,
+					Fault::Student,
+					Cause::NoFile,
+					&format!(
+						"No file matching '{}' found in submission",
+						bundle.spec.meta.file
+					),
+				));
 			}
-
-			let value = if let Some(function_name) = &step.function {
-				let resolved_args = resolve_args(&step.args, &context);
-				let case = crate::models::TestCase {
-					name: format!("setup:{}", step.id),
-					id: Some(step.id.clone()),
-					args: resolved_args,
-					expect: None,
-					expect_error: None,
-					stdin: None,
-					expected_stdout: None,
-					check: None,
-					timeout: None,
-					parametrize: None,
-					function: None,
-					..Default::default()
-				};
-
-				let setup_spec = TestSpec {
-					meta: crate::models::TestMeta {
-						function: Some(function_name.clone()),
-						..spec.meta.clone()
-					},
-					vars: Default::default(),
-					setup: vec![],
-					cases: vec![],
-					lint: None,
-					scenarios: vec![],
-					dir: spec.dir.clone(),
-				};
-
-				let result = executor
-					.execute_case(files, &setup_spec, &case, timeout_secs)
-					.await;
-
-				if result.status != TestStatus::Passed && result.status != TestStatus::Failed {
-					setup_failed = true;
-					serde_json::Value::Null
-				} else {
-					result
-						.actual
-						.as_ref()
-						.and_then(|s| serde_json::from_str(s).ok())
-						.unwrap_or(serde_json::Value::Null)
-				}
-			} else if let Some(script_path) = &step.file {
-				// Run teacher script, capture JSON stdout
-				match tokio::process::Command::new("python3")
-					.arg(script_path)
-					.output()
-					.await
-				{
-					Ok(output) if output.status.success() => {
-						let stdout = String::from_utf8_lossy(&output.stdout);
-						serde_json::from_str(stdout.trim()).unwrap_or(serde_json::Value::Null)
-					}
-					Ok(output) => {
-						let stderr = String::from_utf8_lossy(&output.stderr);
-						eprintln!("Setup script '{}' failed: {}", script_path, stderr.trim());
-						setup_failed = true;
-						serde_json::Value::Null
-					}
-					Err(e) => {
-						eprintln!("Failed to run setup script '{}': {}", script_path, e);
-						setup_failed = true;
-						serde_json::Value::Null
-					}
-				}
-			} else {
-				serde_json::Value::Null
-			};
-
-			context.insert(step.id.clone(), value);
-		}
-
-		// 3. Expand parametrized cases
-		let expanded_cases = crate::runner::expander::expand_cases(&spec.cases);
-
-		// 4. Resolve oracles for parametrized cases
-		let mut final_cases = Vec::new();
-		for mut case in expanded_cases {
-			// Find original parametrized case to get oracle config
-			let original = spec
-				.cases
-				.iter()
-				.find(|c| case.name.starts_with(&c.name) && c.parametrize.is_some());
-			if let Some(orig) = original
-				&& let Some(param) = &orig.parametrize
-			{
-				let mut arg_names: Vec<String> = param.args.keys().cloned().collect();
-				arg_names.sort();
-				crate::runner::oracle::resolve_oracle(
-					&mut case,
-					&param.oracle,
-					spec,
-					executor,
-					&arg_names,
-				)
-				.await;
-			}
-			final_cases.push(case);
-		}
-
-		// 5. Run cases — chain mode or per-case mode
-		let use_chain =
-			!spec.meta.imports.is_empty() || final_cases.iter().any(|c| c.function.is_some());
-
-		let cases = if use_chain {
-			// Chain mode: single subprocess handles setup + all cases
-			executor
-				.execute_chain(files, spec, &final_cases, timeout_secs)
-				.await
-		} else {
-			// Per-case mode (original behavior)
-			let mut cases = Vec::new();
-			for case in &final_cases {
-				if setup_failed {
-					cases.push(CaseResult {
-						case_name: case.name.clone(),
-						status: TestStatus::Error,
-						actual: None,
-						expected: None,
-						failure: Some(FailureDetail {
-							message: "Skipped: setup step failed".to_string(),
-							details: String::new(),
-						}),
-						elapsed_ms: Some(0),
-						..Default::default()
-					});
-					continue;
-				}
-
-				let case_timeout = case.timeout.unwrap_or(timeout_secs);
-
-				// Resolve $ref in args
-				let resolved_case = crate::models::TestCase {
-					args: resolve_args(&case.args, &context),
-					..case.clone()
-				};
-
-				let result = executor
-					.execute_case(files, spec, &resolved_case, case_timeout)
-					.await;
-				cases.push(result);
-			}
-			cases
+			continue;
 		};
-
-		test_results.push(TestResult {
-			item_id: spec.meta.name.clone(),
-			cases,
-		});
-	}
-
-	// Run lint if any spec has a lint config (use the first one found).
-	let mut lint_score = None;
-	for spec in specs {
-		if let Some(lint_config) = &spec.lint {
-			if let Some(first_file) = files.first() {
-				let result = crate::runner::linter::run_lint(lint_config, &first_file.path);
-				lint_score = Some(result.style_score);
-			}
-			break;
+		let path = std::path::absolute(&file.path).unwrap_or_else(|_| file.path.clone());
+		for u in 0..bundle.units.len() {
+			let (bundles, executor, semaphore, python, path) = (
+				bundles.clone(),
+				executor.clone(),
+				semaphore.clone(),
+				python.clone(),
+				path.clone(),
+			);
+			let handle = tasks.spawn(async move {
+				let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
+				let mut plan = bundles[b].units[u].plan.clone();
+				plan.file = path;
+				let observation = executor.run(&plan).await;
+				// Judging may run a teacher's checker script: keep it off the async workers.
+				tokio::task::spawn_blocking(move || {
+					let unit = &bundles[b].units[u];
+					judge(&plan, &unit.scored(), &observation, &python)
+				})
+				.await
+				.expect("judging panicked")
+			});
+			where_is.insert(handle.id(), (b, u));
 		}
 	}
+
+	while let Some(joined) = tasks.join_next_with_id().await {
+		match joined {
+			Ok((id, results)) => {
+				let (b, u) = where_is[&id];
+				slots[b][u] = Some(results);
+			}
+			// A panicking unit costs that unit, not the student's other results.
+			Err(e) => {
+				let (b, u) = where_is[&e.id()];
+				slots[b][u] = Some(blanket(
+					&bundles[b].units[u],
+					TestStatus::Error,
+					Fault::Environment,
+					Cause::Harness,
+					&format!("grading this unit failed: {e}"),
+				));
+			}
+		}
+	}
+
+	let test_results = bundles
+		.iter()
+		.zip(slots)
+		.map(|(bundle, units)| TestResult {
+			item_id: bundle.spec.meta.name.clone(),
+			cases: units.into_iter().flatten().flatten().collect(),
+		})
+		.collect();
 
 	StudentReport {
-		student_id: sid.to_string(),
+		student_id: sid,
 		test_results,
-		backend_name: Some("python".to_string()),
-		lint_score,
+		backend_name: Some(executor.language().to_string()),
+		lint_score: lint(&bundles, &files, &semaphore).await,
 		..Default::default()
 	}
+}
+
+/// Style score from the first spec that asks for one.
+async fn lint(bundles: &[Bundle], files: &[StudentFile], semaphore: &Semaphore) -> Option<f64> {
+	let config = bundles.iter().find_map(|b| b.spec.lint.clone())?;
+	let file = files.first()?.path.clone();
+	let _permit = semaphore.acquire().await.ok()?;
+	tokio::task::spawn_blocking(move || crate::runner::linter::run_lint(&config, &file).style_score)
+		.await
+		.ok()
+}
+
+fn blanket(
+	unit: &Unit,
+	status: TestStatus,
+	fault: Fault,
+	cause: Cause,
+	message: &str,
+) -> Vec<CaseResult> {
+	unit.scored
+		.iter()
+		.map(|(name, _)| CaseResult {
+			case_name: name.clone(),
+			status,
+			failure: Some(FailureDetail {
+				message: message.to_string(),
+				details: String::new(),
+			}),
+			elapsed_ms: Some(0),
+			fault: Some(fault),
+			cause: Some(cause),
+			..Default::default()
+		})
+		.collect()
 }

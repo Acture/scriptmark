@@ -1,6 +1,6 @@
 use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use owo_colors::OwoColorize;
-use scriptmark::models::{StudentReport, TestStatus};
+use scriptmark::models::{Fault, StudentReport, TestStatus};
 
 /// Display a summary table of all student results.
 pub fn display_summary(reports: &[&StudentReport], title: &str) {
@@ -102,12 +102,20 @@ pub fn display_failures(reports: &[&StudentReport]) {
 					TestStatus::Failed => "FAIL".red().to_string(),
 					TestStatus::Error => "ERROR".red().bold().to_string(),
 					TestStatus::Timeout => "TIMEOUT".yellow().to_string(),
-					_ => continue,
+					TestStatus::Missing => "MISSING".dimmed().to_string(),
+					TestStatus::Passed => continue,
+				};
+				// A teacher's or the machine's failure is flagged: the student cannot fix it.
+				let owner = match case.fault {
+					Some(Fault::Teacher) => format!(" {}", "(teacher)".magenta().bold()),
+					Some(Fault::Environment) => format!(" {}", "(environment)".magenta().bold()),
+					Some(Fault::Student) | None => String::new(),
 				};
 
 				println!(
-					"  {} [{}] {}",
+					"  {}{} [{}] {}",
 					status_str,
+					owner,
 					test_result.item_id.dimmed(),
 					case.case_name
 				);

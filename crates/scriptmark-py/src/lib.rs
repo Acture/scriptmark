@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -7,9 +8,10 @@ use pyo3::types::PyDict;
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::grading::apply_grading;
 use scriptmark::models::{AssignmentInput, StudentReport, TestSpec};
-use scriptmark::runner::orchestrator::run_all;
+use scriptmark::runner::orchestrator::{RunOptions, run_all};
+use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
-use scriptmark::spec_loader::load_specs_from_dir;
+use scriptmark::spec_loader::{load_spec as load_spec_file, load_specs_from_dir};
 
 /// A test specification loaded from a TOML file.
 #[pyclass(name = "TestSpec")]
@@ -45,12 +47,18 @@ impl PyTestSpec {
 		self.inner.cases.len()
 	}
 
+	#[getter]
+	fn num_scenarios(&self) -> usize {
+		self.inner.scenarios.len()
+	}
+
 	fn __repr__(&self) -> String {
 		format!(
-			"TestSpec(name='{}', file='{}', cases={})",
+			"TestSpec(name='{}', file='{}', cases={}, scenarios={})",
 			self.inner.meta.name,
 			self.inner.meta.file,
-			self.inner.cases.len()
+			self.inner.cases.len(),
+			self.inner.scenarios.len()
 		)
 	}
 }
@@ -177,12 +185,10 @@ fn local_input(paths: &[String]) -> PyResult<AssignmentInput> {
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))
 }
 
-/// Load a test specification from a TOML file.
+/// Load and validate a test specification from a TOML file.
 #[pyfunction]
 fn load_spec(path: String) -> PyResult<PyTestSpec> {
-	let content = std::fs::read_to_string(&path)
-		.map_err(|e| pyo3::exceptions::PyFileNotFoundError::new_err(e.to_string()))?;
-	let spec: TestSpec = toml::from_str(&content)
+	let spec = load_spec_file(Path::new(&path))
 		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 	Ok(PyTestSpec { inner: spec })
 }
@@ -245,13 +251,22 @@ fn run_grading(
 	let specs = load_specs_from_dir(Path::new(tests))
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-	let executor = PythonExecutor::with_python_cmd(python);
+	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
+	let options = RunOptions {
+		concurrency: None,
+		python: executor.python_cmd().to_string(),
+	};
 
 	// Bridge sync PyO3 → async tokio
 	let rt = tokio::runtime::Runtime::new()
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-	Ok(rt.block_on(run_all(&input.students, &specs, &executor, timeout, None)))
+	rt.block_on(async {
+		let bundles = prepare(specs, executor.clone(), timeout)
+			.await
+			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+		Ok(run_all(&input.students, bundles.into(), executor, &options).await)
+	})
 }
 
 /// Convert serde_json::Value to a Python object.

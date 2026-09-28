@@ -7,48 +7,36 @@ use crate::runner::generator::generate_value;
 /// Expand parametrized TestCases into concrete TestCases.
 /// Non-parametrized cases pass through unchanged.
 pub fn expand_cases(cases: &[TestCase]) -> Vec<TestCase> {
-	let mut result = Vec::new();
+	cases.iter().flat_map(expand_case).collect()
+}
 
-	for case in cases {
-		if let Some(param) = &case.parametrize {
-			let seed = param.seed.unwrap_or(0);
-			let mut rng = StdRng::seed_from_u64(seed);
-
-			// Sort arg names for deterministic positional ordering
-			let mut arg_names: Vec<&String> = param.args.keys().collect();
-			arg_names.sort();
-
-			for i in 0..param.count {
-				let mut args = Vec::new();
-				for name in &arg_names {
-					let expr = &param.args[*name];
-					match generate_value(expr, &mut rng) {
-						Ok(val) => args.push(val),
-						Err(_) => args.push(serde_json::Value::Null),
-					}
-				}
-
-				result.push(TestCase {
-					name: format!("{} [{}]", case.name, i),
-					args,
-					check: case.check.clone(),
-					timeout: case.timeout,
-					..Default::default()
-				});
-			}
-		} else {
-			result.push(case.clone());
-		}
-	}
-
-	result
+/// The concrete cases one case stands for: itself, or its generated cases. A generated
+/// case keeps everything but `parametrize` — its target, checks and timeout included.
+pub fn expand_case(case: &TestCase) -> Vec<TestCase> {
+	let Some(param) = &case.parametrize else {
+		return vec![case.clone()];
+	};
+	let mut rng = StdRng::seed_from_u64(param.seed.unwrap_or(0));
+	// `args` is a BTreeMap, so arguments bind in alphabetical order (P-675 owns binding).
+	(0..param.count)
+		.map(|i| TestCase {
+			name: format!("{} [{}]", case.name, i),
+			args: param
+				.args
+				.values()
+				.map(|expr| generate_value(expr, &mut rng).unwrap_or(serde_json::Value::Null))
+				.collect(),
+			parametrize: None,
+			..case.clone()
+		})
+		.collect()
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::models::spec::{Oracle, Parametrize};
-	use std::collections::BTreeMap as HashMap;
+	use std::collections::BTreeMap;
 
 	#[test]
 	fn test_non_parametrized_passthrough() {
@@ -65,7 +53,7 @@ mod tests {
 
 	#[test]
 	fn test_parametrized_expansion() {
-		let mut args = HashMap::new();
+		let mut args = BTreeMap::new();
 		args.insert("a".into(), "int(0, 10)".into());
 		args.insert("b".into(), "int(0, 10)".into());
 
@@ -90,7 +78,7 @@ mod tests {
 
 	#[test]
 	fn test_seed_reproducibility() {
-		let mut args = HashMap::new();
+		let mut args = BTreeMap::new();
 		args.insert("x".into(), "int(0, 1000)".into());
 
 		let cases = vec![TestCase {
@@ -107,5 +95,25 @@ mod tests {
 		let run2 = expand_cases(&cases);
 		assert_eq!(run1[0].args, run2[0].args);
 		assert_eq!(run1[1].args, run2[1].args);
+	}
+
+	#[test]
+	fn test_a_generated_case_keeps_its_target() {
+		let case = TestCase {
+			name: "g".into(),
+			function: Some("other".into()),
+			timeout: Some(3),
+			parametrize: Some(Parametrize {
+				count: 2,
+				seed: None,
+				args: BTreeMap::from([("x".into(), "int(0, 1)".into())]),
+				oracle: Oracle::default(),
+			}),
+			..Default::default()
+		};
+		for generated in expand_case(&case) {
+			assert_eq!(generated.function.as_deref(), Some("other"));
+			assert_eq!(generated.timeout, Some(3));
+		}
 	}
 }

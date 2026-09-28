@@ -1,9 +1,80 @@
-use std::io::Write;
+//! End to end: specs are loaded and prepared, units run through the Python harness, and
+//! the judge's verdicts come back in `StudentReport`s. Grouped by the P-674 acceptance
+//! line each test pins.
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use scriptmark::grading::apply_grading;
 use scriptmark::models::*;
-use scriptmark::runner::orchestrator;
+use scriptmark::runner::orchestrator::{RunOptions, run_all};
+use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
+use scriptmark::spec_loader::load_spec_str;
+
+/// A scratch directory holding specs, teacher files and one directory per student.
+struct Bench {
+	dir: tempfile::TempDir,
+}
+
+impl Bench {
+	fn new() -> Self {
+		Self {
+			dir: tempfile::tempdir().unwrap(),
+		}
+	}
+
+	fn path(&self) -> &Path {
+		self.dir.path()
+	}
+
+	fn write(&self, name: &str, content: &str) -> PathBuf {
+		let path = self.path().join(name);
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(&path, content).unwrap();
+		path
+	}
+
+	fn spec(&self, toml: &str) -> TestSpec {
+		load_spec_str(toml, self.path()).unwrap_or_else(|e| panic!("{e}"))
+	}
+
+	/// A student whose submission is one file.
+	fn student(&self, key: &str, file: &str, code: &str) -> StudentSubmission {
+		let path = self.write(&format!("students/{key}/{file}"), code);
+		StudentSubmission::from_files(key, &[path])
+	}
+}
+
+async fn grade_with(
+	specs: Vec<TestSpec>,
+	students: &[StudentSubmission],
+	executor: PythonExecutor,
+	timeout: u64,
+) -> Vec<StudentReport> {
+	let executor = Arc::new(executor);
+	let bundles = prepare(specs, executor.clone(), timeout)
+		.await
+		.unwrap_or_else(|e| panic!("{e}"));
+	let options = RunOptions {
+		concurrency: Some(4),
+		..Default::default()
+	};
+	run_all(students, bundles.into(), executor, &options).await
+}
+
+async fn grade(specs: Vec<TestSpec>, students: &[StudentSubmission]) -> Vec<StudentReport> {
+	grade_with(specs, students, PythonExecutor::new(), 5).await
+}
+
+/// Why a bundle is refused before any student runs.
+async fn refusal(spec: TestSpec) -> String {
+	prepare(vec![spec], Arc::new(PythonExecutor::new()), 5)
+		.await
+		.map(|_| ())
+		.unwrap_err()
+		.to_string()
+}
 
 /// Reports come back as a list in input order, so tests look a student up by the id the
 /// model renders rather than indexing a map.
@@ -14,39 +85,20 @@ fn by_id<'a>(reports: &'a [StudentReport], student_id: &str) -> &'a StudentRepor
 		.unwrap_or_else(|| panic!("no report for '{student_id}'"))
 }
 
-fn setup_test_dir() -> tempfile::TempDir {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Student "alice" — correct implementation
-	std::fs::write(
-		dir.path().join("alice_lab5.py"),
-		r#"
-def find_larger_number(a, b):
-    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
-        raise TypeError("Arguments must be numbers")
-    return max(a, b)
-"#,
-	)
-	.unwrap();
-
-	// Student "bob" — buggy implementation (returns min instead of max)
-	std::fs::write(
-		dir.path().join("bob_lab5.py"),
-		r#"
-def find_larger_number(a, b):
-    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
-        raise TypeError("Arguments must be numbers")
-    return min(a, b)
-"#,
-	)
-	.unwrap();
-
-	dir
+fn case<'a>(report: &'a StudentReport, name: &str) -> &'a CaseResult {
+	report
+		.test_results
+		.iter()
+		.flat_map(|t| &t.cases)
+		.find(|c| c.case_name == name)
+		.unwrap_or_else(|| panic!("no case '{name}' in {report:#?}"))
 }
 
-fn test_spec() -> TestSpec {
-	toml::from_str(
-		r#"
+fn verdict(c: &CaseResult) -> (TestStatus, Option<Fault>, Option<Cause>) {
+	(c.status, c.fault, c.cause)
+}
+
+const LARGER: &str = r#"
 [meta]
 name = "find_larger_number"
 file = "lab5.py"
@@ -72,815 +124,51 @@ expect = -2
 name = "invalid type"
 args = ["a", 1]
 expect_error = "TypeError"
-"#,
-	)
-	.unwrap()
-}
+"#;
+
+const ALICE: &str = r#"
+def find_larger_number(a, b):
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        raise TypeError("Arguments must be numbers")
+    return max(a, b)
+"#;
+
+const BOB: &str = r#"
+def find_larger_number(a, b):
+    if not isinstance(a, (int, float)) or not isinstance(b, (int, float)):
+        raise TypeError("Arguments must be numbers")
+    return min(a, b)
+"#;
+
+// ============================================================================
+// A complete teacher bundle runs alone — no generator, reference or seed.
+// ============================================================================
 
 #[tokio::test]
-async fn test_python_executor_correct_student() {
-	let dir = setup_test_dir();
-	let executor = PythonExecutor::new();
-
-	let files = vec![StudentFile::direct(
-		dir.path().join("alice_lab5.py"),
-		"python",
-	)];
-
-	let spec = test_spec();
-
-	// Test correct answers
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[0], 10)
-		.await;
-	assert_eq!(result.status, TestStatus::Passed, "case: 3 < 5");
-
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[1], 10)
-		.await;
-	assert_eq!(result.status, TestStatus::Passed, "case: equal zero");
-
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[2], 10)
-		.await;
-	assert_eq!(result.status, TestStatus::Passed, "case: negative");
-
-	// Test expected error
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[3], 10)
-		.await;
-	assert_eq!(
-		result.status,
-		TestStatus::Passed,
-		"case: invalid type should raise TypeError"
-	);
-}
-
-#[tokio::test]
-async fn test_python_executor_buggy_student() {
-	let dir = setup_test_dir();
-	let executor = PythonExecutor::new();
-
-	let files = vec![StudentFile::direct(
-		dir.path().join("bob_lab5.py"),
-		"python",
-	)];
-
-	let spec = test_spec();
-
-	// "3 < 5" — bob returns min(3,5)=3, expected 5 → FAIL
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[0], 10)
-		.await;
-	assert_eq!(
-		result.status,
-		TestStatus::Failed,
-		"bob: 3<5 should fail (returns min)"
-	);
-
-	// "equal zero" — min(0,0)=0, expected 0 → PASS (edge case)
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[1], 10)
-		.await;
-	assert_eq!(
-		result.status,
-		TestStatus::Passed,
-		"bob: equal zero still passes"
-	);
-
-	// TypeError case — bob has type checking, so this passes
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[3], 10)
-		.await;
-	assert_eq!(
-		result.status,
-		TestStatus::Passed,
-		"bob: TypeError still passes"
-	);
-}
-
-#[tokio::test]
-async fn test_orchestrator_runs_all_students() {
-	let dir = setup_test_dir();
-	let executor = PythonExecutor::new();
-
-	let students = vec![
-		StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]),
-		StudentSubmission::from_files("bob", &[dir.path().join("bob_lab5.py")]),
+async fn test_a_fixed_bundle_grades_without_generator_oracle_or_seed() {
+	let bench = Bench::new();
+	let students = [
+		bench.student("alice", "lab5.py", ALICE),
+		bench.student("bob", "lab5.py", BOB),
 	];
-
-	let specs = vec![test_spec()];
-
-	let results = orchestrator::run_all(&students, &specs, &executor, 10, Some(2)).await;
-
-	assert_eq!(results.len(), 2);
+	let results = grade(vec![bench.spec(LARGER)], &students).await;
 
 	let alice = by_id(&results, "alice");
 	assert_eq!(alice.status(), TestStatus::Passed);
-	assert_eq!(alice.total_cases(), 4);
 	assert_eq!(alice.total_passed(), 4);
 
 	let bob = by_id(&results, "bob");
-	assert_eq!(bob.status(), TestStatus::Failed);
-	assert_eq!(bob.total_cases(), 4);
-	// bob returns min instead of max: fails on "3<5" and "negative", passes "equal zero" and "TypeError"
-	assert_eq!(bob.total_passed(), 2);
-}
-
-#[tokio::test]
-async fn test_missing_file() {
-	let _dir = setup_test_dir();
-	let executor = PythonExecutor::new();
-
-	// Empty file list — no matching file
-	let files: Vec<StudentFile> = vec![];
-	let spec = test_spec();
-
-	let result = executor
-		.execute_case(&files, &spec, &spec.cases[0], 10)
-		.await;
-	assert_eq!(result.status, TestStatus::Error);
-	assert!(result.failure.unwrap().message.contains("No file matching"));
-}
-
-#[tokio::test]
-async fn test_fixtures_and_refs() {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Student code with two functions: make_pair returns [a,b], sum_pair sums a pair
-	std::fs::write(
-		dir.path().join("alice_math.py"),
-		r#"
-def make_pair(a, b):
-    return [a, b]
-
-def sum_pair(pair):
-    return pair[0] + pair[1]
-"#,
-	)
-	.unwrap();
-
-	// TOML spec with setup + $ref
-	let spec: TestSpec = toml::from_str(
-		r#"
-[meta]
-name = "math_pipeline"
-file = "math.py"
-language = "python"
-
-[[setup]]
-id = "pair"
-function = "make_pair"
-args = [3, 7]
-
-[[cases]]
-name = "sum of setup pair"
-function = "sum_pair"
-args = ["$pair"]
-expect = 10
-"#,
-	)
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_math.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-
-	let alice = by_id(&results, "alice");
-	assert_eq!(alice.total_cases(), 1);
 	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Passed,
-		"sum_pair($pair) should pass with fixture pair=[3,7] → sum=10"
-	);
-}
-
-#[tokio::test]
-async fn test_vars_as_refs() {
-	let dir = tempfile::tempdir().unwrap();
-
-	std::fs::write(
-		dir.path().join("alice_echo.py"),
-		r#"
-def echo(x):
-    return x
-"#,
-	)
-	.unwrap();
-
-	let spec: TestSpec = toml::from_str(
-		r#"
-[meta]
-name = "echo_test"
-file = "echo.py"
-language = "python"
-
-[vars]
-msg = "hello world"
-
-[[cases]]
-name = "echo var ref"
-function = "echo"
-args = ["$msg"]
-expect = "hello world"
-"#,
-	)
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_echo.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-	assert_eq!(alice.test_results[0].cases[0].status, TestStatus::Passed);
-}
-
-#[tokio::test]
-async fn test_vars_injected_as_python_globals() {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Student code accesses a global variable defined by the teacher
-	std::fs::write(
-		dir.path().join("alice_config.py"),
-		r#"
-def get_epsilon():
-    return EPSILON  # This global is injected by vars
-"#,
-	)
-	.unwrap();
-
-	let spec: TestSpec = toml::from_str(
-		r#"
-[meta]
-name = "config_test"
-file = "config.py"
-language = "python"
-
-[vars]
-EPSILON = 0.001
-
-[[cases]]
-name = "student reads injected global"
-function = "get_epsilon"
-args = []
-expect = 0.001
-"#,
-	)
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_config.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Passed,
-		"Student should be able to access EPSILON global injected by vars"
-	);
-}
-
-#[tokio::test]
-async fn test_parametrize_with_reference_oracle() {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Student — correct max implementation
-	std::fs::write(
-		dir.path().join("alice_lab5.py"),
-		"def find_max(a, b):\n    return max(a, b)\n",
-	)
-	.unwrap();
-
-	// Teacher reference implementation (the oracle)
-	let solutions_dir = dir.path().join("solutions");
-	std::fs::create_dir(&solutions_dir).unwrap();
-	std::fs::write(
-		solutions_dir.join("lab5.py"),
-		"def find_max(a, b):\n    return max(a, b)\n",
-	)
-	.unwrap();
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "parametrized_max"
-file = "lab5.py"
-function = "find_max"
-language = "python"
-
-[[cases]]
-name = "random max"
-
-[cases.parametrize]
-count = 10
-seed = 42
-
-[cases.parametrize.args]
-a = "int(-50, 50)"
-b = "int(-50, 50)"
-
-[cases.parametrize.oracle]
-reference = "{}/solutions/lab5.py"
-"#,
-		dir.path().display()
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_lab5.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(alice.total_cases(), 10, "Should have 10 generated cases");
-	assert_eq!(
-		alice.total_passed(),
-		10,
-		"Correct implementation should pass all generated cases"
-	);
-}
-
-#[tokio::test]
-async fn test_parametrize_with_rhai_oracle() {
-	let dir = tempfile::tempdir().unwrap();
-
-	std::fs::write(
-		dir.path().join("alice_lab5.py"),
-		"def find_max(a, b):\n    return max(a, b)\n",
-	)
-	.unwrap();
-
-	let spec: TestSpec = toml::from_str(
-		r#"
-[meta]
-name = "rhai_oracle_max"
-file = "lab5.py"
-function = "find_max"
-language = "python"
-
-[[cases]]
-name = "rhai oracle"
-
-[cases.parametrize]
-count = 5
-seed = 123
-
-[cases.parametrize.args]
-a = "int(0, 100)"
-b = "int(0, 100)"
-
-[cases.parametrize.oracle]
-rhai = "if a >= b { a } else { b }"
-"#,
-	)
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_lab5.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(alice.total_cases(), 5, "Should have 5 generated cases");
-	assert_eq!(
-		alice.total_passed(),
-		5,
-		"Correct max implementation should match Rhai oracle"
-	);
-}
-
-#[tokio::test]
-async fn test_setup_file_source() {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Teacher generator script — outputs JSON to stdout
-	std::fs::write(
-		dir.path().join("gen_data.py"),
-		r#"
-import json
-data = {"values": [10, 20, 30], "name": "test_data"}
-print(json.dumps(data))
-"#,
-	)
-	.unwrap();
-
-	// Student code — reads the generated data
-	std::fs::write(
-		dir.path().join("alice_proc.py"),
-		r#"
-def sum_values(data):
-    return sum(data["values"])
-"#,
-	)
-	.unwrap();
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "file_source_test"
-file = "proc.py"
-function = "sum_values"
-language = "python"
-
-[[setup]]
-id = "data"
-file = "{}/gen_data.py"
-
-[[cases]]
-name = "sum generated values"
-args = ["$data"]
-expect = 60
-"#,
-		dir.path().display()
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_proc.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(alice.total_cases(), 1);
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Passed,
-		"Should pass: teacher script generates data, student sums it correctly"
-	);
-}
-
-// ============================================================
-// Chain mode tests
-// ============================================================
-
-/// Helper to write a file and return its path as a string.
-fn write_file(dir: &std::path::Path, name: &str, content: &str) -> String {
-	let path = dir.join(name);
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent).unwrap();
-	}
-	let mut f = std::fs::File::create(&path).unwrap();
-	f.write_all(content.as_bytes()).unwrap();
-	path.to_string_lossy().to_string()
-}
-
-#[tokio::test]
-async fn test_chain_basic_imports() {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Teacher module: provides DATA
-	let teacher_path = write_file(
-		dir.path(),
-		"teacher.py",
-		r#"
-class Dataset:
-    def __init__(self, values):
-        self.values = values
-
-DATA = Dataset([10, 20, 30])
-"#,
-	);
-
-	// Student: processes the teacher's DATA
-	write_file(
-		dir.path(),
-		"alice_hw.py",
-		r#"
-def total(data):
-    return sum(data.values)
-
-def average(data):
-    return sum(data.values) / len(data.values)
-"#,
-	);
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "chain_basic"
-file = "hw.py"
-language = "python"
-imports = ["{teacher_path}"]
-
-[[cases]]
-name = "sum values"
-function = "total"
-args = ["$DATA"]
-expect = 60
-
-[[cases]]
-name = "average values"
-function = "average"
-args = ["$DATA"]
-expect = 20.0
-"#,
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_hw.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(alice.total_cases(), 2);
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Passed,
-		"total($DATA) should be 60"
+		bob.total_passed(),
+		2,
+		"min passes 'equal zero' and the TypeError"
 	);
 	assert_eq!(
-		alice.test_results[0].cases[1].status,
-		TestStatus::Passed,
-		"average($DATA) should be 20.0"
+		verdict(case(bob, "3 < 5")),
+		(TestStatus::Failed, Some(Fault::Student), Some(Cause::Wrong))
 	);
-}
-
-#[tokio::test]
-async fn test_chain_decorator_checker() {
-	let dir = tempfile::tempdir().unwrap();
-
-	// Teacher module: DATA + @checker for validate
-	let teacher_path = write_file(
-		dir.path(),
-		"teacher.py",
-		r#"
-DATA = list(range(10))
-
-@checker
-def check_subset(result, expected, DATA):
-    """Auto-injected DATA from _ctx."""
-    if not isinstance(result, list):
-        return False, f"Expected list, got {type(result).__name__}"
-    for item in result:
-        if item not in DATA:
-            return False, f"{item} not in DATA"
-    return True, ""
-"#,
-	);
-
-	// Student returns a subset
-	write_file(
-		dir.path(),
-		"alice_hw.py",
-		r#"
-def subset(data, n):
-    return data[:n]
-"#,
-	);
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "checker_test"
-file = "hw.py"
-language = "python"
-imports = ["{teacher_path}"]
-
-[[cases]]
-name = "first 3 elements"
-function = "subset"
-args = ["$DATA", 3]
-expect = [0, 1, 2]
-"#,
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_hw.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(alice.total_cases(), 1);
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Passed,
-		"@checker should validate subset against DATA"
-	);
-}
-
-#[tokio::test]
-async fn test_chain_decorator_checker_fails() {
-	let dir = tempfile::tempdir().unwrap();
-
-	let teacher_path = write_file(
-		dir.path(),
-		"teacher.py",
-		r#"
-DATA = [1, 2, 3]
-
-@checker("get_items")
-def validate_items(result, expected, DATA):
-    for item in result:
-        if item not in DATA:
-            return False, f"{item} not in DATA"
-    return True, ""
-"#,
-	);
-
-	// Student returns items not in DATA
-	write_file(
-		dir.path(),
-		"alice_hw.py",
-		r#"
-def get_items():
-    return [1, 2, 99]
-"#,
-	);
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "checker_fail_test"
-file = "hw.py"
-language = "python"
-imports = ["{teacher_path}"]
-
-[[cases]]
-name = "bad items"
-function = "get_items"
-args = []
-"#,
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_hw.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Failed,
-		"@checker('get_items') should detect 99 not in DATA"
-	);
-	assert!(
-		alice.test_results[0].cases[0]
-			.failure
-			.as_ref()
-			.unwrap()
-			.message
-			.contains("99"),
-		"Error message should mention the invalid item"
-	);
-}
-
-#[tokio::test]
-async fn test_chain_setup_failure() {
-	let dir = tempfile::tempdir().unwrap();
-
-	let teacher_path = write_file(dir.path(), "teacher.py", "GREETING = 'hello'\n");
-
-	// Student has no load_data function
-	write_file(
-		dir.path(),
-		"alice_hw.py",
-		r#"
-def process(data):
-    return len(data)
-"#,
-	);
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "setup_fail"
-file = "hw.py"
-language = "python"
-imports = ["{teacher_path}"]
-
-[[setup]]
-id = "data"
-function = "load_data"
-args = ["test.csv"]
-
-[[cases]]
-name = "should be skipped"
-function = "process"
-args = ["$data"]
-expect = 10
-"#,
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_hw.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Error,
-		"All cases should error when setup fails"
-	);
-	let msg = &alice.test_results[0].cases[0]
-		.failure
-		.as_ref()
-		.unwrap()
-		.message;
-	assert!(
-		msg.contains("setup") || msg.contains("Setup") || msg.contains("not found"),
-		"Error should mention setup failure, got: {msg}"
-	);
-}
-
-#[tokio::test]
-async fn test_chain_copy_refs_prevents_mutation() {
-	let dir = tempfile::tempdir().unwrap();
-
-	let teacher_path = write_file(dir.path(), "teacher.py", "DATA = [1, 2, 3, 4, 5]\n");
-
-	// Student mutates the input!
-	write_file(
-		dir.path(),
-		"alice_hw.py",
-		r#"
-def pop_and_sum(data):
-    data.pop()  # mutates!
-    return sum(data)
-
-def length(data):
-    return len(data)
-"#,
-	);
-
-	let spec: TestSpec = toml::from_str(&format!(
-		r#"
-[meta]
-name = "mutation_test"
-file = "hw.py"
-language = "python"
-imports = ["{teacher_path}"]
-
-[[cases]]
-name = "pop_and_sum"
-function = "pop_and_sum"
-args = ["$DATA"]
-expect = 10
-
-[[cases]]
-name = "length after mutation"
-function = "length"
-args = ["$DATA"]
-expect = 5
-"#,
-	))
-	.unwrap();
-
-	let executor = PythonExecutor::new();
-	let students = vec![StudentSubmission::from_files(
-		"alice",
-		&[dir.path().join("alice_hw.py")],
-	)];
-
-	let results = orchestrator::run_all(&students, &[spec], &executor, 10, Some(1)).await;
-	let alice = by_id(&results, "alice");
-
-	// With copy_refs=true (default), second case should still see original DATA
-	assert_eq!(
-		alice.test_results[0].cases[0].status,
-		TestStatus::Passed,
-		"pop_and_sum should work on copied data"
-	);
-	assert_eq!(
-		alice.test_results[0].cases[1].status,
-		TestStatus::Passed,
-		"length should still be 5 because DATA was deepcopied per case"
-	);
+	let input = case(bob, "3 < 5").input.clone().unwrap();
+	assert_eq!(input.args, vec![serde_json::json!(3), serde_json::json!(5)]);
 }
 
 /// The seam between the input model and the results: `run_all` is the only place a
@@ -888,10 +176,8 @@ expect = 5
 /// "a non-submitter is never scored zero" work end to end.
 #[tokio::test]
 async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
-	let dir = setup_test_dir();
-	let executor = PythonExecutor::new();
-
-	let mut alice = StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]);
+	let bench = Bench::new();
+	let mut alice = bench.student("alice", "lab5.py", ALICE);
 	alice.roster_match = RosterMatch::Matched(0);
 	alice.identity.canvas_user_id = Some(101);
 	alice.identity.name = Some("Alice".to_string());
@@ -900,9 +186,7 @@ async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
 	dan_identity.canvas_user_id = Some(105);
 	let absent = StudentSubmission::not_submitted(dan_identity, 1, None);
 
-	let students = vec![alice, absent];
-	let results = orchestrator::run_all(&students, &[test_spec()], &executor, 10, Some(2)).await;
-
+	let results = grade(vec![bench.spec(LARGER)], &[alice, absent]).await;
 	assert_eq!(results.len(), 2, "a non-submitter must still get a row");
 
 	let alice = by_id(&results, "alice");
@@ -929,17 +213,13 @@ async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
 /// output to work out why the two disagree.
 #[tokio::test]
 async fn test_a_submitter_absent_from_the_roster_is_still_executed() {
-	let dir = setup_test_dir();
-	let executor = PythonExecutor::new();
-
-	let mut stranger = StudentSubmission::from_files("alice", &[dir.path().join("alice_lab5.py")]);
+	let bench = Bench::new();
+	let mut stranger = bench.student("alice", "lab5.py", ALICE);
 	stranger.roster_match = RosterMatch::NotInRoster;
 	assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
 
-	let results = orchestrator::run_all(&[stranger], &[test_spec()], &executor, 10, Some(1)).await;
-
-	assert_eq!(results[0].total_cases(), 4, "their tests must still run");
-	assert_eq!(results[0].total_passed(), 4);
+	let results = grade(vec![bench.spec(LARGER)], &[stranger]).await;
+	assert_eq!(results[0].total_passed(), 4, "their tests must still run");
 	assert_eq!(
 		results[0].submission_state,
 		Some(SubmissionOutcome::ReceivedUnmatched)
@@ -948,4 +228,665 @@ async fn test_a_submitter_absent_from_the_roster_is_still_executed() {
 	let mut graded = results;
 	apply_grading(&mut graded, &GradingPolicy::default());
 	assert_eq!(graded[0].final_grade, None);
+}
+
+#[tokio::test]
+async fn test_vars_are_student_globals_and_names_in_scope() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "vars"
+file = "lab.py"
+language = "python"
+
+[vars]
+LIMIT = 10
+PAIR = [3, 4]
+
+[[cases]]
+name = "global"
+function = "limit"
+expect = 10
+
+[[cases]]
+name = "ref"
+function = "total"
+args = ["$PAIR"]
+expect = 7
+
+[[cases]]
+name = "literal dollar"
+function = "echo"
+args = ["$$5"]
+expect = "$5"
+"#,
+	);
+	let alice = bench.student(
+		"alice",
+		"lab.py",
+		"def limit():\n    return LIMIT\n\ndef total(pair):\n    return sum(pair)\n\ndef echo(x):\n    return x\n",
+	);
+	let results = grade(vec![spec], &[alice]).await;
+	assert_eq!(results[0].total_passed(), 3, "{:#?}", results[0]);
+}
+
+#[tokio::test]
+async fn test_parametrized_cases_with_rhai_and_reference_oracles() {
+	let bench = Bench::new();
+	bench.write(
+		"reference/lab.py",
+		"def larger(a, b):\n    return a if a >= b else b\n",
+	);
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "larger"
+file = "lab.py"
+function = "larger"
+language = "python"
+
+[[cases]]
+name = "rhai"
+[cases.parametrize]
+count = 5
+seed = 42
+[cases.parametrize.args]
+a = "int(-100, 100)"
+b = "int(-100, 100)"
+[cases.parametrize.oracle]
+rhai = "if a >= b { a } else { b }"
+
+[[cases]]
+name = "reference"
+[cases.parametrize]
+count = 5
+seed = 7
+[cases.parametrize.args]
+a = "int(-100, 100)"
+b = "int(-100, 100)"
+[cases.parametrize.oracle]
+reference = "reference/lab.py"
+"#,
+	);
+	let students = [
+		bench.student(
+			"alice",
+			"lab.py",
+			"def larger(a, b):\n    return max(a, b)\n",
+		),
+		bench.student("bob", "lab.py", "def larger(a, b):\n    return min(a, b)\n"),
+	];
+	let results = grade(vec![spec], &students).await;
+	assert_eq!(by_id(&results, "alice").total_passed(), 10);
+	assert!(by_id(&results, "bob").total_passed() < 10);
+}
+
+// ============================================================================
+// Changing helper imports does not change isolation.
+// ============================================================================
+
+const COUNTER: &str = "calls = 0\n\ndef bump():\n    global calls\n    calls += 1\n    return calls\n\ndef bump_too():\n    return bump()\n";
+
+#[tokio::test]
+async fn test_imports_and_function_overrides_do_not_change_isolation() {
+	let bench = Bench::new();
+	bench.write("helpers/teacher.py", "HELPER = 1\n");
+	let plain = r#"
+[meta]
+name = "plain"
+file = "lab.py"
+function = "bump"
+language = "python"
+[[cases]]
+name = "first"
+expect = 1
+[[cases]]
+name = "second"
+expect = 1
+"#;
+	let with_import = plain
+		.replace("name = \"plain\"", "name = \"imports\"")
+		.replace(
+			"language = \"python\"",
+			"language = \"python\"\nimports = [\"helpers/teacher.py\"]",
+		);
+	let with_override = plain
+		.replace("name = \"plain\"", "name = \"override\"")
+		.replace(
+			"name = \"second\"",
+			"name = \"second\"\nfunction = \"bump_too\"",
+		);
+	let specs = vec![
+		bench.spec(plain),
+		bench.spec(&with_import),
+		bench.spec(&with_override),
+	];
+	let results = grade(specs, &[bench.student("alice", "lab.py", COUNTER)]).await;
+	for item in &results[0].test_results {
+		for c in &item.cases {
+			assert_eq!(
+				c.status,
+				TestStatus::Passed,
+				"{}: '{}' saw another case's state: {:?}",
+				item.item_id,
+				c.case_name,
+				c.failure
+			);
+		}
+	}
+}
+
+#[tokio::test]
+async fn test_a_scenario_shares_state_on_purpose() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "counter"
+file = "lab.py"
+function = "bump"
+language = "python"
+[[scenarios]]
+name = "counting"
+[[scenarios.steps]]
+name = "one"
+expect = 1
+[[scenarios.steps]]
+name = "two"
+expect = 2
+"#,
+	);
+	let results = grade(vec![spec], &[bench.student("alice", "lab.py", COUNTER)]).await;
+	assert_eq!(results[0].total_passed(), 2);
+	assert!(
+		results[0].test_results[0]
+			.cases
+			.iter()
+			.any(|c| c.case_name == "counting / two")
+	);
+}
+
+// ============================================================================
+// Setup runs exactly once in its declared scope.
+// ============================================================================
+
+#[tokio::test]
+async fn test_setup_runs_once_per_unit_and_once_per_scenario() {
+	let bench = Bench::new();
+	let unit_log = bench.path().join("unit.log");
+	let scenario_log = bench.path().join("scenario.log");
+	let spec = bench.spec(&format!(
+		r#"
+[meta]
+name = "setup_count"
+file = "lab.py"
+function = "echo"
+language = "python"
+
+[vars]
+UNIT_LOG = {unit_log:?}
+SCENARIO_LOG = {scenario_log:?}
+
+[[setup]]
+id = "unit"
+function = "record"
+args = ["$UNIT_LOG"]
+
+[[cases]]
+name = "a"
+args = ["$unit"]
+expect = "recorded"
+
+[[cases]]
+name = "b"
+args = ["$unit"]
+expect = "recorded"
+
+[[scenarios]]
+name = "s"
+[[scenarios.setup]]
+id = "scenario"
+function = "record"
+args = ["$SCENARIO_LOG"]
+[[scenarios.steps]]
+name = "x"
+args = ["$scenario"]
+expect = "recorded"
+[[scenarios.steps]]
+name = "y"
+args = ["$scenario"]
+expect = "recorded"
+"#
+	));
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def record(path):\n    with open(path, 'a') as fh:\n        fh.write('ran\\n')\n    return 'recorded'\n\ndef echo(x):\n    return x\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	assert_eq!(results[0].total_passed(), 4, "{:#?}", results[0]);
+
+	let lines = |p: &Path| std::fs::read_to_string(p).unwrap().lines().count();
+	assert_eq!(
+		lines(&unit_log),
+		3,
+		"top-level setup: once per case, once per scenario"
+	);
+	assert_eq!(lines(&scenario_log), 1, "scenario setup: once per scenario");
+}
+
+// ============================================================================
+// Timeouts belong to calls.
+// ============================================================================
+
+#[tokio::test]
+async fn test_timeouts_belong_to_the_call_that_hung() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "timeouts"
+file = "lab.py"
+language = "python"
+
+[[cases]]
+name = "hangs"
+function = "spin"
+expect = 1
+
+[[cases]]
+name = "slow but allowed"
+function = "nap"
+timeout = 3
+expect = 1
+
+[[cases]]
+name = "neighbour"
+function = "ok"
+expect = 1
+
+[[scenarios]]
+name = "s"
+[[scenarios.steps]]
+name = "hang 1"
+function = "spin"
+expect = 1
+[[scenarios.steps]]
+name = "hang 2"
+function = "swallow"
+expect = 1
+[[scenarios.steps]]
+name = "hang 3"
+function = "spin"
+expect = 1
+[[scenarios.steps]]
+name = "after"
+function = "ok"
+expect = 1
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"import time\n\ndef spin():\n    while True:\n        pass\n\ndef swallow():\n    try:\n        while True:\n            pass\n    except:\n        return 1\n\ndef nap():\n    time.sleep(1.5)\n    return 1\n\ndef ok():\n    return 1\n",
+	);
+	let results = grade_with(vec![spec], &[student], PythonExecutor::new(), 1).await;
+	let r = &results[0];
+	let timeout = (
+		TestStatus::Timeout,
+		Some(Fault::Student),
+		Some(Cause::Timeout),
+	);
+	assert_eq!(verdict(case(r, "hangs")), timeout);
+	assert_eq!(case(r, "slow but allowed").status, TestStatus::Passed);
+	assert_eq!(case(r, "neighbour").status, TestStatus::Passed);
+	assert_eq!(verdict(case(r, "s / hang 1")), timeout);
+	assert_eq!(
+		verdict(case(r, "s / hang 2")),
+		timeout,
+		"a bare except cannot turn a timeout into a pass"
+	);
+	assert_eq!(verdict(case(r, "s / hang 3")), timeout);
+	assert_eq!(
+		case(r, "s / after").status,
+		TestStatus::Passed,
+		"three hangs do not exhaust the CPU limit before the last step"
+	);
+}
+
+// ============================================================================
+// stdout is evidence, never noise on the protocol.
+// ============================================================================
+
+#[tokio::test]
+async fn test_a_printing_student_passes_and_their_output_is_evidence() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "print"
+file = "lab.py"
+function = "greet"
+language = "python"
+
+[[cases]]
+name = "value"
+args = ["ada"]
+expect = "hi ada"
+
+[[cases]]
+name = "output"
+args = ["ada"]
+expected_stdout = "greeting ada\n"
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"import random, csv, json\nprint('module noise')\n\ndef greet(name):\n    print('greeting', name)\n    return 'hi ' + name\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	let value = case(&results[0], "value");
+	assert_eq!(value.status, TestStatus::Passed, "{value:?}");
+	assert_eq!(value.stdout.as_deref(), Some("greeting ada\n"));
+	assert_eq!(case(&results[0], "output").status, TestStatus::Passed);
+}
+
+#[tokio::test]
+async fn test_script_cases_see_their_stdin() {
+	let bench = Bench::new();
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "io"
+file = "io.py"
+language = "python"
+
+[[cases]]
+name = "sum"
+script = true
+stdin = "3\n1 2 3\n"
+expected_stdout = "n? 6\n"
+
+[[cases]]
+name = "tolerant"
+script = true
+stdin = "1\n5\n"
+expected_stdout = "n? 5"
+check = "text"
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"io.py",
+		"import sys\nn = int(input('n? '))\nprint(sum(int(x) for x in sys.stdin.read().split()))\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	assert_eq!(results[0].total_passed(), 2, "{:#?}", results[0]);
+}
+
+// ============================================================================
+// Every failure has an owner.
+// ============================================================================
+
+#[tokio::test]
+async fn test_every_failure_has_an_owner() {
+	let bench = Bench::new();
+	bench.write(
+		"helpers/teacher.py",
+		"def crashes(result, expected):\n    return result.nope\n\ndef rejects(result, expected):\n    assert isinstance(result, list), 'expected a list'\n    return True\n\ndef make():\n    raise RuntimeError('teacher bug')\n",
+	);
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "owners"
+file = "lab.py"
+language = "python"
+imports = ["helpers/teacher.py"]
+
+[[cases]]
+name = "missing function"
+function = "nope_not_here_at_all"
+expect = 1
+
+[[cases]]
+name = "raises"
+function = "boom"
+expect = 1
+
+[[cases]]
+name = "wrong"
+function = "five"
+expect = 6
+
+[[cases]]
+name = "checker crashes"
+function = "five"
+check = { function = "crashes" }
+
+[[cases]]
+name = "checker rejects"
+function = "five"
+check = { function = "rejects" }
+
+[[cases]]
+name = "rhai cannot decide"
+function = "five"
+check = { rhai = "result != () && result.len() > 0" }
+
+[[cases]]
+name = "unserialisable"
+function = "clash"
+expect = 1
+
+[[scenarios]]
+name = "chain"
+[[scenarios.steps]]
+name = "producer fails"
+id = "made"
+function = "boom"
+expect = 1
+[[scenarios.steps]]
+name = "consumer"
+function = "echo"
+args = ["$made"]
+expect = 1
+
+[[scenarios]]
+name = "teacher setup"
+[[scenarios.setup]]
+id = "t"
+teacher = "make"
+[[scenarios.steps]]
+name = "never runs"
+function = "five"
+expect = 5
+"#,
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def boom():\n    raise KeyError('k')\n\ndef five():\n    return 5\n\ndef clash():\n    return {1: 'a', '1': 'b'}\n\ndef echo(x):\n    return x\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	let r = &results[0];
+	use Cause::*;
+	use Fault::*;
+	use TestStatus as S;
+	let expected = [
+		(
+			"missing function",
+			(S::Missing, Some(Student), Some(NoTarget)),
+		),
+		("raises", (S::Error, Some(Student), Some(Raised))),
+		("wrong", (S::Failed, Some(Student), Some(Wrong))),
+		("checker crashes", (S::Error, Some(Teacher), Some(Checker))),
+		(
+			"checker rejects",
+			(S::Failed, Some(Student), Some(Rejected)),
+		),
+		(
+			"rhai cannot decide",
+			(S::Error, Some(Teacher), Some(Checker)),
+		),
+		(
+			"unserialisable",
+			(S::Error, Some(Student), Some(Unserialisable)),
+		),
+		(
+			"chain / producer fails",
+			(S::Error, Some(Student), Some(Raised)),
+		),
+		(
+			"chain / consumer",
+			(S::Error, Some(Student), Some(Dependency)),
+		),
+		(
+			"teacher setup / never runs",
+			(S::Error, Some(Teacher), Some(Setup)),
+		),
+	];
+	for (name, want) in expected {
+		assert_eq!(
+			verdict(case(r, name)),
+			want,
+			"{name}: {:?}",
+			case(r, name).failure
+		);
+	}
+}
+
+#[tokio::test]
+async fn test_failures_before_any_call_have_owners_too() {
+	let bench = Bench::new();
+	let spec = bench.spec(LARGER);
+	let students = [
+		bench.student("nofile", "other.txt", "hello"),
+		bench.student(
+			"syntax",
+			"lab5.py",
+			"def find_larger_number(a, b)\n    return a\n",
+		),
+		bench.student("exits", "lab5.py", "exit()\n"),
+	];
+	let results = grade(vec![spec.clone()], &students).await;
+	let first = |id: &str| verdict(&by_id(&results, id).test_results[0].cases[0]);
+	assert_eq!(
+		first("nofile"),
+		(
+			TestStatus::Missing,
+			Some(Fault::Student),
+			Some(Cause::NoFile)
+		)
+	);
+	assert_eq!(
+		first("syntax"),
+		(TestStatus::Error, Some(Fault::Student), Some(Cause::Syntax))
+	);
+	assert_eq!(
+		first("exits"),
+		(TestStatus::Error, Some(Fault::Student), Some(Cause::Load))
+	);
+
+	// A grader that cannot start Python blames nobody's code.
+	let results = grade_with(
+		vec![spec],
+		&[bench.student("alice", "lab5.py", ALICE)],
+		PythonExecutor::with_python_cmd("/nonexistent/python3"),
+		5,
+	)
+	.await;
+	assert_eq!(
+		verdict(&results[0].test_results[0].cases[0]),
+		(
+			TestStatus::Error,
+			Some(Fault::Environment),
+			Some(Cause::Spawn)
+		)
+	);
+}
+
+// ============================================================================
+// Illegal or unsupported configuration is refused before any student runs.
+// ============================================================================
+
+#[tokio::test]
+async fn test_a_bundle_that_cannot_be_honoured_is_refused_before_grading() {
+	let bench = Bench::new();
+	bench.write(
+		"helpers/broken.py",
+		"raise RuntimeError('helper is broken')\n",
+	);
+	bench.write(
+		"helpers/decorated.py",
+		"@checker('f')\ndef check_f(result, expected):\n    return True\n",
+	);
+	bench.write("helpers/ok.py", "def two(result):\n    return True\n");
+	bench.write(
+		"reference/bad.py",
+		"def f(x):\n    raise ValueError('no')\n",
+	);
+
+	let spec = |body: &str| {
+		bench.spec(&format!(
+			"[meta]\nname = \"t\"\nfile = \"lab.py\"\nfunction = \"f\"\nlanguage = \"python\"\n{body}"
+		))
+	};
+	let refusals = [
+		(
+			spec("[[cases]]\nname = \"x\"\nargs = [\"$ghost\"]\nexpect = 1\n"),
+			"'$ghost' names nothing in scope",
+		),
+		(
+			spec("[[cases]]\nname = \"x\"\nexpect = 1\n").tap_imports(&bench, "helpers/broken.py"),
+			"teacher module failed to import",
+		),
+		(
+			spec("[[cases]]\nname = \"x\"\nexpect = 1\n")
+				.tap_imports(&bench, "helpers/decorated.py"),
+			"name 'checker' is not defined",
+		),
+		(
+			spec("[[cases]]\nname = \"x\"\ncheck = { rhai = \"result.len() > 0\" }\n"),
+			"cannot judge a student who returns None",
+		),
+		(
+			spec("[[cases]]\nname = \"x\"\ncheck = { function = \"nowhere\" }\n")
+				.tap_imports(&bench, "helpers/ok.py"),
+			"checker 'nowhere' is not a function the teacher modules export",
+		),
+		(
+			spec("[[cases]]\nname = \"x\"\ncheck = { function = \"two\" }\n")
+				.tap_imports(&bench, "helpers/ok.py"),
+			"must take (result, expected, ...)",
+		),
+		(
+			spec(
+				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\n",
+			),
+			"reference implementation 'f' did not return a value",
+		),
+	];
+	for (spec, needle) in refusals {
+		let message = refusal(spec).await;
+		assert!(
+			message.contains(needle),
+			"expected {needle:?} in:\n{message}"
+		);
+	}
+}
+
+trait TapImports {
+	fn tap_imports(self, bench: &Bench, path: &str) -> Self;
+}
+
+impl TapImports for TestSpec {
+	/// Add a teacher module after loading, the way a hand-built spec would.
+	fn tap_imports(mut self, bench: &Bench, path: &str) -> Self {
+		self.meta
+			.imports
+			.push(bench.path().join(path).to_string_lossy().into_owned());
+		self
+	}
 }
