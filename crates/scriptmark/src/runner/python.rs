@@ -152,9 +152,27 @@ const RECORD_FD: i32 = 3;
 #[cfg(not(unix))]
 const RECORD_FD: i32 = 1;
 
-/// More than this on the record channel is not the harness writing: its records carry at
-/// most a 4 MiB value, 64 KiB of stdout and 1 MiB per observed file per call.
-const STDOUT_CAP: usize = 64 * 1024 * 1024;
+/// What a unit's records may total before the channel counts as flooded, which is also
+/// what the grader buffers for it at most: this floor, plus the most each call carries.
+const BASE_CAP: usize = 64 << 20;
+/// The most one call's records carry, measured: a 4 MiB value, plus 64 KiB each of
+/// stdout and checker message, which JSON escaping can grow sixfold (`harness.py`'s
+/// `VALUE_LIMIT`, `STDOUT_LIMIT` and `MESSAGE_LIMIT`).
+const CALL_BOUND: usize = 6 << 20;
+/// The most one observed file adds: `FILE_LIMIT` characters, escaped.
+const FILE_BOUND: usize = 7 << 20;
+
+/// The record channel's cap for `plan`: a correct submission never reaches it, however
+/// many calls the unit makes.
+fn record_cap(plan: &UnitPlan) -> usize {
+	let files = |n: usize| n.saturating_mul(FILE_BOUND);
+	let script = plan.script.as_ref().map_or(0, |s| files(s.files.len()));
+	plan.setup
+		.iter()
+		.chain(&plan.steps)
+		.map(|c| CALL_BOUND.saturating_add(files(c.files.len())))
+		.fold(BASE_CAP.saturating_add(script), usize::saturating_add)
+}
 
 /// A unit's private directory: the payload beside a working directory the student runs in.
 struct Staged {
@@ -226,7 +244,7 @@ fn nonce() -> String {
 /// What a finished harness process left behind.
 struct Finished {
 	stdout: String,
-	/// The process wrote more than `STDOUT_CAP` to the record channel.
+	/// The process wrote more than its cap to the record channel.
 	stdout_overflow: bool,
 	stderr: String,
 	exit: Exit,
@@ -239,6 +257,7 @@ impl PythonExecutor {
 		staged: &Staged,
 		deadline_secs: u64,
 		stdin: Option<String>,
+		cap: usize,
 	) -> Finished {
 		use tokio::io::AsyncWriteExt;
 
@@ -308,7 +327,7 @@ impl PythonExecutor {
 				let _ = pipe.write_all(text.as_bytes()).await;
 			});
 		}
-		let stdout = Arc::new(Mutex::new(Sink::head(STDOUT_CAP)));
+		let stdout = Arc::new(Mutex::new(Sink::head(cap)));
 		let stderr = Arc::new(Mutex::new(Sink::tail(STDERR_TAIL)));
 		let mut pumps = tokio::task::JoinSet::new();
 		#[cfg(unix)]
@@ -565,7 +584,9 @@ impl Executor for PythonExecutor {
 			.await
 			.map_err(|e| e.to_string())?
 			.map_err(|e| format!("could not stage the teacher modules: {e}"))?;
-		let finished = self.run_harness(&staged, timeout_secs + 2, None).await;
+		let finished = self
+			.run_harness(&staged, timeout_secs + 2, None, BASE_CAP)
+			.await;
 		discard(staged).await;
 
 		let records = crate::runner::records::parse(&finished.stdout, &nonce);
@@ -640,14 +661,17 @@ impl Executor for PythonExecutor {
 			.script
 			.as_ref()
 			.map(|s| s.stdin.clone().unwrap_or_default());
-		let finished = self.run_harness(&staged, plan.deadline_secs(), stdin).await;
+		let cap = record_cap(plan);
+		let finished = self
+			.run_harness(&staged, plan.deadline_secs(), stdin, cap)
+			.await;
 		discard(staged).await;
 
 		let mut records = crate::runner::records::parse(&finished.stdout, &nonce);
 		if finished.stdout_overflow && records.protocol_error.is_none() {
 			records.protocol_error = Some(ProtocolError::Flooded(format!(
 				"more than {} MiB was written to the record channel",
-				STDOUT_CAP >> 20
+				cap >> 20
 			)));
 		}
 		UnitObservation {
@@ -674,6 +698,7 @@ impl Default for PythonExecutor {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::runner::executor::CallPlan;
 
 	/// The CPU limit is derived from the unit's own deadline — never the fixed 30 s it used
 	/// to be, which a scenario of several long steps would outrun and be killed by.
@@ -683,5 +708,37 @@ mod tests {
 			assert!(sandbox_for(deadline).cpu_secs > deadline);
 		}
 		assert_eq!(sandbox_for(u64::MAX).cpu_secs, u64::MAX, "saturates");
+	}
+
+	/// The cap grows with every call and observed file, so a long scenario of large but
+	/// legal values is never taken for a flood.
+	#[test]
+	fn test_the_record_cap_grows_with_the_units_calls_and_files() {
+		let step = |files: usize| CallPlan {
+			target: crate::models::Target::Function { name: "f".into() },
+			args: Vec::new(),
+			stdin: None,
+			timeout: 1,
+			id: None,
+			files: vec!["out.txt".into(); files],
+			check: None,
+		};
+		let plan = |steps: Vec<CallPlan>| UnitPlan {
+			subject: Subject::Student,
+			file: PathBuf::from("lab.py"),
+			script: None,
+			imports: Vec::new(),
+			vars: Default::default(),
+			data_files: Vec::new(),
+			allowed_imports: Vec::new(),
+			load_timeout: 1,
+			setup: Vec::new(),
+			steps,
+		};
+		assert_eq!(record_cap(&plan(Vec::new())), BASE_CAP);
+		let wide = record_cap(&plan(vec![step(1); 20]));
+		// Measured: one call with a 4 MiB value, 64 KiB of escaped stdout, a failing check's
+		// 64 KiB message and one 1 Mi-character file came to 10.75 MiB.
+		assert!(wide >= BASE_CAP + 20 * (43 << 18), "{wide}");
 	}
 }

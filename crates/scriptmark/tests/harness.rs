@@ -759,3 +759,93 @@ async fn test_nothing_a_student_writes_to_stdout_can_reach_the_records() {
 		);
 	}
 }
+
+#[tokio::test]
+async fn test_a_submission_cannot_stand_in_for_a_teacher_modules_sibling() {
+	let dir = tempfile::tempdir().unwrap();
+	write(dir.path(), "helpers/sibling.py", "VALUE = 'teacher'\n");
+	let teacher = write(
+		dir.path(),
+		"helpers/teacher.py",
+		"from sibling import VALUE\n\ndef which():\n    return VALUE\n",
+	);
+	// The student's file is staged under its own name, which it chose.
+	let student = write(
+		dir.path(),
+		"submission/sibling.py",
+		"VALUE = 'student'\n\ndef f():\n    return 1\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.steps = vec![call(
+		Target::Teacher {
+			name: "which".into(),
+		},
+		vec![],
+	)];
+	let obs = run(&plan).await;
+	assert!(obs.fatal.is_none(), "{obs:?}");
+	assert_eq!(returned(&obs.steps[0].outcome), &json!("teacher"));
+}
+
+#[tokio::test]
+async fn test_record_limits_count_bytes_and_clip_messages() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def wide():\n    return '\u{4e2d}' * (1536 * 1024)\n\ndef loud():\n    raise ValueError('x' * 1_000_000)\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("wide", vec![]), function("loud", vec![])];
+	let obs = run(&plan).await;
+	// 1.5 Mi characters, but 4.5 MiB of UTF-8 on the wire.
+	assert!(
+		returned(&obs.steps[0].outcome).get("$too_large").is_some(),
+		"{:?}",
+		obs.steps[0].outcome
+	);
+	match &obs.steps[1].outcome {
+		Outcome::Raised(e) => {
+			assert!(e.is_a("ValueError"));
+			assert!(e.message.len() < 70 * 1024, "{} bytes", e.message.len());
+			assert!(
+				e.message.ends_with("characters)"),
+				"{}",
+				&e.message[e.message.len() - 40..]
+			);
+		}
+		other => panic!("expected a raise, got {other:?}"),
+	}
+}
+
+#[tokio::test]
+async fn test_a_long_scenario_of_large_legal_values_is_not_a_flood() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def worst():\n    print('\\x01' * 70000)\n    with open('out.txt', 'w') as fh:\n        fh.write('\\x01' * (1024 * 1024 + 10))\n    return 'y' * (4 * 1024 * 1024 - 2)\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"teacher.py",
+		"def picky(result, expected):\n    return False, '\\x01' * 70000\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut step = function("worst", vec![]);
+	step.timeout = 30;
+	step.files = vec!["out.txt".into()];
+	step.check = Some(InProcessCheck {
+		function: "picky".into(),
+		expected: None,
+	});
+	// About 10.75 MiB each on the wire: 75 MiB in all, past a fixed 64 MiB cap.
+	plan.steps = vec![step; 7];
+	let obs = run(&plan).await;
+	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
+	assert!(obs.done, "{obs:?}");
+	assert_eq!(obs.steps.len(), 7);
+	assert_eq!(obs.checks.len(), 7);
+}

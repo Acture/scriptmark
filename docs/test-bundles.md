@@ -101,7 +101,8 @@ A case must declare at least one, and passes only if every one it declares holds
 What a returned value looks like to `expect`: tuples are lists, sets are lists in sorted
 order (mixed types fall back to a stable order), dict keys are strings, and an integer too
 large for a 64-bit number is `{ "$bigint" = "123…" }` — its exact decimal digits, or
-`hex()` past Python's 4300-digit limit. A value whose JSON would exceed 4 MiB is reported
+`hex()` past Python's 4300-digit limit. A value whose JSON would take more than 4 MiB of
+UTF-8 is reported
 as `{ "$too_large" = "… bytes of JSON" }`. Judge either with a function checker, which
 always gets the real value.
 
@@ -109,7 +110,7 @@ always gets the real value.
 
 | Spelling | |
 | -- | -- |
-| `check = "approx"` (with `expect`) | `exact`, `approx`, `set_eq`, `contains`, `text` compare against `expect`; `sorted` does not need it |
+| `check = "approx"` (with `expect`) | `exact`, `approx`, `set_eq`, `contains`, `text` compare against `expect`; `sorted` checks order only and takes no `expect` |
 | `check = { builtin = "approx", tolerance = 0.01 }` | |
 | `check = { rhai = "result != () && result.len() > 2" }` | `result`, `expected`, `context.stdout`, `context.files` |
 | `check = { python = "verifiers/check.py" }` | reads `{result, expected, context}` as JSON on stdin; prints `{"pass": ..., "message": ...}` |
@@ -150,8 +151,8 @@ Every case and every scenario runs in its own temporary directory with your data
 staged in it and the student's file copied beside them. `open("data/poem.txt")` and
 `Path(__file__).parent / "data" / "poem.txt"` both work. Relative writes land in that
 directory, which is removed afterwards; `expect_files` reads them back. Neither the
-working directory nor the import allowlist is a security boundary: an absolute path, or
-`importlib`, reaches past them.
+working directory nor the import allowlist is a security boundary; see
+[What grading does not defend against](#what-grading-does-not-defend-against).
 
 Teacher modules are loaded from the bundle, not the working directory. Find your own
 files with `Path(__file__).parent`, not a relative path; a module may import a sibling
@@ -192,6 +193,24 @@ Every case that does not pass says whose it is (`fault`) and why (`cause`):
 | `error` | teacher | `checker` / `teacher_import` / `nothing_to_judge` | the bundle's fault |
 | `error` | environment | `spawn` / `harness` | the machine's, or the grader's own, fault |
 
+An error or checker message longer than 64 KiB is cut, and says how long it was.
+
+## What grading does not defend against
+
+Every unit runs in its own process and directory, and its results travel on a channel of
+their own. That keeps accidents contained: stray output, a crash, a hang or a leftover
+file cannot touch another case or another student. It is not a sandbox against a student
+who sets out to beat the grader. Student code runs as your user, in the same process as
+the harness that records its calls and as your function checkers, so it can:
+
+- read the bundle, expected values included, by absolute path, or import past the
+  allowlist with `importlib`;
+- reach the harness through the interpreter and forge the records of its own calls,
+  a passing function checker's verdict included.
+
+Read the submission behind a result that surprises you, and grade on a machine or
+account where a student's code can do no harm.
+
 ## Refused before grading
 
 These are errors when the bundle is loaded or prepared, before any student runs:
@@ -209,6 +228,8 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 - a checker function that does not exist or asks for a name that means nothing;
 - a Rhai check that cannot judge `None`;
 - a function checker on a script case; `check` together with `oracle.check`;
+- `sorted` together with the `expect`, `expected_stdout` or oracle it would ignore;
+  `oracle.check` together with `expect` or `expect_error`;
 - an `expect` of the wrong shape for its checker (`approx` needs a number, `set_eq` an
   array, `text` a string);
 - `inf` or `nan` in `args`; `expected_stdout` longer than the 64 KiB of output kept;
@@ -227,8 +248,10 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 | `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module |
 | stdin → stdout cases with no function | add `script = true` |
 | a Rhai check like `result.len() > 0` | `result != () && result.len() > 0` |
+| `check = "sorted"` beside `expect = [...]` | drop `check`: `expect` alone already requires that exact list; or drop `expect` if any sorted list will do |
 
 Results can change on regrading. Students who printed inside a graded function, or who
 imported an allowed module such as `random` or `csv`, used to fail every case and now
 pass. Cases that a name-bound `@checker` used to judge silently are now judged by what
-they declare.
+they declare. A case that paired `sorted` with `expect` used to pass any sorted list; it
+is now refused until one of the two goes.

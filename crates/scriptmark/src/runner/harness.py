@@ -46,13 +46,12 @@ _channel = os.fdopen(
 _quiet = open(os.devnull, "w", encoding="utf-8")
 sys.stdout = _quiet
 _real_stdin = sys.stdin
-# Student code may import helpers staged beside it — after the stdlib, so a submission
-# named json.py or heapq.py never shadows what the harness or a teacher module imports.
-sys.path.append(os.getcwd())
 STUDENT = PAYLOAD.get("subject", "student") == "student"
+# What one call's record can carry; python.rs sizes the record channel from these.
 STDOUT_LIMIT = 64 * 1024
 FILE_LIMIT = 1024 * 1024
 VALUE_LIMIT = 4 * 1024 * 1024
+MESSAGE_LIMIT = 64 * 1024
 DEPTH_LIMIT = 100
 
 
@@ -232,11 +231,18 @@ def text_of(value):
 	return text if isinstance(text, str) else f"<{type(value).__name__}>"
 
 
+def clip(message):
+	"""A message kept to MESSAGE_LIMIT characters, saying how long it was."""
+	if len(message) <= MESSAGE_LIMIT:
+		return message
+	return f"{message[:MESSAGE_LIMIT]}… (cut from {len(message)} characters)"
+
+
 def error_of(exc):
 	info = {
 		"type": type(exc).__name__,
 		"types": [cls.__name__ for cls in type(exc).__mro__],
-		"message": text_of(exc),
+		"message": clip(text_of(exc)),
 	}
 	if isinstance(exc, SystemExit):
 		# The exit status CPython would report: `exit()`, `exit(0)` and `exit(False)` succeed;
@@ -311,7 +317,7 @@ def wire(value):
 	"""The value as a record carries it. One too large to report is replaced by its size:
 	the call still returned, and a function checker still judges the live value."""
 	value = to_json(value)
-	size = len(json.dumps(value, ensure_ascii=False))
+	size = len(json.dumps(value, ensure_ascii=False).encode("utf-8", "replace"))
 	if size > VALUE_LIMIT:
 		return {"$too_large": f"{size} bytes of JSON"}
 	return value
@@ -484,7 +490,7 @@ def verdict_of(returned):
 		and isinstance(returned[0], bool)
 		and isinstance(returned[1], (str, type(None)))
 	):
-		return {"verdict": {"pass": returned[0], "message": returned[1] or ""}}
+		return {"verdict": {"pass": returned[0], "message": clip(returned[1] or "")}}
 	return {
 		"error": {
 			"type": "CheckerContract",
@@ -643,6 +649,9 @@ def main():
 	except BaseException as exc:
 		emit({"kind": "fatal", "stage": "teacher_import", "error": error_of(exc)})
 		finish()
+	# Student code may import helpers staged beside it: after the stdlib and the teacher
+	# modules' directories, so a submission never stands in for what either imports.
+	sys.path.append(os.getcwd())
 	if PAYLOAD["mode"] == "inspect":
 		emit({"kind": "inspect", "duplicates": duplicates, "exports": {
 			name: {"callable": callable(value), "params": params_of(value) if callable(value) else None}

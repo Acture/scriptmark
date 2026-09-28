@@ -538,6 +538,25 @@ impl Validator<'_> {
 	}
 
 	fn check(&mut self, check: &Check, case: &TestCase, oracle_expects: bool, at: &str) {
+		// A built-in that judges a property never reads the expectation it is handed, so
+		// the case would pass without keeping it.
+		if let Check::Builtin { name, .. } = check
+			&& !check.needs_expectation()
+		{
+			let ignored = if case.script {
+				case.expected_stdout.is_some().then_some("expected_stdout")
+			} else if case.expect.is_some() {
+				Some("expect")
+			} else {
+				oracle_expects.then_some("the oracle's expectation")
+			};
+			if let Some(ignored) = ignored {
+				self.problem(
+					at,
+					format!("the {name} checker ignores {ignored}; drop one of them"),
+				);
+			}
+		}
 		if check.needs_expectation() {
 			let has = if case.script {
 				case.expected_stdout.is_some()
@@ -626,6 +645,18 @@ impl Validator<'_> {
 			self.problem(
 				at,
 				"check conflicts with oracle.check, which would replace it",
+			);
+		}
+		if oracle.check.is_some() && case.expect.is_some() {
+			self.problem(
+				at,
+				"expect is ignored: oracle.check judges a property, not a value",
+			);
+		}
+		if oracle.check.is_some() && case.expect_error.is_some() {
+			self.problem(
+				at,
+				"expect_error conflicts with oracle.check: a raised exception has no value to check",
 			);
 		}
 		if case.attribute.is_some() {
@@ -906,6 +937,17 @@ reference = "solutions/lab5.py"
 	}
 
 	#[test]
+	fn test_a_property_checker_is_refused_only_an_expectation_it_would_ignore() {
+		for body in [
+			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n",
+			// In call mode stdout is judged on its own, beside the checker.
+			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpected_stdout = \"hi\\n\"\n",
+		] {
+			assert_eq!(problems(body), Vec::<String>::new(), "{body}");
+		}
+	}
+
+	#[test]
 	fn test_a_valid_spec_has_no_problems() {
 		assert!(
 			problems(
@@ -1016,6 +1058,26 @@ expect = 150
 		refused(
 			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpect_error = \"E\"\n",
 			"check and expect_error contradict",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpect = [1, 2, 3]\n",
+			"the sorted checker ignores expect",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\nscript = true\ncheck = \"sorted\"\nexpected_stdout = \"1\\n\"\n",
+			"the sorted checker ignores expected_stdout",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\ncheck = { builtin = \"sorted\" }\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\nrhai = \"[1]\"\n",
+			"the sorted checker ignores the oracle's expectation",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = [1]\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"expect is ignored: oracle.check",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"expect_error conflicts with oracle.check",
 		);
 		refused(
 			"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 2\n[cases.parametrize.args]\na = \"int(0, 1)\"\n",

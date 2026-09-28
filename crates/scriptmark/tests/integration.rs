@@ -182,6 +182,28 @@ async fn test_a_fixed_bundle_grades_without_generator_oracle_or_seed() {
 /// student's delivery outcome and Canvas id reach `StudentReport`, and it is what makes
 /// "a non-submitter is never scored zero" work end to end.
 #[tokio::test]
+async fn test_a_concurrency_a_semaphore_cannot_hold_still_runs() {
+	let bench = Bench::new();
+	let students = [bench.student("alice", "lab5.py", ALICE)];
+	let executor = Arc::new(PythonExecutor::new());
+	let bundles: Arc<[_]> = prepare(vec![bench.spec(LARGER)], executor.clone(), 5)
+		.await
+		.unwrap_or_else(|e| panic!("{e}"))
+		.into();
+	for concurrency in [0, usize::MAX] {
+		let options = RunOptions {
+			concurrency: Some(concurrency),
+			..Default::default()
+		};
+		let run = run_all(&students, bundles.clone(), executor.clone(), &options);
+		let results = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+			.await
+			.unwrap_or_else(|_| panic!("concurrency {concurrency} hung"));
+		assert_eq!(by_id(&results, "alice").total_passed(), 4, "{concurrency}");
+	}
+}
+
+#[tokio::test]
 async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
 	let bench = Bench::new();
 	let mut alice = bench.student("alice", "lab5.py", ALICE);

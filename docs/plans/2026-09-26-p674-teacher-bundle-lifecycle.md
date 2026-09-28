@@ -759,3 +759,38 @@ They are all fixed and tested:
   now kills every live unit group on interrupt, and a guard kills a unit's group if its
   run is dropped.
 
+
+### CodeRabbit review of PR #4
+
+CodeRabbit reviewed the PR twice and raised five findings. Each was checked against the
+code before it was acted on. Four are fixed and tested; the fifth is a limit of the
+design, now stated where teachers read it.
+
+- **A teacher module could import the student's file in place of its own sibling.**
+  The work directory went on `sys.path` before the teacher modules' directories, and
+  the student's file keeps the name it was submitted under. The work directory is now
+  added only once the teacher modules have loaded. A test names the submission after a
+  teacher module's sibling; it fails on the old order.
+- **The record channel's 64 MiB cap could flood a correct scenario.** It bounded one
+  call, not a unit. The cap now grows with the plan: 64 MiB, plus 6 MiB a call and
+  7 MiB an observed file, sized from a measured worst case (10.75 MiB for a call with a
+  4 MiB value, a failing check and a 1 Mi-character file of control characters). The
+  value limit now counts UTF-8 bytes, not characters, and error and checker messages
+  are cut at 64 KiB, so each call really is bounded. A test runs seven such calls,
+  75 MiB in all; it floods under a fixed cap.
+- **`expect` beside `check = "sorted"` was silently ignored,** so the case passed any
+  sorted list. `sorted` beside the expectation it would ignore (`expect`, a script's
+  `expected_stdout`, an oracle's) is refused, as is `oracle.check` beside `expect`.
+  Checking this found `oracle.check` beside `expect_error`, whose check never ran; it
+  is refused too. Two real specs, three cases, pair `sorted` with `expect` and need the
+  migration note.
+- **`RunOptions::concurrency` of 0 hung `run_all`,** and one past the semaphore's
+  maximum panicked. It is clamped to what a semaphore can hold; 0 runs one unit at a
+  time.
+- **A student can forge the records of their own calls,** including a passing function
+  checker's verdict, by reaching the harness through the interpreter. This is D5's
+  same-process limit, not a new hole: no secret the harness holds is out of reach of
+  code in its process, and the bundle's expected values can be read from disk anyway.
+  Closing it takes OS-level isolation, which is not P-674's. `docs/test-bundles.md`
+  now says plainly what grading does not defend against, and the README no longer calls
+  the runner a sandbox.

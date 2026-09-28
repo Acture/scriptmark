@@ -15,7 +15,8 @@ use crate::runner::prepare::{Bundle, Unit};
 /// How a batch runs.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
-	/// Units running at once. Defaults to the number of CPUs.
+	/// Units running at once. Defaults to the number of CPUs; 0 runs one at a time, and a
+	/// value past what a semaphore can count is capped there.
 	pub concurrency: Option<usize>,
 	/// The interpreter that runs teacher Python checker scripts.
 	pub python: String,
@@ -47,11 +48,14 @@ pub async fn run_all<E: Executor>(
 	executor: Arc<E>,
 	options: &RunOptions,
 ) -> Vec<StudentReport> {
-	let concurrency = options.concurrency.unwrap_or_else(|| {
-		std::thread::available_parallelism()
-			.map(|n| n.get())
-			.unwrap_or(4)
-	});
+	let concurrency = options
+		.concurrency
+		.unwrap_or_else(|| {
+			std::thread::available_parallelism()
+				.map(|n| n.get())
+				.unwrap_or(4)
+		})
+		.clamp(1, Semaphore::MAX_PERMITS);
 	let semaphore = Arc::new(Semaphore::new(concurrency));
 	let python: Arc<str> = options.python.as_str().into();
 

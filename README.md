@@ -169,7 +169,7 @@ whose it is: the student's, the teacher's, or the machine's. See
 ## Features
 
 - **Custom test engine** -- subprocess execution, no pytest dependency
-- **Sandboxed** -- env isolation, import allowlist, setrlimit, timeout with kill
+- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](docs/test-bundles.md#what-grading-does-not-defend-against))
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
 - **Canvas LMS** -- roster pull, grades push
