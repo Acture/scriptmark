@@ -187,7 +187,7 @@ pub struct Oracle {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Parametrize {
-	/// The parameters in call order, each `{ name = "rule" }`.
+	/// The parameters, `name = "rule"`, in call order: the order they are written.
 	#[serde(default, deserialize_with = "call_order")]
 	pub args: Vec<Param>,
 	/// Inputs written out, each a list of values in call order, like a fixed case's
@@ -275,8 +275,8 @@ impl<'de> Deserialize<'de> for Param {
 	}
 }
 
-/// `args` as a list in call order. The table it used to be has no order, so it is refused
-/// with the fix rather than bound in some order the teacher never chose.
+/// `args` in call order: a table, read in the order its keys are written, or several
+/// `[[args]]` blocks, read one after another. Nothing is sorted.
 fn call_order<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Param>, D::Error> {
 	struct CallOrder;
 
@@ -284,26 +284,31 @@ fn call_order<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Param>, 
 		type Value = Vec<Param>;
 
 		fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-			f.write_str("a list of parameters in call order, each { name = \"rule\" }")
+			f.write_str("a table of parameters in call order, each `name = \"rule\"`")
 		}
 
-		fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Param>, A::Error> {
+		fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Vec<Param>, M::Error> {
 			let mut params = Vec::new();
-			while let Some(param) = seq.next_element()? {
-				params.push(param);
+			while let Some((name, rule)) = map.next_entry()? {
+				params.push(Param { name, rule });
 			}
 			Ok(params)
 		}
 
-		fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Vec<Param>, M::Error> {
-			let mut names = Vec::new();
-			while let Some((name, _)) = map.next_entry::<String, de::IgnoredAny>()? {
-				names.push(name);
+		fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Param>, A::Error> {
+			struct Block(Vec<Param>);
+
+			impl<'de> Deserialize<'de> for Block {
+				fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+					deserializer.deserialize_map(CallOrder).map(Block)
+				}
 			}
-			Err(de::Error::custom(format!(
-				"args is now a list in call order, one `name = \"rule\"` per parameter: write a [[cases.parametrize.args]] block for each of {}, in the order the function takes them",
-				names.join(", ")
-			)))
+
+			let mut params = Vec::new();
+			while let Some(Block(block)) = seq.next_element()? {
+				params.extend(block);
+			}
+			Ok(params)
 		}
 	}
 

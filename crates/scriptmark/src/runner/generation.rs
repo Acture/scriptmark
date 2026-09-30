@@ -357,7 +357,7 @@ mod tests {
 			)
 			.unwrap_or_else(|e| panic!("{e}"))
 		};
-		let one = "[[cases.parametrize.args]]\na = \"list(int(0, 1), 0, 2)\"\n";
+		let one = "[cases.parametrize.args]\na = \"list(int(0, 1), 0, 2)\"\n";
 		let random = format!("{one}[cases.parametrize.random]\ncount = 1\nseed = \"random\"\n");
 		assert_eq!(draws_a_seed(&[spec(&random)]), Some(("s", "c")));
 		for quiet in [

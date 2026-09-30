@@ -68,9 +68,8 @@ expect_error = "TypeError"
 [[cases]]
 name = "random int pairs"
 
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 a = "int(-1000, 1000)"
-[[cases.parametrize.args]]
 b = "int(-1000, 1000)"
 
 [cases.parametrize]
@@ -86,9 +85,8 @@ rhai = "if a >= b { a } else { b }"
 [[cases]]
 name = "random float pairs"
 
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 a = "float(-100.0, 100.0)"
-[[cases.parametrize.args]]
 b = "float(-100.0, 100.0)"
 
 [cases.parametrize.random]

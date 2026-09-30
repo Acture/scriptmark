@@ -386,9 +386,8 @@ language = "python"
 
 [[cases]]
 name = "rhai"
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 a = "int(-100, 100)"
-[[cases.parametrize.args]]
 b = "int(-100, 100)"
 [cases.parametrize.random]
 count = 5
@@ -399,7 +398,7 @@ rhai = "if a >= b { a } else { b }"
 [[cases]]
 name = "reference"
 [cases.parametrize]
-args = [{ a = "int(-100, 100)" }, { b = "int(-100, 100)" }]
+args = { a = "int(-100, 100)", b = "int(-100, 100)" }
 [cases.parametrize.random]
 count = 5
 seed = 7
@@ -436,9 +435,8 @@ language = "python"
 
 [[cases]]
 name = "random"
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 a = "int(0, 10)"
-[[cases.parametrize.args]]
 b = "int(20, 30)"
 [cases.parametrize.random]
 count = {count}
@@ -1112,7 +1110,7 @@ async fn test_a_bundle_that_cannot_be_honoured_is_refused_before_grading() {
 		),
 		(
 			spec(
-				"[[cases]]\nname = \"x\"\n[[cases.parametrize.args]]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\n",
+				"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\n",
 			),
 			"reference implementation 'f' did not return a value",
 		),
@@ -1186,7 +1184,7 @@ async fn test_every_name_must_mean_exactly_one_thing() {
 		),
 		(
 			spec(
-				"[[cases]]\nname = \"x\"\n[[cases.parametrize.args]]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\n",
+				"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\n",
 				&[],
 			),
 			"returned None",

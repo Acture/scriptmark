@@ -136,11 +136,9 @@ fn report<'a>(reports: &'a [StudentReport], id: &str) -> &'a StudentReport {
 const CLAMP: &str = r#"
 [[cases]]
 name = "clamp"
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 value = "choice([-100, -75, -25, 0, 25, 75, 100])"
-[[cases.parametrize.args]]
 low = "int(-49, -26)"
-[[cases.parametrize.args]]
 high = "int(26, 49)"
 [cases.parametrize]
 samples = [[-30, -30, 30], [30, -30, 30], [-100, -30, 30]]
@@ -204,7 +202,7 @@ async fn test_the_bundle_records_each_templates_inputs() {
 
 	let seeds = |seed: &str| {
 		bench.spec(&format!(
-			"[[cases]]\nname = \"s\"\ncheck = \"sorted\"\n[[cases.parametrize.args]]\na = \"list(int(0, 9), 0, 3)\"\n[cases.parametrize.random]\ncount = 2\n{seed}"
+			"[[cases]]\nname = \"s\"\ncheck = \"sorted\"\n[cases.parametrize.args]\na = \"list(int(0, 9), 0, 3)\"\n[cases.parametrize.random]\ncount = 2\n{seed}"
 		))
 	};
 	let default = bundle(seeds("")).await;
@@ -223,7 +221,7 @@ async fn test_the_bundle_records_each_templates_inputs() {
 async fn test_a_generated_case_keeps_its_templates_target_and_timeout() {
 	let bench = Bench::new();
 	let b = bundle(bench.spec(
-		"[[cases]]\nname = \"g\"\nfunction = \"other\"\ntimeout = 3\ncheck = \"sorted\"\n[[cases.parametrize.args]]\nx = \"list(int(0, 1), 0, 2)\"\n[cases.parametrize.random]\ncount = 2\n",
+		"[[cases]]\nname = \"g\"\nfunction = \"other\"\ntimeout = 3\ncheck = \"sorted\"\n[cases.parametrize.args]\nx = \"list(int(0, 1), 0, 2)\"\n[cases.parametrize.random]\ncount = 2\n",
 	))
 	.await;
 	for case in &b.spec.cases {
@@ -237,7 +235,7 @@ async fn test_a_generated_case_keeps_its_templates_target_and_timeout() {
 async fn test_a_dollar_literal_reaches_the_oracle_and_the_student_alike() {
 	let bench = Bench::new();
 	let spec = bench.spec(
-		"[[cases]]\nname = \"d\"\n[[cases.parametrize.args]]\nx = \"str(0, 3)\"\n[cases.parametrize]\nsamples = [[\"$$5\"], [[\"$$a\", 1]]]\n[cases.parametrize.oracle]\nrhai = \"x\"\n",
+		"[[cases]]\nname = \"d\"\n[cases.parametrize.args]\nx = \"str(0, 3)\"\n[cases.parametrize]\nsamples = [[\"$$5\"], [[\"$$a\", 1]]]\n[cases.parametrize.oracle]\nrhai = \"x\"\n",
 	);
 	let b = bundle(spec).await;
 	assert_eq!(b.spec.cases[0].expect, Some(json!("$5")));
@@ -268,7 +266,7 @@ expect = [1, 2]
 [[cases]]
 name = "samples with a reference"
 [cases.parametrize]
-args = [{ a = "int(0, 9)" }, { b = "int(0, 9)" }]
+args = { a = "int(0, 9)", b = "int(0, 9)" }
 samples = [[5, 5], [0, 9]]
 [cases.parametrize.oracle]
 reference = "reference/lab.py"
@@ -276,7 +274,7 @@ reference = "reference/lab.py"
 [[cases]]
 name = "draws with rhai and no seed"
 [cases.parametrize]
-args = [{ a = "int(0, 9)" }, { b = "int(10, 19)" }]
+args = { a = "int(0, 9)", b = "int(10, 19)" }
 [cases.parametrize.random]
 count = 4
 [cases.parametrize.oracle]
@@ -285,7 +283,7 @@ rhai = "[a, b]"
 [[cases]]
 name = "both, with a property check"
 [cases.parametrize]
-args = [{ a = "int(-5, 5)" }, { b = "int(-5, 5)" }]
+args = { a = "int(-5, 5)", b = "int(-5, 5)" }
 samples = [[-3, 3]]
 [cases.parametrize.random]
 count = 4
@@ -333,7 +331,7 @@ async fn test_an_oracle_answer_that_cannot_fit_its_checker_is_refused() {
 	let bench = Bench::new();
 	bench.write("reference/lab.py", "def f(a):\n    return [a]\n");
 	let message = refusal(bench.spec(
-		"[[cases]]\nname = \"x\"\ncheck = \"approx\"\n[cases.parametrize]\nargs = [{ a = \"int(0, 9)\" }]\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
+		"[[cases]]\nname = \"x\"\ncheck = \"approx\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
 	))
 	.await;
 	assert!(
@@ -347,7 +345,7 @@ async fn test_a_reference_answer_holding_none_is_an_answer() {
 	let bench = Bench::new();
 	bench.write("reference/lab.py", "def f(a):\n    return [a, None]\n");
 	let b = bundle(bench.spec(
-		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = [{ a = \"int(0, 9)\" }]\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
+		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
 	))
 	.await;
 	assert_eq!(b.spec.cases[0].expect, Some(json!([1, null])));
@@ -364,7 +362,7 @@ async fn test_a_failed_oracle_is_reported_once() {
 	let bench = Bench::new();
 	bench.write("reference/lab.py", "def f(a):\n    print(a)\n");
 	let message = refusal(bench.spec(
-		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = [{ a = \"int(0, 9)\" }]\nsamples = [[1], [2]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
+		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1], [2]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
 	))
 	.await;
 	assert!(message.contains("returned None"), "{message}");
@@ -376,7 +374,7 @@ async fn test_a_failed_oracle_is_reported_once() {
 async fn test_a_bad_rule_in_a_hand_built_spec_is_refused_not_null() {
 	let bench = Bench::new();
 	let mut spec = bench.spec(
-		"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n[[cases.parametrize.args]]\na = \"list(int(0, 1), 0, 2)\"\n[cases.parametrize.random]\ncount = 1\n",
+		"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n[cases.parametrize.args]\na = \"list(int(0, 1), 0, 2)\"\n[cases.parametrize.random]\ncount = 1\n",
 	);
 	spec.cases[0].parametrize.as_mut().unwrap().args[0].rule = "int(5, 1)".into();
 	let message = refusal(spec).await;
@@ -457,7 +455,7 @@ async fn test_replay_refuses_inputs_it_cannot_honour() {
 	.await;
 	refused(
 		vec![bench.spec(&format!(
-			"{CLAMP}\n[[cases]]\nname = \"other\"\ncheck = \"sorted\"\n[[cases.parametrize.args]]\nx = \"list(int(0, 1), 0, 2)\"\n[cases.parametrize.random]\ncount = 1\n"
+			"{CLAMP}\n[[cases]]\nname = \"other\"\ncheck = \"sorted\"\n[cases.parametrize.args]\nx = \"list(int(0, 1), 0, 2)\"\n[cases.parametrize.random]\ncount = 1\n"
 		))],
 		"case 'other': the frozen inputs have no template by this name",
 	)
@@ -480,7 +478,7 @@ async fn test_replay_refuses_inputs_it_cannot_honour() {
 #[tokio::test]
 async fn test_inputs_do_not_depend_on_order_or_concurrency() {
 	let bench = Bench::new();
-	let second = "[[cases]]\nname = \"pairs\"\ncheck = \"sorted\"\n[[cases.parametrize.args]]\nxs = \"list(int(0, 9), 0, 4)\"\n[cases.parametrize.random]\ncount = 6\nseed = 3\n";
+	let second = "[[cases]]\nname = \"pairs\"\ncheck = \"sorted\"\n[cases.parametrize.args]\nxs = \"list(int(0, 9), 0, 4)\"\n[cases.parametrize.random]\ncount = 6\nseed = 3\n";
 	let a = || bench.named("a", &format!("{CLAMP}{second}"));
 	let b = || bench.named("b", &format!("{second}{CLAMP}"));
 	let ab = Frozen::of(&prepared(vec![a(), b()]).await.unwrap());

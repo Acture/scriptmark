@@ -661,9 +661,17 @@ impl<'a> Validator<'a> {
 	}
 
 	fn parametrize(&mut self, case: &TestCase, param: &crate::models::Parametrize, at: &str) {
+		// Only an older spec has these, and its args bound alphabetically: say that the
+		// order changed, since the table itself still loads.
 		for (moved, field) in [(&param.count, "count"), (&param.seed, "seed")] {
 			if moved.is_some() {
-				self.problem(at, format!("{field} moved to [cases.parametrize.random]"));
+				self.problem(
+					at,
+					format!(
+						"{field} moved to [cases.parametrize.random]; args now bind in the order written ({}), not alphabetically, so check it is the order the function takes them",
+						param.inputs().names().join(", ")
+					),
+				);
 			}
 		}
 		if !case.args.is_empty() {
@@ -1032,11 +1040,9 @@ language = "python"
 [[cases]]
 name = "random clamps"
 
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 value = "int(-100, 100)"
-[[cases.parametrize.args]]
 low = "int(-49, -26)"
-[[cases.parametrize.args]]
 high = "int(26, 49)"
 
 [cases.parametrize]
@@ -1052,18 +1058,30 @@ reference = "solutions/lab5.py"
 [[cases]]
 name = "inline"
 [cases.parametrize]
-args = [{ z = "bool()" }, { a = "int(0, 1)" }]
+args = { z = "bool()", a = "int(0, 1)" }
 [cases.parametrize.random]
 count = 1
 seed = "random"
 [cases.parametrize.oracle]
 rhai = "a"
+
+[[cases]]
+name = "blocks"
+[[cases.parametrize.args]]
+y = "bool()"
+x = "bool()"
+[[cases.parametrize.args]]
+w = "bool()"
+[cases.parametrize.random]
+count = 1
+[cases.parametrize.oracle]
+rhai = "x"
 "#,
 		)
 		.unwrap();
 
 		let spec = load_spec(&path).unwrap();
-		assert_eq!(spec.cases.len(), 2);
+		assert_eq!(spec.cases.len(), 3);
 		let param = spec.cases[0].parametrize.as_ref().unwrap();
 		// Call order is the order written, not the alphabetical one.
 		assert_eq!(param.inputs().names(), ["value", "low", "high"]);
@@ -1078,20 +1096,25 @@ rhai = "a"
 		let inline = spec.cases[1].parametrize.as_ref().unwrap();
 		assert_eq!(inline.inputs().names(), ["z", "a"]);
 		assert_eq!(inline.random.as_ref().unwrap().seed, Some(Seed::Random));
+		// Blocks read one after another, each in the order written.
+		let blocks = spec.cases[2].parametrize.as_ref().unwrap();
+		assert_eq!(blocks.inputs().names(), ["y", "x", "w"]);
 	}
 
+	/// An older spec keeps its `args` table, which now binds in the order written: the
+	/// fields it must move anyway say so.
 	#[test]
-	fn test_the_old_spelling_is_refused_with_the_fix() {
-		refused(
-			"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nb = \"int(0, 1)\"\na = \"int(0, 1)\"\n",
-			"write a [[cases.parametrize.args]] block for each of b, a, in the order the function takes them",
-		);
+	fn test_count_and_seed_moved_and_say_the_order_changed() {
 		for field in ["count = 3", "seed = 1"] {
-			refused(
-				&format!(
-					"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n[cases.parametrize]\n{field}\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n"
-				),
-				"moved to [cases.parametrize.random]",
+			let found = problems(&format!(
+				"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n[cases.parametrize]\n{field}\n[cases.parametrize.args]\nb = \"int(0, 1)\"\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n"
+			));
+			assert!(
+				found
+					.iter()
+					.any(|p| p.contains("moved to [cases.parametrize.random]")
+						&& p.contains("args now bind in the order written (b, a)")),
+				"{found:?}"
 			);
 		}
 	}
@@ -1101,28 +1124,28 @@ rhai = "a"
 		format!("[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n{parametrize}")
 	}
 
-	const ONE_PARAM: &str = "[[cases.parametrize.args]]\na = \"int(0, 1)\"\n";
-	const TWO_PARAMS: &str = "[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[[cases.parametrize.args]]\nb = \"int(0, 1)\"\n";
+	const ONE_PARAM: &str = "[cases.parametrize.args]\na = \"int(0, 1)\"\n";
+	const TWO_PARAMS: &str = "[cases.parametrize.args]\na = \"int(0, 1)\"\nb = \"int(0, 1)\"\n";
 
 	#[test]
 	fn test_templates_are_checked_before_grading() {
 		let table = [
 			(
 				template(
-					"[cases.parametrize]\nargs = [{ a = \"int(0, 1)\", b = \"int(0, 1)\" }]\n[cases.parametrize.random]\ncount = 1\n",
+					"[cases.parametrize]\nargs = [\"int(0, 1)\"]\n[cases.parametrize.random]\ncount = 1\n",
 				),
-				"a parameter is one",
+				"expected a table of parameters",
 			),
 			(
 				template(
-					"[[cases.parametrize.args]]\n\"my-x\" = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
+					"[cases.parametrize.args]\n\"my-x\" = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
 				),
 				"parameter 'my-x' must be a name",
 			),
 			(
-				template(&format!(
-					"{ONE_PARAM}{ONE_PARAM}[cases.parametrize.random]\ncount = 1\n"
-				)),
+				template(
+					"[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
+				),
 				"parameter 'a' is declared twice",
 			),
 			(
@@ -1178,19 +1201,19 @@ rhai = "a"
 			),
 			(
 				template(
-					"[[cases.parametrize.args]]\na = \"int(5, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
+					"[cases.parametrize.args]\na = \"int(5, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
 				),
 				"parameter 'a': int(5, 1): the minimum 5 is greater than the maximum 1",
 			),
 			(
 				template(
-					"[[cases.parametrize.args]]\na = \"nope()\"\n[cases.parametrize]\nsamples = [[1]]\n",
+					"[cases.parametrize.args]\na = \"nope()\"\n[cases.parametrize]\nsamples = [[1]]\n",
 				),
 				"parameter 'a': unknown rule",
 			),
 			(
 				template(
-					"[[cases.parametrize.args]]\na = \"list(int(0, 1), 0, 1000)\"\n[cases.parametrize.random]\ncount = 10000\n",
+					"[cases.parametrize.args]\na = \"list(int(0, 1), 0, 1000)\"\n[cases.parametrize.random]\ncount = 10000\n",
 				),
 				"could generate up to",
 			),
@@ -1353,7 +1376,7 @@ rhai = "a"
 			"[[cases]]\nname = \"x\"\ncheck = { rhai = \"result.len() == 3\" }\nexpect = [1, 2, 3]\n",
 			// In call mode stdout is judged on its own, beside the checker.
 			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpected_stdout = \"hi\\n\"\n",
-			"[[cases]]\nname = \"x\"\nexpect = [1]\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"[[cases]]\nname = \"x\"\nexpect = [1]\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 		] {
 			assert_eq!(problems(body), Vec::<String>::new(), "{body}");
 		}
@@ -1480,15 +1503,15 @@ expect = 150
 			"the sorted checker judges a list, but a script's value is its printed text",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\nexpect = [2, 1]\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"[[cases]]\nname = \"x\"\nexpect = [2, 1]\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 			"expect fails the sorted check itself",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 			"expect_error conflicts with oracle.check",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 2\n",
+			"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 2\n",
 			"declares nothing to judge",
 		);
 		refused(

@@ -15,11 +15,9 @@ language = "python"
 
 [[cases]]
 name = "clamp"
-[[cases.parametrize.args]]
+[cases.parametrize.args]
 value = "int(-100, 100)"
-[[cases.parametrize.args]]
 low = "int(-49, -26)"
-[[cases.parametrize.args]]
 high = "int(26, 49)"
 [cases.parametrize]
 samples = [[-30, -30, 30]]

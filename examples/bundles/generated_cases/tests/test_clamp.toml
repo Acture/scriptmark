@@ -15,12 +15,10 @@ expect = 5
 [[cases]]
 name = "clamp"
 
-# One block per parameter, in the order clamp(value, low, high) takes them.
-[[cases.parametrize.args]]
+# One line per parameter, in the order clamp(value, low, high) takes them.
+[cases.parametrize.args]
 value = "choice([-100, -75, -25, 0, 25, 75, 100])"
-[[cases.parametrize.args]]
 low = "int(-49, -26)"
-[[cases.parametrize.args]]
 high = "int(26, 49)"
 
 [cases.parametrize]

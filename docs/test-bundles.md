@@ -159,11 +159,9 @@ the same ones.
 [[cases]]
 name = "clamp"
 
-[[cases.parametrize.args]]      # one block per parameter, in call order:
-value = "choice([-100, -75, -25, 0, 25, 75, 100])"   # clamp(value, low, high)
-[[cases.parametrize.args]]
+[cases.parametrize.args]        # in call order: clamp(value, low, high)
+value = "choice([-100, -75, -25, 0, 25, 75, 100])"
 low = "int(-49, -26)"
-[[cases.parametrize.args]]
 high = "int(26, 49)"
 
 [cases.parametrize]
@@ -178,9 +176,9 @@ rhai = "if value < low { low } else if value > high { high } else { value }"
 ```
 
 - **`args`** declares every parameter: its name, its place in the call and its rule. The
-  order of the blocks is the order of the arguments; nothing is sorted or guessed.
-  `args = [{ value = "..." }, { low = "..." }]` is the same thing written inline. A
-  function that takes no arguments has no `args`.
+  order you write them in is the order of the arguments; nothing is sorted. Inline,
+  `args = { value = "...", low = "..." }` is the same thing. A function that takes no
+  arguments has no `args`.
 - **`samples`** are inputs, each a list of values in call order, exactly like a fixed
   case's `args`. A sample is never an answer.
 - **`[random]`** draws `count` cases, from 1 to 10000, from the rules. Without it only the
@@ -442,9 +440,8 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 - a tests directory with no specs;
 - a reference implementation that does not return;
 - missing data files;
-- `args` written as a table, and `count` or `seed` outside `[cases.parametrize.random]`;
-- a parameter entry naming two parameters, a name that is not an identifier, or a name
-  declared twice;
+- `count` or `seed` outside `[cases.parametrize.random]`;
+- a parameter name that is not an identifier, or a name declared twice;
 - a rule that does not parse; a template with nothing to run; `count` outside 1–10000; a
   seed on a template without `args`; draws past the size cap;
 - a sample of the wrong length, or holding `null` or a `$name`;
@@ -459,7 +456,7 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 | `@checker("f")` in a teacher module | `check = { function = "check_f" }` on each case meant to use it — decorating no longer binds, and importing a module that still uses it fails with that instruction |
 | `copy_refs` | delete it: every case already gets fresh values |
 | `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module; generate inputs with a template |
-| `[cases.parametrize.args]` as a table, with `count` and `seed` beside it | one `[[cases.parametrize.args]]` block per parameter, in the order the function takes them; `count` and `seed` in `[cases.parametrize.random]` |
+| `count` and `seed` in `[cases.parametrize]` | move them to `[cases.parametrize.random]`. The `[cases.parametrize.args]` table stays, but binds in the order written, not alphabetically: check it is the order the function takes them |
 | stdin → stdout cases with no function | add `script = true` |
 | a Rhai check like `result.len() > 0` | `result != () && result.len() > 0` |
 | `[lint] weight = 0.1` | delete it, and give lint points with `[grading] lint_points` |
@@ -471,7 +468,8 @@ pass. Cases that a name-bound `@checker` used to judge silently are now judged b
 they declare. A case that paired `sorted` with `expect` used to pass any sorted list; the
 value must now equal `expect` too. Generated inputs change once: the generator is new, so
 even a declared seed draws other values, and arguments that used to bind in alphabetical
-order now bind in the order written. A rule that could not draw used to pass `null`, and
+order now bind in the order written: an `args` table whose keys are not in the function's
+order now calls it with the arguments swapped. A rule that could not draw used to pass `null`, and
 now stops the bundle.
 
 Grades change too. They were a curve — `sqrt` by default — over the pass rate of every

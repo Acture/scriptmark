@@ -10,10 +10,10 @@ picked the teacher-UX design. Revision 1 then went through a five-lens adversari
 (acceptance, determinism, Rust feasibility, scope and UX, oracles), with a skeptic
 refuting each lens. 32 of 38 findings survived. What changed, and why:
 
-- **The spelling is the owner's (D-a, D-b).** `args` is an array of one-key tables in call
-  order, samples are positional lists like fixed `args`, and the draws live in their own
-  `[cases.parametrize.random]` table. Revision 1's `params` list beside a rules table was
-  judged too much to remember.
+- **The spelling is the owner's (D-a, D-b).** `args` is one table whose written order is
+  the call order, samples are positional lists like fixed `args`, and the draws live in
+  their own `[cases.parametrize.random]` table. Revision 1's `params` list beside a rules
+  table was judged too much to remember.
 - **An omitted seed is 0 (D-c).** `seed = "random"` asks for a drawn seed, which is
   recorded. Revision 1 drew a seed whenever none was declared.
 - **A fresh run refuses to replace an artifact that holds other inputs (D-e).** Revision 1
@@ -46,11 +46,12 @@ refuting each lens. 32 of 38 findings survived. What changed, and why:
 
 2026-09-30:
 
-- **D-a** Generated parameters are an array in call order, one `{ name = rule }` table per
-  parameter. The array order is the call order, and the key names the parameter for the
-  Rhai oracle. It may be written inline or as one `[[cases.parametrize.args]]` block per
-  parameter. The owner asked "why not split the parameters out"; this plan reads that as
-  the block form, and uses it in the docs and the example.
+- **D-a** (revised the same day, after the first implementation) Generated parameters are
+  one table, `[cases.parametrize.args]`, written once: `name = "rule"` per line, and the
+  order written is the call order. The key names the parameter for the Rhai oracle.
+  `args = { ... }` inline is the same thing, and `[[cases.parametrize.args]]` blocks, if
+  someone writes them, are read one after another. The first reading, one block per
+  parameter, made the teacher repeat the header for every parameter.
 - **D-b** The number of draws and the seed are kept apart from the parameters, in
   `[cases.parametrize.random]`. With no `[random]` table only the samples run.
 - **D-c** An omitted seed is 0. `seed = N` fixes it. `seed = "random"` draws one, which is
@@ -132,10 +133,10 @@ Not in scope:
 - The harness turns a `$name` string into the named value, and `$$` into a literal `$`,
   recursively (`runner/harness.py:416-427`). A sample `"$$x"` therefore reaches the
   student as `$x` but reaches the Rhai scope as `$$x` unless it is unescaped first.
-- `toml` 0.8.23 deserialises `[[cases.parametrize.args]]` blocks and an inline array of
-  one-key tables alike, in document order, and a second `[[cases]]` does not absorb the
-  first's blocks (checked with a scratch program). The old table spelling fails with
-  serde's "invalid type: map, expected a sequence", which names no fix.
+- `toml` 0.8.23 hands a table's keys to a deserialiser in document order, for
+  `[cases.parametrize.args]`, an inline `{ ... }` and `[[...]]` blocks alike, and a second
+  `[[cases]]` does not absorb the first's blocks (checked with a scratch program). Only
+  collecting them into a `BTreeMap`, as `Parametrize` did, sorts them.
 
 **How the generator fails today**
 
@@ -217,11 +218,9 @@ Not in scope:
 [[cases]]
 name = "clamp"
 
-[[cases.parametrize.args]]      # call order: clamp(value, low, high)
+[cases.parametrize.args]        # call order: clamp(value, low, high)
 value = "choice([-100, -75, -25, 0, 25, 75, 100])"
-[[cases.parametrize.args]]
 low = "int(-49, -26)"
-[[cases.parametrize.args]]
 high = "int(26, 49)"
 
 [cases.parametrize]
@@ -238,7 +237,8 @@ rhai = "if value < low { low } else if value > high { high } else { value }"
 - `args` declares every parameter: its name, its place in the call and its rule. It is
   required whenever the function takes arguments, whether the inputs are samples, draws
   or both. One rule, so there is nothing to infer. The inline form
-  `args = [{ value = "..." }, { low = "..." }]` is the same thing.
+  `args = { value = "...", low = "..." }` is the same thing. `toml` 0.8 hands a table's
+  keys to the deserialiser in the order written (checked), so nothing is sorted.
 - `samples` are inputs only: each is a list of values in call order, exactly like a fixed
   case's `args`. Nothing in a sample is an answer.
 - `[random]` holds `count` (at least 1) and `seed`. Without it, only the samples run.
@@ -263,10 +263,10 @@ pub enum Seed { Fixed(u64), Random }                     // default Fixed(0)
 
 - `Param`, `Seed` and the `args` field get hand-written `Deserialize` impls, as
   `CheckMethod` already has (`spec.rs:48-71`), so errors name the fix rather than
-  "did not match any variant". The old table spelling of `args` gets: "args is now a list
-  in call order, one `{ name = rule }` per parameter — write a `[[cases.parametrize.args]]`
-  block for each of a, b, in the order the function takes them". No ready-to-paste array
-  is offered, because its order would be a guess.
+  "did not match any variant". `args` reads a table in the order its keys are written,
+  or `[[args]]` blocks one after another. An older spec keeps its table, which now binds
+  in written order rather than alphabetically; the refused `count`/`seed` it must move
+  anyway say so and name the order it now binds in.
 - `Parametrize::inputs()` returns an `Inputs { args, samples, random }` value, everything
   that decides the inputs and nothing else. It is a separate struct because serde cannot
   combine `flatten` with `deny_unknown_fields`.
@@ -391,9 +391,9 @@ in the tests directory.
 
 Static, in `Validator::parametrize`, at load and again in `prepare`, all collected:
 
-1. **args.** An entry with no key or several keys; a name that is not an identifier
-   (`[A-Za-z_][A-Za-z0-9_]*`, so the Rhai oracle can name it); a name used twice; the old
-   table spelling (D2).
+1. **args.** A name that is not an identifier (`[A-Za-z_][A-Za-z0-9_]*`, so the Rhai
+   oracle can name it); a name used twice (across `[[args]]` blocks; TOML itself refuses a
+   duplicate key in one table); a value that is not a table.
 2. **random.** `count = 0` ("drop [random] to run only the samples"); `count` above the
    cap; a declared seed on a template with no `args`; a seed below 0 or not an integer
    or `"random"`.
@@ -479,7 +479,7 @@ and no generation path is left that can panic or produce `null`.
 
 | Spec shape | After P-675 |
 |---|---|
-| `[cases.parametrize.args]` table | refused; the message asks for `[[cases.parametrize.args]]` blocks in call order |
+| `[cases.parametrize.args]` table | loads, and binds in the order written, not alphabetically; the `count`/`seed` refusal says so |
 | `count`, `seed` directly in `[cases.parametrize]` | refused as unknown fields; they move to `[cases.parametrize.random]` |
 | explicit `seed` | same meaning; the values change once (D3) |
 | no `seed` | still 0, now recorded; the values change once |

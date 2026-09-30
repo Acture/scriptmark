@@ -124,7 +124,7 @@ expect = -1
 
 [[cases]]
 name = "random inputs"
-[[cases.parametrize.args]]           # one block per parameter, in call order
+[cases.parametrize.args]             # one line per parameter, in call order
 nums = "list(int(-100, 100), 5, 20)"
 [cases.parametrize]
 samples = [[[7]], [[0, 0, 0]]]        # inputs always run, like fixed args
