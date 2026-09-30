@@ -3,12 +3,36 @@
 Linear: https://linear.app/acturea/issue/P-677
 Parent: P-663 · Depends on: P-674 (merged) · Hands off to: P-678, P-680, P-673
 
-Revision 1. Produced by a design workflow (three code maps, independent designs, an
-adversarial judge, a synthesis that re-read the code). Two of three designs failed to
-return, so only the risk-first design was judged; this revision goes through a separate
-adversarial review before any code is written.
+Revision 2. Revision 1 (`50c0bf8`) came out of a design workflow: three code maps,
+independent designs, an adversarial judge, and a synthesis that re-read the code. Two of the
+three designs failed to return, so only the risk-first one was judged. Revision 1 then went
+through a six-lens adversarial review (acceptance, fault attribution, wrong-number paths,
+Rust feasibility, scope, persistence), with a skeptic refuting each lens. 17 findings
+survived. What changed, and why:
 
-## Owner decisions (2026-09-29)
+- **Old results and old databases are not read.** Owner decision D-e. This removes
+  Revision 1's `UnknownFault` reason, its legacy display state, and the DB migration. The
+  migration was also broken: a fresh database would have run `ALTER TABLE ADD COLUMN` on
+  columns `CREATE TABLE` had just made.
+- **`summarize` shows stored results; it no longer re-scores.** Re-scoring with a
+  different or missing `assignment.toml` silently changed grades (D12).
+- **A missing item file withholds by default.** Owner decision D-f (D4).
+- **A checker that errors on a student's value is the student's wrong answer.** Owner
+  decision D-g. Before, a common wrong answer such as `None` reaching `len(result)` would
+  have withheld much of a class (D5, D15).
+- **A curve is shown next to the raw grade.** Owner decision D-h (D8).
+- **Lint has three outcomes, not two.** Revision 1 withheld a student who forgot the file
+  with `LintUnavailable`, and still gave full lint points when the tool started but failed
+  (D10).
+- **A missing-policy zero carries its reason into every export.** Otherwise it was
+  indistinguishable from a wrong-answer zero (D9, D11).
+- **Consumers colour and chart by fraction of `scale`**, not by a fixed 0–100 (D14).
+- **Rust fixes:** an explicit `Default` for `GradingConfig`, full derives on the config
+  types, and the `GradingItem` literal in `submission.rs:1128`.
+
+## Owner decisions
+
+2026-09-29:
 
 - **D-a** NotSubmitted: explicit `[grading] missing` policy, default `withheld`. Canvas
   excused is always withheld.
@@ -18,147 +42,224 @@ adversarial review before any code is written.
   policy field.
 - **D-d** Points and in-item aggregation live in `assignment.toml [[items]]`.
 
-Settled by the issue itself: the default policy is raw `score/max`, curves and formulas are
-opt-in, a teacher or environment fault leaves the student ungraded — never 0 — and an
-item's max does not depend on its case count.
+2026-09-30:
 
-## Corrections checked against the code
+- **D-e** Old result files and old databases are not supported. Reading one is refused
+  with a message; there is no compatibility path.
+- **D-f** A student who submitted but lacks an item's file: that item is withheld by
+  default. `missing_file = "zero"` opts into 0.
+- **D-g** A checker that errors while judging a student's value — function, Rhai or
+  Python script — is the student's wrong answer, not a teacher fault. Only teacher code
+  failing to load or be configured is the teacher's.
+- **D-h** Whether a curve applies is configuration. When it does, the raw grade and the
+  curved grade are both shown and exported.
+- **D-i** The `--grading`, `--formula` and `--range` flags are removed.
 
-- **`LintConfig` location.** It lives in `models/spec.rs:12-21`, including `weight`, whose default of 0.1 is never read. It is not in `runner/linter.rs`. The 5 tests in `linter.rs` build the struct literally.
-- **Environment startup failure produces real cases.** `tests/integration.rs:861-875` pins `(Error, Environment, Spawn)` for `with_python_cmd("/nonexistent/python3")`. The expected state is `Withheld(EnvironmentFault)`, not NoEvidence.
-- **The runner cannot produce a TestResult with zero cases.**
-  - `spec_loader.rs:280` refuses a scenario with no steps.
-  - `:642` refuses `parametrize.count < 1`.
-  - NoEvidence is therefore reachable only from hand-built or legacy JSON.
-- **`StudentReport::is_gradeable` callers:**
-  - `main.rs:1054`
-  - `tests/integration.rs:264,270`
-  - `tests/input_equivalence.rs:350`
-  - `db/mod.rs:325`
-  - `archive::is_gradeable` (`archive.rs:103`) is an unrelated function and is not touched.
-- **Call sites that break when `apply_grading` and `GradingPolicy` go:**
-  - `main.rs:665,857`
-  - `scriptmark-py/src/lib.rs:239-244`
-  - `tests/integration.rs:275,297`
-  - `db/mod.rs:327`
-  - `CourseConfig.grading` (`config.rs:57`) and `test_load_course_config` (`spec_loader.rs:855`)
-- **`Assignment` is Serialize/Deserialize and built literally** at `input/canvas.rs:388,989` and `main.rs:407`. A new required serde field on `GradingItem` would break those.
-- **No `points_possible` exists anywhere** in the code.
-- **Reusable Rhai helpers exist:** `rhai_checker::compile(expr, names) -> Result<(), String>` and `rhai_checker::engine()`.
-- **The current sqrt template is not the curve the old design described.** It computes `lower + (upper-lower)/10 * sqrt(rate%)` (`grading.rs:37-40`). The ported template has to keep this formula in fraction form, `lower + (upper-lower)*sqrt(fraction)`, which is the same thing.
+Settled by the issue itself: the default policy is raw `score/max`; curves and formulas are
+opt-in; a teacher or environment fault leaves the student ungraded, never 0, while the rest
+of the batch is graded; an item's max does not depend on its case count. Within an item the
+default is its pass rate: `points × passed / cases`.
+
+## Scope
+
+In: scoring per item, zero versus withheld with a reason, the policy in `assignment.toml`,
+and making every consumer — JSON, CSV, DB, terminal, TUI, HTML, Python, Canvas push —
+tell a zero from a withheld grade.
+
+Not in:
+
+| Ticket | Owns |
+|---|---|
+| P-673 | matching rules; ambiguous matches feed `PendingReview` later |
+| P-675 | random case generation (unaffected: more cases never change an item's max) |
+| P-676 | reference oracle |
+| P-678 | versioned result contract, regrade revisions, re-scoring stored evidence |
+| P-680 | push preview, receipts, checking the scale against Canvas `points_possible` |
+
+## Facts checked against the code
+
+- **`LintConfig`** lives in `models/spec.rs:12-21`. Its `weight` (default 0.1) is never
+  read. The 5 tests in `linter.rs` build it literally.
+- **`run_lint`** (`linter.rs:35-58`) ignores the exit status and counts stdout lines. A
+  tool that starts and fails scores 100. `lint()` (`orchestrator.rs:217-224`) lints
+  `files.first()`, whichever item that file belongs to.
+- **Environment startup failure produces real cases.** `tests/integration.rs:861-875`
+  pins `(Error, Environment, Spawn)` for `/nonexistent/python3`.
+- **The runner cannot produce a `TestResult` with zero cases.** `spec_loader.rs:280`
+  refuses an empty scenario, `:642` refuses `parametrize.count < 1`.
+- **NoFile** is `(Error, Student, NoFile)` for every case of the bundle, and leaves
+  `graded_files[b] = None` (`orchestrator.rs:134-149`).
+- **Checker errors are teacher faults today:**
+  - function checker: `judge.rs:686-693`;
+  - Rhai: `rhai_checker.rs:94-110`;
+  - Python script checker: `python_checker.rs:85-105` (timeout, non-zero exit with no
+    stdout, unparseable verdict); a lost child is Environment.
+  - Rhai checks are dry-run against the expectation before grading
+    (`prepare.rs` `dry_run_rhai`); function and script checkers are not.
+- **Breaking call sites:**
+  - `apply_grading`/`GradingPolicy`: `main.rs:665,857`, `scriptmark-py/src/lib.rs:239-244`,
+    `tests/integration.rs:275,297`, `db/mod.rs:327`.
+  - `CourseConfig.grading` (`config.rs:57`) and `test_load_course_config`
+    (`spec_loader.rs:855`).
+  - `is_gradeable`: `main.rs:1054`, `tests/integration.rs:264,270`,
+    `tests/input_equivalence.rs:350`, `db/mod.rs:325`. (`archive::is_gradeable` is
+    unrelated.)
+  - `GradingItem { .. }` literal: `models/submission.rs:1128`.
+  - `db sessions` and `db history` print `avg_grade` and `pass_rate` (`main.rs:1236-1286`).
+- **Rhai helpers:** `rhai_checker::engine()` sets operation, call-depth and expression
+  limits (`rhai_checker.rs:49-52`). `rhai_checker::compile` returns `()`, so the policy
+  compiles its own AST with that engine.
+- **The sqrt template** is `lower + (upper-lower)/10 * sqrt(rate%)` (`grading.rs:37-40`),
+  which is `lower + (upper-lower) * sqrt(fraction)`.
 
 ## Decisions
 
 **D1. An item's max is its declared points.**
-- `GradingItem` gains `points: u32` (default 1, per D-b) and `aggregation: Aggregation`, which is `proportional` or `all_or_nothing`.
-- Scoring:
-  - `proportional`: `score = points * passed / counted`.
-  - `all_or_nothing`: `score = points` only if every case passed, else 0.
+- `GradingItem` gains `points: u32` (default 1, D-b) and `aggregation: Aggregation`:
+  - `proportional` (default): `score = points × passed / cases`;
+  - `all_or_nothing`: `points` if every case passed, else 0.
 - The number of cases never enters an item's max.
-- Rationale: this is the core acceptance item. u32 keeps the `Eq`/`Ord` derives on `GradingItem`, `Assignment` and `AssignmentInput`, and rules out NaN points.
+- `u32` keeps the `Eq`/`Ord` derives on `GradingItem`, `Assignment` and
+  `AssignmentInput`, and rules out NaN points.
 
-**D2. Aggregation is chosen explicitly in TOML. Derived items use a documented default.**
-- The TOML-facing type is a separate `ItemDecl` with `deny_unknown_fields`, in which `aggregation` is required.
-  - A missing aggregation is a serde error.
-  - `ItemDecl` converts into `GradingItem`.
-- The model struct `GradingItem` keeps `#[serde(default)]` for both new fields, so stored `Assignment` JSON and the literal constructors keep working.
-- With no `assignment.toml`:
-  - Items are derived at 1 point each, proportional.
-  - `basis.derived_items = true`.
-  - The derived `[[items]]` block is printed to stderr so the teacher can paste it into a file.
-- Rationale: D-b sanctions the 1-point default. A derived default that is documented and recorded is not "implied by case count".
+**D2. Items are declared in TOML, or derived.**
+- `[[items]]` deserialises into `ItemDecl` (`deny_unknown_fields`, `aggregation`
+  required), which converts to `GradingItem`. `GradingItem` itself keeps serde defaults
+  for its new fields, because `Assignment` JSON and the literal constructors use it.
+- With no `assignment.toml`, items are derived from the specs at 1 point, proportional.
+  `basis.derived_items = true`, and the derived `[[items]]` block is printed to stderr so
+  the teacher can paste it.
 
-**D3. Policy lives in `assignment.toml [grading]`. The CLI flags go.**
-- `GradingPolicy`, `TemplatePolicy`, `FormulaPolicy` and the sqrt `Default` are deleted.
-- `--grading`, `--formula` and `--range` are removed from `GradeArgs` and `SummarizeArgs`, together with `build_grading_policy`.
-- The default is `curve = raw`: `score / max * scale`, with `scale` defaulting to 100 (D-b).
-- `deny_unknown_fields` goes on `AssignmentConfig`, `AssignmentInfo`, `GradingConfig` and `ItemDecl`.
-- `CourseConfig.grading` is removed. Its loader is never called by the CLI, and its test is updated.
-- Rationale: one recorded source of policy is what makes "same evidence + policy gives the same result" hold. Typos such as `missing = "witheld"` or `pionts` are refused instead of silently dropped.
+**D3. Policy lives in `assignment.toml [grading]`.**
+- `GradingPolicy`, `TemplatePolicy`, `FormulaPolicy`, the sqrt default,
+  `build_grading_policy`, the three flags (D-i) and `CourseConfig.grading` are deleted.
+- The default is `curve = raw`: `score / max × scale`, `scale` defaulting to 100.
+- `deny_unknown_fields` on `AssignmentConfig`, `AssignmentInfo`, `GradingConfig`,
+  `ItemDecl`, so `missing = "witheld"` or `pionts` is refused, not ignored.
+- `GradingConfig` has a hand-written `Default` equal to its serde defaults, and a test
+  that `[grading]` omitted, `[grading]` empty and `GradingConfig::default()` are equal.
 
-**D4. Missing policies.**
-- `missing` covers NotSubmitted and SubmittedEmpty. It is `withheld` (default, D-a) or `zero`.
-- Excused is always Withheld(Excused), even under `missing = "zero"` and even with an all-pass submission (D-a).
-- `missing_file` covers an item whose cases are all `cause == NoFile`. It is `zero` (default) or `withheld`.
-  - The default is zero because NoFile carries `Fault::Student` and fault is authoritative.
-  - The scorer never moves the blame from Student to Teacher.
-- Wrong-pattern guard: if every Executable student is NoFile on an item, grading prints a warning naming `[meta] file` and the item. It is a diagnostic only, so one student's result never depends on the rest of the batch.
-- Rationale: a forgotten file is an ordinary student mistake and must produce a defined score. The warning covers the case where the teacher's file pattern is wrong.
+**D4. Missing work.**
+- `missing` covers NotSubmitted and SubmittedEmpty: `withheld` (default, D-a) or `zero`.
+- `missing_file` covers an item whose every case is `cause == NoFile`: `withheld`
+  (default, D-f) or `zero`.
+- Excused is always `Withheld(Excused)`, whatever the policy and whatever the evidence.
+- A zero from either policy is `Graded` with `zero_reason` set (D9), so every export can
+  tell it from a wrong-answer zero.
 
-**D5. Item classification, in fixed order, trusting fault. The first matching rule decides.**
-1. No TestResult for the item: NoEvidence.
-2. More than one TestResult for the item: DuplicateEvidence.
-3. The TestResult has zero cases: NoEvidence.
-4. Any non-Passed case with Teacher fault: TeacherFault.
-5. Any non-Passed case with Environment fault: EnvironmentFault.
-6. Any non-Passed case with no fault, or any Passed case that carries a fault: UnknownFault (legacy or inconsistent evidence; it is never treated as a student fault).
-7. Every case is NoFile: apply `missing_file`.
-8. Otherwise the item is scored. Every remaining non-pass is a student fault (Wrong, Raised, Timeout, NoTarget, Syntax, and NotRun inherited from a student culprit).
+**D5. Item classification.** In declaration order; the first matching rule decides.
+1. No `TestResult` for the item, or more than one: refuse the batch. The runner makes
+   exactly one per spec and specs are unique (D13); anything else is a bug.
+2. A non-passed case with no `fault`: refuse the batch, same reason.
+3. Any non-passed case with `Fault::Teacher`: `Withheld(TeacherFault)`.
+4. Any non-passed case with `Fault::Environment`: `Withheld(EnvironmentFault)`.
+5. Every case is `NoFile`: the `missing_file` policy.
+6. Otherwise score it. Every remaining non-pass is the student's.
 
-Rationale: the P-674 contract makes fault authoritative, and `result.rs:99-100` says a missing fault must not be read as "no fault". The fixed order gives deterministic output.
+`blocking_case` and `blocking_cause` name the case that decided a withheld item.
 
 **D6. A withheld item withholds the student.**
-- `grade_state = Withheld` and `final_grade = None`.
-- `withheld_reason` is the reason of the first withheld item in declaration order.
-- Per-item states are kept, with `blocking_case` and `blocking_cause`.
+- `grade = Withheld`, `final_grade = None`, `reason` = the first withheld item's reason in
+  declaration order. Per-item scores are kept.
 - Other students are unaffected.
-- Rationale: the issue says the student stays ungraded, never 0. A partial total would reach Canvas looking like a real low grade.
+- A partial total would reach Canvas looking like a real low grade, so there is none.
 
-**D7. Student-level gates are checked before items, in this order:**
-1. excused: Excused
-2. `error` is set: GradingTaskFailed
-3. ReceivedUnmatched: PendingReview (this is the only pending-review hook; P-673 maps ambiguous matches onto it later)
-4. NotSubmitted or SubmittedEmpty: the `missing` policy
-5. `submission_state` is None (legacy) or Executable: fall through to item classification
+**D7. Student-level gates, before items, in order:**
+1. excused → `Excused`
+2. `error` set → `GradingTaskFailed`
+3. `ReceivedUnmatched` → `PendingReview`
+4. NotSubmitted / SubmittedEmpty → the `missing` policy
+5. Executable → item classification (D5)
 
-**D8. Curves and formulas only by explicit declaration. Formulas compile once and are never clamped.**
-- `curve` is `raw` (default), `template` (linear, sqrt, log or strict, with `0 <= lower <= upper <= scale`), or `formula`.
-- The formula is compiled into an AST once, in `CompiledPolicy::compile`, before `run_bundles`.
-  - The variables are `score`, `max`, `fraction` and `scale`.
-  - A compile failure refuses the run, so no student is graded.
-- A runtime error, a result that is not a number, a non-finite result, or a result outside `[0, scale]` withholds that student only, with FormulaError. The value is never clamped.
-- `missing = "zero"` bypasses the curve, so it gives a real 0.
-- Rationale: this fixes the batch-wide zero bug and the hidden clamp to 100.
+`submission_state` becomes required on `StudentReport` (D-e).
 
-**D9. Round once.**
-- `final_grade = round_half_away(scaled, decimals)`.
-- `decimals` defaults to 2, with a range of 0 to 4.
-- The unrounded value is kept in `basis.unrounded`.
-- Every consumer reads `final_grade` as is and never recomputes.
+**D8. Curves are explicit, and shown beside the raw grade (D-h).**
+- `curve` is `raw` (default), `template` (`linear`, `sqrt`, `log`, `strict`, with
+  `0 <= lower <= upper <= scale`), or `formula`.
+- A graded student always has `raw_grade = round(fraction × scale)`. `final_grade` is the
+  curved value, equal to `raw_grade` under `raw`.
+- The formula is compiled once, before any student runs, with `rhai_checker::engine()`.
+  Its variables are `score`, `max`, `fraction`, `scale`. A compile error refuses the run.
+- A runtime error, a non-number, a non-finite value or a value outside `[0, scale]`
+  withholds that student with `FormulaError`. Nothing is clamped.
+- A policy zero (D4) bypasses the curve: its `raw_grade` and `final_grade` are both 0.
+
+**D9. Rounding and the result fields.**
+- `raw_grade` and `final_grade` are rounded half away from zero to `decimals` (default 2,
+  range 0–4). Item scores and `score` stay unrounded in JSON; the grades CSV writes them
+  to `decimals` too.
+- `StudentReport` gains:
+
+  ```rust
+  pub grade: GradeState,                 // required: Graded | Withheld
+  pub reason: Option<Reason>,            // why withheld, or why a graded 0 is a policy 0
+  pub score: Option<f64>, pub max: f64,  // unrounded
+  pub raw_grade: Option<f64>,
+  pub final_grade: Option<f64>,          // None exactly when Withheld
+  pub items: Vec<ItemScore>,
+  pub basis: GradeBasis,                 // scale, decimals, curve, derived_items
+  ```
+
+- `final_grade` is `None` exactly when `grade == Withheld`.
 
 **D10. Lint counts only through `[grading] lint_points = N` (D-c).**
-- The 0.9/0.1 blend and `LintConfig.weight` are deleted.
-- There is no synthetic item: `score = Σ item scores + lint_points * lint_score / 100` and `max = Σ points + lint_points`.
-- `run_lint` returns a `Result`. A spawn failure, a spawn-blocking join error or an empty command gives `lint_score = None`, which gives Withheld(LintUnavailable) when lint points are declared.
-- Lint runs on the graded file of the bundle whose spec declares `[lint]`, not on `files.first()`.
-- Validation refuses `lint_points` when no spec has `[lint]`.
+- The blend and `LintConfig.weight` go.
+- `lint_points` adds `lint_points × lint_score / 100` to `score` and `lint_points` to
+  `max`. It is refused when no spec declares `[lint]`.
+- Lint runs on the file of the item whose spec declares `[lint]`, and has three outcomes:
+  - `Scored(f64)`;
+  - `NoFile`: that item is NoFile, so the student is already covered by `missing_file` —
+    withheld, or 0 lint points under `missing_file = "zero"`;
+  - `Failed(String)`: spawn failure, join error, empty command, or an exit code outside
+    `[lint] ok_exit_codes` (default `[0, 1]`, since ruff and flake8 exit 1 on findings) →
+    `Withheld(LintFailed)`.
 
-**D11. Push is reason-aware and cannot send a wrong scale.**
-- The filter lives in a library function, `export::grades_to_push`. It pushes only students with `grade_state == Graded` and a `canvas_user_id`.
-- It reports skip counts per reason: no Canvas user, excused, withheld(reason), legacy.
-- It refuses when:
-  - a report has `final_grade` set but no `grade_state` (legacy, no re-derivable basis), or
-  - two reports share a `canvas_user_id` (`HashMap::insert` would silently overwrite).
-- An explicit zero is pushed.
-- Checking the pushed scale against Canvas `points_possible` is P-680's; `basis.scale` is
-  recorded so P-680 can do it without re-deriving.
+**D11. Push is by state, never by number.**
+- `export::grades_to_push(&[StudentReport]) -> Result<PushSet>` pushes only `Graded`
+  students with a `canvas_user_id`, including real zeros.
+- It returns skip counts per reason and refuses two reports sharing a `canvas_user_id`
+  (a `HashMap::insert` would silently lose one).
+- `push_grades` takes a `BTreeMap<u64, f64>`.
+- Checking `basis.scale` against Canvas `points_possible` is P-680's.
 
-**D12. Legacy results.**
-- Loading never re-scores.
-- Consumers show `final_grade` set with no `grade_state` as "legacy", never as graded, and push refuses it.
-- `summarize` re-scores, so legacy failed cases with no fault become UnknownFault. This is intended, and the notice is printed.
+**D12. `summarize` displays what `grade` stored.** It loses the policy flags and never
+re-scores. Re-scoring stored evidence is P-678's.
 
 **D13. Assignment loading is library code.**
-- `load_assignment`, `reconcile_items` and `validate_assignment` move from `main.rs` into `scriptmark::assignment`.
-- `reconcile_items` returns a `Result`: an orphan spec or an orphan item becomes a hard refusal.
-- `grade`, `run`, `summarize` and the Python `grade()` share this path.
-- `load_specs_from_dir` refuses duplicate `[meta] name`. DuplicateEvidence stays as the scorer's second line of defence.
+- `load_assignment`, `reconcile_items` and `validate` move from `main.rs` to
+  `scriptmark::assignment`, shared by `grade`, `run` and the Python `grade()`.
+- `reconcile_items` refuses an orphan item or orphan spec.
+- `load_specs_from_dir` refuses a duplicate `[meta] name`.
+- Everything runs before `run_bundles`. Problems are collected into one
+  `refusing to grade:` error:
+  1. unknown key or enum value (serde);
+  2. duplicate item id;
+  3. orphan item or spec;
+  4. duplicate `[meta] name`;
+  5. total points 0;
+  6. `scale` not finite or `<= 0`;
+  7. `decimals > 4`;
+  8. template bounds not finite or outside `0 <= lower <= upper <= scale`;
+  9. formula does not compile;
+  10. `lint_points` with no `[lint]`; empty lint command.
 
-**D14. Scope is trimmed.**
-- No duplicate student_id refusal in `grade_all` (that is P-673's).
-- No PushPlan or SkipReason structure.
-- TUI, HTML and Python only read the new fields: they show withheld as a dash with its reason and never recompute.
-- `GradeBasis` is kept minimal, and P-678 hoists it into the versioned contract.
+**D14. Consumers read, never recompute.**
+- Withheld shows as `-` plus its reason; a graded 0 shows as `0` plus its `reason` when
+  it is a policy zero.
+- Colour thresholds and the HTML histogram use `final_grade / basis.scale`.
+- Averages count graded students only, and are `-` when there are none.
+
+**D15. A checker erroring on a student's value is the student's (D-g).**
+- `CheckError` becomes `Student` for: a function checker that raised; a Rhai check that
+  fails to evaluate or does not return a bool; a Python script checker that times out,
+  exits non-zero without a verdict, or prints no verdict. The cause stays `Checker`,
+  status `Failed`.
+- A Python checker that cannot be spawned or is lost stays Environment. Teacher module
+  import and setup failures stay Teacher.
+- After grading, any item where every executable student failed at least one case with
+  `Cause::Checker` prints a warning naming the checker: that is usually a teacher bug.
+  So does an item where every executable student is NoFile (a wrong `[meta] file`). Both
+  are diagnostics; no student's grade depends on another's.
 
 ## Types
 
@@ -168,88 +269,60 @@ Rationale: the P-674 contract makes fault authoritative, and `result.rs:99-100` 
 #[serde(rename_all = "snake_case")]
 pub enum Aggregation { #[default] Proportional, AllOrNothing }
 
-pub struct GradingItem {          // derives unchanged (Eq, Ord)
-    pub id: String,
-    #[serde(default)] pub title: Option<String>,
-    #[serde(default = "one")] pub points: u32,
-    #[serde(default)] pub aggregation: Aggregation,
+pub struct GradingItem {                        // derives unchanged
+	pub id: String,
+	#[serde(default)] pub title: Option<String>,
+	#[serde(default = "one")] pub points: u32,
+	#[serde(default)] pub aggregation: Aggregation,
 }
 
-// models/config.rs
-#[derive(Deserialize)] #[serde(deny_unknown_fields)]
-pub struct ItemDecl { pub id: String, #[serde(default)] pub title: Option<String>,
-    #[serde(default = "one")] pub points: u32, pub aggregation: Aggregation }   // -> GradingItem
-
-pub enum MissingPolicy { Withheld, Zero }                 // snake_case
+// models/config.rs — all Debug, Clone, Serialize, Deserialize
+#[serde(deny_unknown_fields)]
+pub struct ItemDecl { id, title: Option<String>, #[serde(default = "one")] points: u32, aggregation: Aggregation }
+pub enum MissingPolicy { Withheld, Zero }        // snake_case
 pub enum CurveTemplate { Linear, Sqrt, Log, Strict }
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Curve { #[default] Raw, Template { name: CurveTemplate, lower: f64, upper: f64 }, Formula { formula: String } }
+pub enum Curve { Raw, Template { name: CurveTemplate, lower: f64, upper: f64 }, Formula { formula: String } }
+#[serde(default, deny_unknown_fields)]
+pub struct GradingConfig { missing, missing_file: MissingPolicy, scale: f64, decimals: u8, curve: Curve, lint_points: Option<u32> }
+impl Default for GradingConfig { /* withheld, withheld, 100, 2, Raw, None */ }
 
-#[serde(deny_unknown_fields)]
-pub struct GradingConfig {
-    #[serde(default)] pub missing: MissingPolicy,           // Withheld
-    #[serde(default = "zero_policy")] pub missing_file: MissingPolicy, // Zero
-    #[serde(default = "hundred")] pub scale: f64,
-    #[serde(default = "two")] pub decimals: u8,
-    #[serde(default)] pub curve: Curve,
-    #[serde(default)] pub lint_points: Option<u32>,
-}
-// AssignmentConfig (deny_unknown_fields): items: Vec<ItemDecl>, #[serde(default)] grading: GradingConfig
+// models/spec.rs
+pub struct LintConfig { command, max_warnings, #[serde(default = "zero_one")] ok_exit_codes: Vec<i32> }  // weight removed
 
 // models/result.rs
 pub enum GradeState { Graded, Withheld }
-pub enum WithheldReason { NotSubmitted, SubmittedEmpty, Excused, PendingReview, GradingTaskFailed,
-    MissingFile, TeacherFault, EnvironmentFault, UnknownFault, NoEvidence, DuplicateEvidence,
-    UnexpectedEvidence, FormulaError, LintUnavailable }
-
-pub struct ItemScore {
-    pub item_id: String, pub points: u32, pub aggregation: Aggregation, pub state: GradeState,
-    #[serde(default)] pub score: Option<f64>,          // unrounded; None when withheld
-    #[serde(default)] pub reason: Option<WithheldReason>, // also set on a graded 0 via missing policy
-    pub passed: usize, pub counted: usize,
-    #[serde(default)] pub blocking_case: Option<String>,
-    #[serde(default)] pub blocking_cause: Option<Cause>,
-}
-pub struct GradeBasis { pub scale: f64, pub decimals: u8, pub curve: Curve,
-    pub derived_items: bool, pub unrounded: Option<f64>,
-    #[serde(default)] pub formula_error: Option<String> }
-
-// StudentReport new fields, all #[serde(default)]:
-pub grade_state: Option<GradeState>,      // None = legacy/unscored
-pub withheld_reason: Option<WithheldReason>,
-pub score: Option<f64>, pub max: Option<f64>,
-pub items: Vec<ItemScore>,
-pub excused: bool,
-pub basis: Option<GradeBasis>,
-// final_grade: rounded scaled value; None exactly when not Graded.
+pub enum Reason { NotSubmitted, SubmittedEmpty, Excused, PendingReview, GradingTaskFailed,
+	MissingFile, TeacherFault, EnvironmentFault, FormulaError, LintFailed }
+pub enum LintOutcome { Scored(f64), NoFile, Failed(String) }
+pub struct ItemScore { item_id, points: u32, aggregation, state: GradeState,
+	score: Option<f64>, reason: Option<Reason>, passed: usize, cases: usize,
+	blocking_case: Option<String>, blocking_cause: Option<Cause> }
+pub struct GradeBasis { scale: f64, decimals: u8, curve: Curve, derived_items: bool }
+// StudentReport: fields from D9; lint_score -> lint: Option<LintOutcome>;
+// submission_state required; is_gradeable removed; `spec_name` alias dropped.
 
 // grading.rs
-pub const FORMULA_VARIABLES: [&str; 4] = ["score", "max", "fraction", "scale"];
-pub struct CompiledPolicy { config: GradingConfig, derived_items: bool, engine: rhai::Engine, ast: Option<rhai::AST> }
-impl CompiledPolicy { pub fn compile(c: &GradingConfig, derived_items: bool) -> Result<Self, Vec<String>>; }
-pub fn grade_all(reports: &mut [StudentReport], items: &[GradingItem], p: &CompiledPolicy);
-pub fn round_half_away(x: f64, d: u8) -> f64;
-pub fn all_nofile_items(reports: &[StudentReport]) -> Vec<String>; // D4 warning
+pub struct CompiledPolicy { config: GradingConfig, derived_items: bool, engine: Engine, ast: Option<AST> }
+impl CompiledPolicy { pub fn compile(config: &GradingConfig, derived_items: bool) -> Result<Self> }
+pub fn grade_all(reports: &mut [StudentReport], items: &[GradingItem], policy: &CompiledPolicy) -> Result<()>;
+pub fn diagnostics(reports: &[StudentReport], items: &[GradingItem]) -> Vec<String>;  // D15 warnings
 
 // export.rs (new)
 pub struct PushSet { pub grades: BTreeMap<u64, f64>, pub skipped: BTreeMap<String, usize> }
-pub fn grades_to_push(reports: &[StudentReport]) -> anyhow::Result<PushSet>;
-pub fn write_grades_csv<W: Write>(reports: &[StudentReport], items: &[GradingItem], w: W) -> anyhow::Result<()>;
+pub fn grades_to_push(reports: &[StudentReport]) -> Result<PushSet>;
+pub fn write_grades_csv<W: Write>(reports: &[StudentReport], items: &[GradingItem], w: W) -> Result<()>;
 ```
 
-`is_gradeable()` is removed. The old tests assert the new states instead. It has no other in-library callers once push moves to `export`.
-
-## Config schema (`assignment.toml`)
+## `assignment.toml`
 
 ```toml
 [assignment]
 name = "hw3"
-canvas_course_id = 123
-canvas_assignment_id = 456
 
-[grading]                 # optional; the values shown are the defaults
+[grading]                 # optional; these are the defaults
 missing = "withheld"      # "withheld" | "zero"
-missing_file = "zero"     # "zero" | "withheld"
+missing_file = "withheld" # "withheld" | "zero"
 scale = 100
 decimals = 2
 curve = { kind = "raw" }
@@ -258,224 +331,156 @@ curve = { kind = "raw" }
 # lint_points = 1
 
 [[items]]
-id = "stats"              # == a spec's [meta] name
+id = "stats"              # a spec's [meta] name
 points = 3
-aggregation = "proportional"   # required when declared
+aggregation = "proportional"
 ```
 
-`validate_assignment(&AssignmentConfig, &[TestSpec]) -> Vec<String>` and `CompiledPolicy::compile` run before `run_bundles`. All problems are collected into one refusal, `"refusing to grade: ..."`. The refusals are:
-1. An unknown key or enum value (serde).
-2. A declared item that omits `aggregation`.
-3. Duplicate item ids.
-4. An orphan item or an orphan spec.
-5. Duplicate `meta.name`.
-6. Total points of 0.
-7. `scale` is not finite, or `scale <= 0`.
-8. `decimals > 4`.
-9. Template bounds that are not finite, or that fail `0 <= lower <= upper <= scale`.
-10. A formula that fails `rhai_checker::compile`.
-11. `lint_points` with no `[lint]` in any spec.
-12. An empty lint command.
+## Scoring (`grade_all`)
 
-## Scoring algorithm (`grade_all`)
+Each report independently, from scratch — the pass is idempotent:
 
-**Per report.** Each report is processed independently, with no shared state between reports.
+1. `max = Σ points + lint_points.unwrap_or(0)`.
+2. Student gates (D7). A gate withholds and stops, except a policy zero: `Graded`,
+   `score = 0`, `raw_grade = final_grade = 0`, `reason` set, each item a graded 0 with
+   that reason.
+3. Classify each declared item (D5). A scored item's score follows its aggregation.
+4. Lint (D10), when `lint_points` is declared.
+5. Any withheld item → student withheld (D6).
+6. `score = Σ`, `fraction = score / max`, `raw_grade = round(fraction × scale)`.
+7. Curve:
 
-1. **Reset** every scoring field. This makes the pass idempotent.
-2. **Compute max.** `max = Σ points + lint_points.unwrap_or(0)`.
-3. **Apply the student-level gates** from D7. A gate that fires withholds the student with its reason and stops.
-   - Under `missing = "zero"`, the student is instead Graded:
-     - `score = 0` and `final_grade = Some(0.0)`;
-     - each item gets `ItemScore { Graded, score 0, reason NotSubmitted or SubmittedEmpty }`;
-     - no curve is applied.
-4. **Build the evidence index.** Group `test_results` by `item_id` with a linear scan in `Vec` order. Any `item_id` that is not declared marks the student UnexpectedEvidence.
-5. **Classify each declared item** in declaration order (D5). A scored item gets `counted = cases.len()` and `passed = #Passed`, then its aggregation per D1.
-6. **Lint.** If `lint_points` is declared:
-   - a finite `lint_score` in `[0, 100]` adds `lint_points * lint_score / 100`;
-   - anything else withholds with LintUnavailable.
-7. **Withhold if needed.** If UnexpectedEvidence is set or any item is Withheld, the student is Withheld. The reason is UnexpectedEvidence, else the first withheld item's reason. `score` and `final_grade` are None, and `items` are kept.
-8. **Sum.** `score = Σ` item scores, then `fraction = score / max`.
-9. **Apply the curve.**
+   | Curve | `final_grade` before rounding |
+   |---|---|
+   | raw | `fraction × scale` |
+   | linear | `lower + fraction × (upper − lower)` |
+   | sqrt | `lower + √fraction × (upper − lower)` |
+   | log | `lower + ln(1 + 100·fraction) / ln 101 × (upper − lower)` |
+   | strict | `upper` at 1; `lower + (fraction − 0.8)/0.2 × (upper − lower)` from 0.8; else `lower` |
+   | formula | the compiled AST in a fresh scope; an int becomes f64 |
 
-| Curve | Result |
-|---|---|
-| raw | `fraction * scale` |
-| linear | `lower + fraction * (upper - lower)` |
-| sqrt | `lower + sqrt(fraction) * (upper - lower)` |
-| log | `lower + ln(1 + 100 * fraction) / ln(101) * (upper - lower)` |
-| strict | `upper` if `fraction == 1`; `lower + (fraction - 0.8) / 0.2 * (upper - lower)` if `fraction >= 0.8`; otherwise `lower` |
-| formula | evaluate the precompiled AST in a fresh Scope. An int is converted to f64. Anything else withholds with FormulaError, and the message goes in `basis.formula_error`. |
+8. Out of `[0, scale]` or not finite → `Withheld(FormulaError)`. Otherwise round and
+   mark `Graded`.
 
-10. **Range guard.** A result that is not finite or lies outside `[0, scale]` withholds with FormulaError. It is never clamped.
-11. **Finish.** `final_grade = round_half_away(scaled, decimals)`, `grade_state = Graded`, and `basis` is filled in.
+A 0 can only come from a policy zero, student-fault evidence, or a declared curve. Teacher,
+environment, formula and lint-tool problems always give `None` with a reason.
 
-**Where a 0 can come from.** Only these produce a zero:
-- `missing = "zero"`
-- a NoFile item under `missing_file = "zero"`
-- student-fault evidence that scores 0
-- a declared curve or formula whose result is 0
+Items and cases are walked in `Vec` order: no hash iteration, clock or randomness.
 
-Teacher, environment, unknown-fault, formula and lint-tool problems always give None plus a reason.
+## Consumers
 
-**Determinism.** Items and cases are walked in `Vec` order. There is no HashMap iteration, no clock and no randomness.
-
-## Consumer changes, file by file
-
-- **`grading.rs`**
-  - Rewrite as described above.
-  - Delete the blend (`:56-62`), the `Missing → 0` path (`:27,74`) and the eval-error zero (`:96-99`).
-- **`models/result.rs`**
-  - Add the new fields.
-  - Remove `is_gradeable`.
-  - Keep `pass_rate` and `status`, documented as informational only.
-- **`models/config.rs`**
-  - Add `GradingConfig`, `ItemDecl` and `deny_unknown_fields`.
-  - Remove `GradingPolicy` and `CourseConfig.grading`.
-- **`models/spec.rs`**
-  - Remove `LintConfig.weight`.
-- **`spec_loader.rs`**
-  - Refuse duplicate `meta.name`.
-  - Refuse an empty lint command.
-  - Update `test_load_course_config`.
-- **`assignment.rs`** (new)
-  - Holds `load_assignment` (returns `Assignment`, `AttemptPolicy`, `GradingConfig`, `derived: bool`), `reconcile_items -> Result`, and `validate_assignment`.
-- **`runner/orchestrator.rs`**
-  - Set `report.excused = student.is_excused()` in the spawn closure (`:84-92`) and in the panic branch (`:104-111`).
-  - `lint()` takes the graded file of the lint-declaring bundle.
-  - A lint `Err` maps to None.
-- **`runner/linter.rs`**
-  - `run_lint -> Result<LintResult, String>`; a spawn failure or an empty command is `Err`.
 - **`main.rs`**
-  - Remove the flags and `build_grading_policy`.
-  - `cmd_grade` order:
-    1. load
-    2. specs
-    3. reconcile and validate
-    4. compile
-    5. `run_bundles`
-    6. `grade_all`
-    7. warn on items where every student is NoFile
-    8. outputs
-  - `save_session` receives `grading_policy` as JSON of `GradingConfig` plus items.
-  - `cmd_run` validates and compiles before running.
-  - `cmd_summarize` gains `--tests` (required) and `--assignment`, re-scores, and prints the legacy notice.
-  - CSV archive:
-    - `submission_state` is written in snake_case serde form.
-    - The sentinel row's status comes from `grade_state` and `withheld_reason`.
-    - Add `grades_{stem}.csv` via `export::write_grades_csv`, one row per student: `student_id, student_name, canvas_user_id, grade_state, withheld_reason, score, max, final_grade, <item>_score, <item>_state...`.
-    - Withheld cells are empty. A zero is written as `0`.
-    - An unknown `--format` now bails instead of printing "Archived".
-  - `cmd_grades_push`:
-    - uses `export::grades_to_push`;
-    - prints skip counts per reason.
-- **`canvas/client.rs`**
-  - `push_grades` takes `&BTreeMap<u64, f64>`.
-- **`display.rs`**
-  - `display_summary` columns: Student, Name, State, Reason, Score (`score/max` or `-`), Grade (`final_grade` or `-`), Pass (info).
-  - Legacy reports show `LEGACY`.
-  - `display_failures` labels `fault None` as "unknown fault" and prints the report-level withheld reason and the blocking item.
-  - `display_stats` shows graded, zero and withheld-by-reason counts, with the average over graded students only.
-- **`db/schema.rs` and `db/results.rs`**
-  - The first migration is gated on `PRAGMA user_version < 1` and runs in one transaction:
-    - `ALTER TABLE results ADD COLUMN grade_state TEXT`
-    - `... withheld_reason TEXT`
-    - `... score REAL`
-    - `... max_score REAL`
-    - set `user_version = 1`
-  - `CREATE TABLE` includes the same columns.
-  - `ResultRow` gains the four fields.
-  - One shared row mapper serves `get_results` and `get_student_history`.
-  - `pass_rate` becomes `Option`.
-  - Order by `final_grade DESC NULLS LAST`.
-  - `Session.avg_grade` becomes `Option`, NULL when nobody is graded.
-- **`tui/ui.rs`**
-  - Add State and Score columns in the list; withheld shows `—` plus its reason.
-  - The detail pane gains a top state/reason line and a per-item `score/points` header.
-- **`report_template.html`**
-  - `_graded = grade_state === 'graded'`.
-  - `grade_state` absent with `final_grade` set shows as legacy.
-  - Add a state/reason badge and `score/max`.
-  - Aggregates count graded students only, so withheld students are not counted as failures.
-- **`scriptmark-py/src/lib.rs`**
-  - `grade(..., assignment=None)` replaces `policy`, through the shared path.
-  - New getters: `state`, `reason`, `score`, `max`.
-- **`README.md:73-75`**
-  - Guard the grade format against `None`.
-- **`docs/test-bundles.md`**
-  - Add a Scoring section: the schema, the withheld-reason table, and the zero-versus-withheld rules.
-- **`examples/bundles/*/`**
-  - Add example `assignment.toml` files.
+  - `grade`: load → specs → reconcile and validate → compile → `run_bundles` →
+    `grade_all` → diagnostics → outputs. `save_session` stores the `GradingConfig` and
+    items as JSON.
+  - `run`: validates and compiles before running.
+  - `summarize`: displays stored results (D12).
+  - archive CSV: `submission_state` in serde form; the per-student sentinel row reports
+    `grade` and `reason`; an unknown `--format` bails.
+  - new `grades_{stem}.csv`: `student_id, student_name, canvas_user_id, grade, reason,
+    score, max, raw_grade, final_grade`, then `<item>_score, <item>_state,
+    <item>_reason` per item. Withheld cells are empty; a zero is `0`.
+  - `grades push`: `export::grades_to_push`, skip counts per reason.
+  - `db sessions` / `db history`: `-` for no grade; state and reason shown.
+- **`display.rs`**: Student, Name, State, Reason, Score (`score/max`), Raw, Grade.
+  `display_stats`: graded, zero and withheld-by-reason counts; average over graded.
+- **`db`**: the schema gains `grade`, `reason`, `score`, `max_score`, `raw_grade`, and
+  sets `PRAGMA user_version = 1`. Opening a database whose `user_version` is not 1 is
+  refused (D-e). Row mappers propagate errors instead of `filter_map(ok)`, and numeric
+  columns are not defaulted to 0. `avg_grade` and `pass_rate` become `Option`. Order by
+  `final_grade DESC NULLS LAST`.
+- **`tui/ui.rs`**: State and Score columns; detail pane shows state, reason and
+  `score/points` per item.
+- **`report_template.html`**: `_graded = grade === 'graded'`; state and reason badge;
+  `score/max`; raw beside curved when they differ; chart and colours by fraction of
+  scale; withheld sorted after graded.
+- **`scriptmark-py`**: `grade(..., assignment=None)` through the shared path; getters
+  for `grade`, `reason`, `score`, `max`, `raw_grade`.
+- **Docs**: a Scoring section in `docs/test-bundles.md` with the schema, the reason
+  table and the zero-versus-withheld rules; README examples; example `assignment.toml`
+  files for `examples/bundles/*`.
 
-## Commit sequence (the crate compiles after each)
+## Commits (the crate builds and tests pass after each)
 
-1. **Additive model fields.** `Aggregation`, `GradingItem.points` and `.aggregation` (serde-defaulted), and all `StudentReport` fields (serde-defaulted). Legacy fixture tests still pass.
-2. **Scorer.** Add `GradingConfig`, `ItemDecl`, `CompiledPolicy` and `grade_all`. Delete `GradingPolicy`, the flags and the blend. Fix all 6 call sites plus `test_load_course_config`. Flip `test_missing_student_gets_zero` and `test_formula_error_gives_zero`. Port the template tests.
-3. **Assignment module.** Add `assignment.rs` with a `reconcile_items` that refuses, plus the validation table. Add the duplicate `meta.name` refusal. Wire `grade`, `run`, `summarize` and Python.
-4. **Orchestrator and linter.** The `excused` flag, lint on the graded file, `run_lint -> Result`, and removal of `LintConfig.weight` (update the 5 linter tests).
-5. **Export and push.** `export.rs` (`grades_to_push`, `write_grades_csv`), `cmd_grades_push`, the CSV archive changes, and `BTreeMap` in `push_grades`.
-6. **DB.** Migration, row mapper, nullable average and the `grading_policy` column.
-7. **Display, TUI, HTML, Python getters and README.**
-8. **Docs and example `assignment.toml` files.** Add score assertions to `tests/examples.rs`.
+1. **Checker attribution (D15).** `CheckError::student`, the three checkers, judge tests.
+2. **Scorer.** Model fields, `Aggregation`, `GradingConfig`, `ItemDecl`,
+   `CompiledPolicy`, `grade_all`. Delete `GradingPolicy`, the flags and the blend. Fix
+   every call site. Old results stop parsing (D-e).
+3. **Assignment module and validation (D13).**
+4. **Lint (D10).** `LintOutcome`, exit codes, lint on the declaring item's file.
+5. **Export and push (D11).** `export.rs`, grades CSV, archive changes.
+6. **DB.** New schema, version check, strict mappers, `db` subcommands.
+7. **Display, TUI, HTML, Python, diagnostics.**
+8. **Docs and example `assignment.toml` files**, with score assertions in
+   `tests/examples.rs`.
 
-## Regression tests mapped to acceptance items
+## Regression tests, by acceptance item
 
-**A1. More cases in one item do not change its max contribution.**
-- `grading::more_cases_do_not_change_item_max`: 5 cases vs 50 cases, 2 points, next to a 1-point item. Max stays 3, and the score is equal at the same pass fraction.
-- `integration::parametrized_count_does_not_change_item_max`: a real spec run with `count` 5 vs 50.
-- `grading::all_or_nothing_aggregation`: 9/10 gives 0, 10/10 gives full points.
+**More random cases do not change an item's max.**
+- `grading::more_cases_do_not_change_item_max`: 5 against 50 cases on a 2-point item
+  next to a 1-point item; max stays 3 and the score is equal at equal pass fractions.
+- `integration::parametrized_count_does_not_change_item_max`: a real spec, `count` 5
+  against 50.
+- `grading::all_or_nothing_aggregation`: 9/10 → 0, 10/10 → full.
 
-**A2. All correct and partial.**
-- `grading::all_correct_and_partial`: all correct gives 100.0. With two 1-point items at 3/4 and 1/1, the score is 1.75/2, which is 87.5.
-- `examples.rs`: alice gets full marks, bob gets a partial score.
+**All correct and partial.**
+- `grading::all_correct_and_partial`: all correct → 100; two 1-point items at 3/4 and
+  1/1 → 1.75/2 = 87.5.
+- `examples.rs`: alice full marks, bob partial.
 
-**A3. Missing.**
-- `grading::not_submitted_default_withheld` (the flipped `test_missing_student_gets_zero`; `StudentReport::default()` is legacy state, so it becomes NoEvidence, withheld).
-- `grading::missing_zero_policy_gives_zero_without_curve`
-- `grading::excused_always_withheld` (under `missing = "zero"`, and with an all-pass submission)
-- `grading::received_unmatched_is_pending_review`
-- `grading::missing_file_item_scores_zero_by_default_withheld_by_policy`
-- `grading::all_nofile_items_reports_the_item`
-- Port the call sites in `integration.rs:264-298` (dan is withheld NotSubmitted; the unmatched student is PendingReview).
+**Missing.**
+- `grading::not_submitted_withheld_by_default` (replaces
+  `test_missing_student_gets_zero`).
+- `grading::missing_zero_gives_zero_with_reason_and_no_curve`.
+- `grading::excused_always_withheld` (under `missing = "zero"`, and with all passing).
+- `grading::received_unmatched_is_pending_review`.
+- `grading::missing_file_withheld_by_default_zero_by_policy`.
+- `grading::lint_on_missing_file_follows_missing_file_policy`.
 
-**A4. Teacher formula error.**
-- `grading::formula_that_fails_to_compile_is_refused` (the flipped `test_formula_error_gives_zero`): `compile` returns Err and no report is touched.
-- `grading::formula_runtime_error_withholds_only_that_student`
-- `grading::formula_non_finite_or_out_of_range_is_withheld_not_clamped` (`1.0/0.0`, `scale+1`, `-1`, `true`)
-- `grading::teacher_fault_in_one_item_withholds_student_not_batch`, with `blocking_case` set.
-- `integration::teacher_checker_crash_withholds_only_affected_student`
+**Teacher formula error.**
+- `grading::formula_that_does_not_compile_is_refused` (replaces
+  `test_formula_error_gives_zero`): no report is touched.
+- `grading::formula_runtime_error_withholds_only_that_student`.
+- `grading::formula_out_of_range_is_withheld_not_clamped`: `1.0/0.0`, `scale + 1`, `-1`,
+  `true`.
+- `grading::teacher_fault_withholds_student_not_batch`, with `blocking_case`.
+- `judge::checker_error_on_student_value_is_student_fault` for all three checker kinds.
+- `integration::teacher_module_import_failure_withholds`.
 
-**A5. Environment startup failure.**
-- `integration::env_startup_failure_withholds_all`: `/nonexistent/python3` gives every student Withheld(EnvironmentFault) with `final_grade` None.
-- `grading::lint_tool_failure_withholds_when_lint_declared`
-- `linter::spawn_failure_is_err_not_100`
-- `grading::task_panic_is_grading_task_failed` (port of `db/mod.rs:317`)
+**Environment startup failure.**
+- `integration::env_startup_failure_withholds_everyone`: `/nonexistent/python3` →
+  `Withheld(EnvironmentFault)` for every student.
+- `linter::nonzero_exit_outside_ok_codes_is_failed_not_100`,
+  `linter::spawn_failure_is_failed`.
+- `grading::lint_failure_withholds_when_lint_points_declared`.
+- `grading::task_panic_is_grading_task_failed`.
 
-**A6. Same evidence + policy gives the same result.**
-- `grading::grade_all_is_idempotent_and_order_independent`: grading twice, and grading shuffled then sorted, give byte-identical JSON.
-- `grading::rounding_is_half_away_and_recorded`: 2/3 gives 66.67, with the unrounded value in `basis`; 0 decimals gives 67.
+**Same evidence and policy, same result.**
+- `grading::grade_all_is_idempotent_and_order_independent`: byte-identical JSON.
+- `grading::rounding_half_away`: 2/3 → 66.67; 0 decimals → 67.
+- `grading::curve_keeps_raw_grade`: sqrt at 0.25 → raw 25, final 80.
 
-**A7. Export distinguishes zero from ungraded.**
-- `export::grades_csv_leaves_withheld_empty_and_writes_zero`
-- `db::zero_and_withheld_round_trip_with_reason`
-- `db::migration_adds_columns_to_pre_p677_db` (legacy rows read NULL state; `user_version` is 1)
-- `db::session_average_null_when_nobody_graded`
-- `input_equivalence::legacy_fixture_still_loads`: `final_grade == Some(95.0)`, `grade_state` None, no re-scoring on load. Replaces the `is_gradeable` assertion at `:350`.
+**Export and Canvas tell a zero from no grade.**
+- `export::grades_csv_leaves_withheld_empty_writes_zero_and_reason`.
+- `export::push_skips_withheld_and_excused_pushes_explicit_zero`.
+- `export::push_refuses_duplicate_canvas_user`.
+- `db::zero_and_withheld_round_trip_with_reason`.
+- `db::old_database_is_refused`, `db::reopen_is_idempotent`.
+- `db::session_average_none_when_nobody_graded`.
+- `results::old_result_json_is_refused`.
 
-**A8. Canvas sync distinguishes zero from ungraded.**
-- `export::push_skips_withheld_and_excused_pushes_explicit_zero`
-- `export::push_refuses_legacy_grade_without_state`
-- `export::push_refuses_duplicate_canvas_user`
-
-**Refuse-early validation.**
-- `assignment::validate_assignment_refusals`, table-driven: duplicate id, orphan item, orphan spec, zero points, scale 0 or NaN, decimals 5, lower > upper, upper > scale, a bad formula, `lint_points` with no `[lint]`, `missing = "witheld"`, `pionts`, a missing `aggregation`.
-- `spec_loader::duplicate_meta_name_is_refused`
-- `spec_loader::empty_lint_command_is_refused`
-
-**Unchanged.** `integration.rs:701-876` (the fault-owner tests), `harness.rs`, and `db/mod.rs:208-224,332-353`, whose intent is kept.
+**Refused before grading.**
+- `assignment::validate_refusals`, table-driven over D13's list, plus
+  `missing = "witheld"`, `pionts`, and a missing `aggregation`.
+- `config::grading_default_matches_serde_default`.
+- `spec_loader::duplicate_meta_name_is_refused`.
 
 ## Residual risks, accepted
 
-- One teacher fault on a single item withholds the whole student. The per-item records show which item blocked.
-- Re-scoring legacy JSON through `summarize` withholds every student with failures as UnknownFault. A regrade is required for those results.
-- Removing the CLI flags and `LintConfig.weight` is a breaking change.
+- One teacher or environment fault on one item withholds the whole student. The per-item
+  record says which item and case blocked.
+- A buggy teacher checker now fails students instead of withholding them. The D15
+  warning names it; the teacher fixes the checker and regrades.
+- Removing the flags and `LintConfig.weight`, and refusing old results and databases, are
+  breaking changes by decision.
 - The pushed scale is not checked against Canvas `points_possible`; that is P-680's.
