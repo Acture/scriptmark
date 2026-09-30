@@ -21,7 +21,8 @@ use crate::models::{Check, SetupStep, TestCase, TestSpec};
 use crate::runner::executor::{
 	CallPlan, Executor, InProcessCheck, ScriptRun, Subject, TeacherRuntime, UnitPlan,
 };
-use crate::runner::generation::{Generated, generate, os_seed, seed_for};
+use crate::runner::frozen::{Generation, replay_entry};
+use crate::runner::generation::{DrawSeed, Generated, generate, seed_for};
 use crate::runner::judge::Scored;
 use crate::runner::oracle::resolve_oracle;
 use crate::spec_loader::{MAX_TIMEOUT_SECS, RESERVED, refs, validate, validate_expanded};
@@ -70,9 +71,17 @@ pub struct PrepareError {
 #[error("{}", .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n"))]
 pub struct PrepareErrors(pub Vec<PrepareError>);
 
+/// Where one spec's template inputs come from.
+enum Source {
+	Fresh(DrawSeed),
+	/// The spec's frozen templates, by name.
+	Replay(BTreeMap<String, Generated>),
+}
+
 /// Prepare every spec, concurrently. Either all of them are ready or none is returned.
 pub async fn prepare<E: Executor>(
 	specs: Vec<TestSpec>,
+	generation: &Generation,
 	executor: Arc<E>,
 	timeout_secs: u64,
 ) -> Result<Vec<Bundle>, PrepareErrors> {
@@ -98,11 +107,29 @@ pub async fn prepare<E: Executor>(
 			"two specs are named '{twice}': results and frozen inputs are kept by spec name"
 		));
 	}
+	if let Generation::Replay(frozen) = generation
+		&& let Some(extra) = frozen.specs.keys().find(|s| !seen.contains(s.as_str()))
+	{
+		return refuse(&format!(
+			"the frozen inputs have spec '{extra}', which this batch does not: replay them with the specs they were made from"
+		));
+	}
 	let mut tasks = tokio::task::JoinSet::new();
 	let mut index_of = std::collections::HashMap::new();
 	for (index, spec) in specs.into_iter().enumerate() {
 		let executor = executor.clone();
-		let handle = tasks.spawn(async move { prepare_one(spec, &*executor, timeout_secs).await });
+		let source = match generation {
+			Generation::Fresh(draw) => Source::Fresh(*draw),
+			Generation::Replay(frozen) => Source::Replay(
+				frozen
+					.specs
+					.get(&spec.meta.name)
+					.cloned()
+					.unwrap_or_default(),
+			),
+		};
+		let handle =
+			tasks.spawn(async move { prepare_one(spec, source, &*executor, timeout_secs).await });
 		index_of.insert(handle.id(), index);
 	}
 	let mut done: Vec<(usize, Result<Bundle, PrepareError>)> = Vec::new();
@@ -140,6 +167,7 @@ pub async fn prepare<E: Executor>(
 
 async fn prepare_one<E: Executor>(
 	mut spec: TestSpec,
+	source: Source,
 	executor: &E,
 	timeout_secs: u64,
 ) -> Result<Bundle, PrepareError> {
@@ -167,10 +195,18 @@ async fn prepare_one<E: Executor>(
 			continue;
 		};
 		let inputs = param.inputs();
-		let made = match seed_for(&inputs, os_seed)
-			.map_err(|e| vec![e])
-			.and_then(|seed| generate(&case.name, &inputs, seed))
-		{
+		let made = match &source {
+			Source::Fresh(draw) => seed_for(&inputs, *draw)
+				.map_err(|e| vec![e])
+				.and_then(|seed| generate(&case.name, &inputs, seed)),
+			Source::Replay(frozen) => match frozen.get(&case.name) {
+				Some(entry) => replay_entry(&case.name, &inputs, entry),
+				None => Err(vec![
+					"the frozen inputs have no template by this name: draw new inputs instead of replaying".into(),
+				]),
+			},
+		};
+		let made = match made {
 			Ok(made) => made,
 			Err(errors) => {
 				let at = format!("case '{}'", case.name);
@@ -196,6 +232,19 @@ async fn prepare_one<E: Executor>(
 			cases.push(g);
 		}
 		generated.insert(case.name.clone(), made);
+	}
+	if let Source::Replay(frozen) = &source {
+		let templates: BTreeSet<&str> = spec
+			.cases
+			.iter()
+			.filter(|c| c.parametrize.is_some())
+			.map(|c| c.name.as_str())
+			.collect();
+		for extra in frozen.keys().filter(|t| !templates.contains(t.as_str())) {
+			problems.push(format!(
+				"the frozen inputs have template '{extra}', which the spec does not: replay them with the spec they were made from"
+			));
+		}
 	}
 	spec.cases = cases;
 	// The expanded cases meet the static rules too — an oracle answer that cannot fit its

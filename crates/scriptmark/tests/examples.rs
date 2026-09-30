@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::models::{Cause, Fault, GradeOutcome, StudentReport, TestStatus};
+use scriptmark::runner::frozen::Generation;
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
@@ -28,7 +29,7 @@ async fn grade_example(name: &str) -> Vec<StudentReport> {
 	let submissions = root.join("submissions");
 	let input = load_local_input(&[submissions.as_path()], LocalInputOptions::default()).unwrap();
 	let executor = Arc::new(PythonExecutor::new());
-	let bundles = prepare(specs, executor.clone(), 5)
+	let bundles = prepare(specs, &Generation::fresh(), executor.clone(), 5)
 		.await
 		.unwrap_or_else(|e| panic!("{e}"));
 	let mut reports = run_all(

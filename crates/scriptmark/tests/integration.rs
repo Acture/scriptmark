@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use scriptmark::grading::{Policy, grade_all};
 use scriptmark::models::*;
+use scriptmark::runner::frozen::Generation;
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
@@ -53,7 +54,7 @@ async fn grade_with(
 	timeout: u64,
 ) -> Vec<StudentReport> {
 	let executor = Arc::new(executor);
-	let bundles = prepare(specs, executor.clone(), timeout)
+	let bundles = prepare(specs, &Generation::fresh(), executor.clone(), timeout)
 		.await
 		.unwrap_or_else(|e| panic!("{e}"));
 	let options = RunOptions {
@@ -69,11 +70,16 @@ async fn grade(specs: Vec<TestSpec>, students: &[StudentSubmission]) -> Vec<Stud
 
 /// Why a bundle is refused before any student runs.
 async fn refusal(spec: TestSpec) -> String {
-	prepare(vec![spec], Arc::new(PythonExecutor::new()), 5)
-		.await
-		.map(|_| ())
-		.unwrap_err()
-		.to_string()
+	prepare(
+		vec![spec],
+		&Generation::fresh(),
+		Arc::new(PythonExecutor::new()),
+		5,
+	)
+	.await
+	.map(|_| ())
+	.unwrap_err()
+	.to_string()
 }
 
 /// Score reports under the default policy: each spec an item worth 1 point.
@@ -244,10 +250,15 @@ async fn test_a_concurrency_a_semaphore_cannot_hold_still_runs() {
 	let bench = Bench::new();
 	let students = [bench.student("alice", "lab5.py", ALICE)];
 	let executor = Arc::new(PythonExecutor::new());
-	let bundles: Arc<[_]> = prepare(vec![bench.spec(LARGER)], executor.clone(), 5)
-		.await
-		.unwrap_or_else(|e| panic!("{e}"))
-		.into();
+	let bundles: Arc<[_]> = prepare(
+		vec![bench.spec(LARGER)],
+		&Generation::fresh(),
+		executor.clone(),
+		5,
+	)
+	.await
+	.unwrap_or_else(|e| panic!("{e}"))
+	.into();
 	for concurrency in [0, usize::MAX] {
 		let options = RunOptions {
 			concurrency: Some(concurrency),
@@ -1196,6 +1207,7 @@ async fn test_every_name_must_mean_exactly_one_thing() {
 				"[[cases]]\nname = \"x\"\ncheck = { function = \"lenient\" }\n",
 				&[t]
 			)],
+			&Generation::fresh(),
 			Arc::new(PythonExecutor::new()),
 			5
 		)
@@ -1203,7 +1215,13 @@ async fn test_every_name_must_mean_exactly_one_thing() {
 		.is_ok()
 	);
 
-	let nothing = prepare(vec![], Arc::new(PythonExecutor::new()), 5).await;
+	let nothing = prepare(
+		vec![],
+		&Generation::fresh(),
+		Arc::new(PythonExecutor::new()),
+		5,
+	)
+	.await;
 	assert!(
 		nothing
 			.map(|_| ())
@@ -1211,7 +1229,13 @@ async fn test_every_name_must_mean_exactly_one_thing() {
 			.to_string()
 			.contains("no test specs")
 	);
-	let zero = prepare(vec![bench.spec(LARGER)], Arc::new(PythonExecutor::new()), 0).await;
+	let zero = prepare(
+		vec![bench.spec(LARGER)],
+		&Generation::fresh(),
+		Arc::new(PythonExecutor::new()),
+		0,
+	)
+	.await;
 	assert!(
 		zero.map(|_| ())
 			.unwrap_err()

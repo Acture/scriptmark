@@ -8,7 +8,7 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{Inputs, Seed};
+use crate::models::{Inputs, Seed, TestSpec};
 use crate::runner::generator::{GENERATOR_VERSION, Rule};
 
 /// The most draws one template may make.
@@ -92,6 +92,19 @@ pub fn seed_for(inputs: &Inputs, draw: DrawSeed) -> Result<Option<(u64, SeedSour
 		Some(Seed::Fixed(seed)) => (seed, SeedSource::Declared),
 		Some(Seed::Random) => (draw()?, SeedSource::Drawn),
 	}))
+}
+
+/// The first template, as `(spec, case)`, whose seed would be drawn: `seed = "random"` on
+/// a template that draws from rules.
+pub fn draws_a_seed(specs: &[TestSpec]) -> Option<(&str, &str)> {
+	specs.iter().find_map(|spec| {
+		spec.cases.iter().find_map(|case| {
+			let inputs = case.parametrize.as_ref()?.inputs();
+			let random = inputs.random.as_ref().filter(|_| !inputs.args.is_empty())?;
+			(random.seed == Some(Seed::Random))
+				.then_some((spec.meta.name.as_str(), case.name.as_str()))
+		})
+	})
 }
 
 /// A seed from the OS, kept below 2^53 so it fits a TOML integer and a JSON reader's
@@ -334,6 +347,27 @@ mod tests {
 			seed_for(&inputs(&[], vec![], Some((2, None))), never),
 			Ok(None)
 		);
+	}
+
+	#[test]
+	fn test_only_a_random_seed_on_a_template_that_draws_is_drawn() {
+		let spec = |body: &str| {
+			crate::spec_loader::load_spec_str(
+				&format!("[meta]\nname = \"s\"\nfile = \"l.py\"\nfunction = \"f\"\nlanguage = \"python\"\n[[cases]]\nname = \"c\"\ncheck = \"sorted\"\n{body}"),
+				std::path::Path::new("."),
+			)
+			.unwrap_or_else(|e| panic!("{e}"))
+		};
+		let one = "[[cases.parametrize.args]]\na = \"list(int(0, 1), 0, 2)\"\n";
+		let random = format!("{one}[cases.parametrize.random]\ncount = 1\nseed = \"random\"\n");
+		assert_eq!(draws_a_seed(&[spec(&random)]), Some(("s", "c")));
+		for quiet in [
+			format!("{one}[cases.parametrize.random]\ncount = 1\nseed = 4\n"),
+			format!("{one}[cases.parametrize.random]\ncount = 1\n"),
+			format!("{one}[cases.parametrize]\nsamples = [[[1]]]\n"),
+		] {
+			assert_eq!(draws_a_seed(&[spec(&quiet)]), None, "{quiet}");
+		}
 	}
 
 	#[test]

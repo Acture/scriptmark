@@ -1,7 +1,7 @@
 mod display;
 mod report;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -14,6 +14,8 @@ use scriptmark::models::{
 	SubmissionOutcome, TestSpec,
 };
 use scriptmark::roster::load_roster;
+use scriptmark::runner::frozen::{self, Frozen, Generation};
+use scriptmark::runner::generation::SeedSource;
 use scriptmark::runner::orchestrator::{self, RunOptions};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
@@ -56,6 +58,19 @@ enum Commands {
 	},
 	/// Database management commands
 	Db(DbCommand),
+}
+
+/// Where a batch's generated inputs come from. They are frozen beside `--output`, as
+/// `<stem>.cases.json`, once the run is done.
+#[derive(clap::Args)]
+struct FrozenArgs {
+	/// Grade on the inputs frozen in FILE instead of generating them
+	#[arg(long, value_name = "FILE")]
+	replay: Option<PathBuf>,
+
+	/// Generate new inputs, even though the ones frozen beside --output differ
+	#[arg(long, conflicts_with = "replay")]
+	fresh: bool,
 }
 
 #[derive(Parser)]
@@ -110,6 +125,9 @@ struct GradeArgs {
 	/// Save results to SQLite database
 	#[arg(long)]
 	db: Option<PathBuf>,
+
+	#[command(flatten)]
+	frozen: FrozenArgs,
 }
 
 #[derive(Parser)]
@@ -152,6 +170,9 @@ struct RunArgs {
 	/// Python interpreter command
 	#[arg(long, default_value = "python3")]
 	python: String,
+
+	#[command(flatten)]
+	frozen: FrozenArgs,
 }
 
 #[derive(Parser)]
@@ -486,16 +507,26 @@ fn label<T: serde::Serialize>(value: Option<T>) -> String {
 }
 
 /// Prepare every test bundle, then run them against every student. A bundle that cannot
-/// be prepared stops the run before any student is graded.
+/// be prepared stops the run before any student is graded, and so do fresh inputs that
+/// would replace other inputs frozen beside `output`.
+///
+/// Returns the reports and the inputs they were graded on, for `save_frozen` once the
+/// results are written.
 async fn run_bundles(
 	students: &[StudentSubmission],
 	specs: Vec<TestSpec>,
 	python: &str,
 	timeout: u64,
 	concurrency: Option<u64>,
-) -> Result<Vec<StudentReport>> {
+	output: &Path,
+	options: &FrozenArgs,
+) -> Result<(Vec<StudentReport>, Frozen)> {
+	let generation = match &options.replay {
+		Some(path) => Generation::Replay(Frozen::load(path)?),
+		None => Generation::fresh(),
+	};
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
-	let bundles = prepare(specs, executor.clone(), timeout)
+	let bundles = prepare(specs, &generation, executor.clone(), timeout)
 		.await
 		.context("refusing to grade: the test bundle is not ready")?;
 	println!(
@@ -503,19 +534,52 @@ async fn run_bundles(
 		bundles.len(),
 		bundles.iter().map(|b| b.units.len()).sum::<usize>()
 	);
-	let options = RunOptions {
+	let inputs = Frozen::of(&bundles);
+	let beside = frozen::beside(output);
+	if options.replay.is_none() {
+		for (spec, templates) in &inputs.specs {
+			for (case, made) in templates {
+				if let (Some(seed), Some(SeedSource::Drawn)) = (made.seed, made.seed_source) {
+					eprintln!(
+						"  note: case '{case}' in '{spec}' drew seed {seed}. Write `seed = {seed}` in its [cases.parametrize.random] to keep these inputs, or grade with --replay {}",
+						beside.display()
+					);
+				}
+			}
+		}
+		if !inputs.is_empty() {
+			frozen::check_replaceable(&beside, &inputs, options.fresh)
+				.map_err(anyhow::Error::msg)
+				.context("refusing to grade")?;
+		}
+	}
+	let run_options = RunOptions {
 		concurrency: concurrency.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
 		python: executor.python_cmd().to_string(),
 	};
 	// Units run in their own process groups, so the terminal's Ctrl-C reaches only the
 	// grader: take them down with it rather than leave them running to their timeouts.
 	tokio::select! {
-		reports = orchestrator::run_all(students, bundles.into(), executor, &options) => Ok(reports),
+		reports = orchestrator::run_all(students, bundles.into(), executor, &run_options) => Ok((reports, inputs)),
 		_ = tokio::signal::ctrl_c() => {
 			scriptmark::runner::python::kill_all_units();
 			anyhow::bail!("interrupted: every running unit was stopped")
 		}
 	}
+}
+
+/// Write the inputs a batch was graded on beside its results — after them, so an
+/// interrupted or failed run replaces neither.
+fn save_frozen(inputs: &Frozen, output: &Path) -> Result<()> {
+	if inputs.is_empty() {
+		return Ok(());
+	}
+	let path = frozen::beside(output);
+	inputs
+		.write(&path)
+		.with_context(|| format!("failed to write {}", path.display()))?;
+	println!("Inputs frozen to {}", path.display());
+	Ok(())
 }
 
 /// Everything settled before any student runs.
@@ -573,12 +637,14 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 		args.roster.as_ref(),
 	)?;
 
-	let mut reports = run_bundles(
+	let (mut reports, inputs) = run_bundles(
 		&input.students,
 		specs,
 		&args.python,
 		args.timeout,
 		args.concurrency,
+		&args.output,
+		&args.frozen,
 	)
 	.await?;
 
@@ -602,6 +668,7 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	let json = serde_json::to_string_pretty(&reports)?;
 	std::fs::write(&args.output, &json)?;
 	println!("\nResults saved to {}", args.output.display());
+	save_frozen(&inputs, &args.output)?;
 
 	// Archive: the evidence per case, and the grades per student.
 	if let Some(archive_dir) = &args.archive {
@@ -613,6 +680,11 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 			.unwrap_or("results");
 		let archive_path = archive_dir.join(format!("archive_{stem}.{}", args.format));
 		let grades_path = archive_dir.join(format!("grades_{stem}.csv"));
+		if !inputs.is_empty() {
+			let cases_path = archive_dir.join(format!("cases_{stem}.json"));
+			inputs.write(&cases_path)?;
+			println!("Inputs written to {}", cases_path.display());
+		}
 		scriptmark::export::write_grades_csv(
 			&reports,
 			items,
@@ -744,12 +816,14 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 	)?;
 
 	// A JSON array, the same shape `grade` writes; unscored until graded.
-	let results = run_bundles(
+	let (results, inputs) = run_bundles(
 		&input.students,
 		specs,
 		&args.python,
 		args.timeout,
 		args.concurrency,
+		&args.output,
+		&args.frozen,
 	)
 	.await?;
 
@@ -759,6 +833,7 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 	let json = serde_json::to_string_pretty(&results)?;
 	std::fs::write(&args.output, &json)?;
 	println!("Results saved to {}", args.output.display());
+	save_frozen(&inputs, &args.output)?;
 
 	Ok(())
 }
