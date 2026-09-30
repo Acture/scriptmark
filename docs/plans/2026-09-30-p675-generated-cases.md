@@ -630,3 +630,36 @@ gets the same rows.
 - **P-673:** the harness's fuzzy lookup by number of arguments.
 - **Follow-up ticket:** generated setup data (`setup.file`); checking a reference's
   signature against `args`; showing a generated case's arguments in terminal failures.
+
+## Review of the implementation
+
+A six-lens adversarial review of the branch (acceptance, determinism, errors, wiring,
+quality, tests and docs), each lens checked by a skeptic, left 32 of 38 findings, which
+came to these changes (`c5c08f9`):
+
+- **D10 compares rows.** "Other inputs" meant the whole recorded entry, so writing a drawn
+  seed back as `seed = N`, as the note says, was refused as other inputs. Found by five of
+  the six lenses. Now only the concrete rows count; how the seed was spelled or chosen,
+  and the generator version, do not.
+- **A batch without templates removes a stale file.** It left an earlier batch's inputs
+  beside results they had nothing to do with. It now passes the same check, and the file
+  goes.
+- **The drawn-seed note comes after the check.** Printed before it, a refused run offered
+  `--replay` of a file that held the previous seed's inputs.
+- **The count cap holds in validation.** `validate` named every draw before the cap
+  refused them, so a mistyped `count = 1000000000` never finished loading.
+- **`choice` sizes and integers.** A `choice` counts as its largest value under the size
+  cap, and an integer literal past 64 bits is refused instead of drawn as a float.
+- **The file's mode follows the umask**, like `results.json`, rather than tempfile's
+  owner-only default.
+- **Python probes `freeze=`** before any student runs, and `grade()` writes it only after
+  scoring succeeded. With no templates it writes a file holding none: the caller named
+  the path, and the file says what was graded on.
+- Messages: `count = 0` names a fix that works; an oracle's answer that fails its check
+  is not called `expect`. Format 1 is pinned by a literal file, and the golden generate
+  test asserts origins.
+- One null walk, one `plural`, and `Inputs::draws`/`Inputs::seeded` replace copies.
+
+Kept as it is: the refused `count` and `seed` fields on `Parametrize` also appear in
+serde's list of expected keys. They follow `copy_refs`, `compile` and `setup.file`, and
+give the message that names the fix.

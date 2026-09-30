@@ -253,7 +253,8 @@ takes away the inputs an earlier batch left beside `--output`, after the same ch
 From Python, `scriptmark.grade(subs, tests, freeze="cases.json")` writes the file, and
 `replay="cases.json"` uses one. A `seed = "random"` template needs `freeze=`, so that the
 seed is never lost, and a `freeze=` path that cannot be written is refused before any
-student runs. The file goes where you say, whatever it held before.
+student runs. The file goes where you say, whatever it held before; with no templates it
+holds none.
 
 ### Weight
 
