@@ -1,8 +1,8 @@
 use crate::models::TestCase;
-use rand::SeedableRng;
-use rand::rngs::StdRng;
+use rand_chacha::ChaCha8Rng;
+use rand_chacha::rand_core::SeedableRng;
 
-use crate::runner::generator::generate_value;
+use crate::runner::generator::Rule;
 
 /// The concrete cases one case stands for: itself, or its generated cases. A generated
 /// case keeps everything but `parametrize` — its target, checks and timeout included.
@@ -10,7 +10,7 @@ pub fn expand_case(case: &TestCase) -> Vec<TestCase> {
 	let Some(param) = &case.parametrize else {
 		return vec![case.clone()];
 	};
-	let mut rng = StdRng::seed_from_u64(param.seed.unwrap_or(0));
+	let mut rng = ChaCha8Rng::seed_from_u64(param.seed.unwrap_or(0));
 	// `args` is a BTreeMap, so arguments bind in alphabetical order (P-675 owns binding).
 	(0..param.count)
 		.map(|i| TestCase {
@@ -18,7 +18,11 @@ pub fn expand_case(case: &TestCase) -> Vec<TestCase> {
 			args: param
 				.args
 				.values()
-				.map(|expr| generate_value(expr, &mut rng).unwrap_or(serde_json::Value::Null))
+				.map(|expr| {
+					Rule::parse(expr)
+						.map(|rule| rule.draw(&mut rng))
+						.unwrap_or(serde_json::Value::Null)
+				})
 				.collect(),
 			parametrize: None,
 			..case.clone()
