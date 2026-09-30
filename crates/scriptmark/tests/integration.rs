@@ -789,14 +789,14 @@ expect = 5
 		),
 		("raises", (S::Error, Some(Student), Some(Raised))),
 		("wrong", (S::Failed, Some(Student), Some(Wrong))),
-		("checker crashes", (S::Error, Some(Teacher), Some(Checker))),
+		("checker crashes", (S::Failed, Some(Student), Some(Checker))),
 		(
 			"checker rejects",
 			(S::Failed, Some(Student), Some(Rejected)),
 		),
 		(
 			"rhai cannot decide",
-			(S::Error, Some(Teacher), Some(Checker)),
+			(S::Failed, Some(Student), Some(Checker)),
 		),
 		(
 			"unserialisable",

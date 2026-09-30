@@ -61,7 +61,8 @@ pub enum Cause {
 	Protocol,
 	/// A teacher module failed to import.
 	TeacherImport,
-	/// A checker could not decide.
+	/// A checker failed: on the student's answer (student), or could not run (environment),
+	/// or was still running when the process stopped (teacher).
 	Checker,
 	/// The case declared nothing that was judged.
 	NothingToJudge,

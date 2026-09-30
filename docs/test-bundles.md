@@ -130,19 +130,22 @@ where a case names them, and never on a script case (a script has no returned va
 If the step that produces a parameter failed, the case is the student's `dependency`
 error, not a checker crash.
 
-**A checker that cannot decide is your error, not the student's.** A Rhai error, a checker
-script that crashes, or a function checker that raises anything but `AssertionError`
-all mark the case `error` with fault `teacher`, so the student is not scored on your
-bug. The most common trap is refused before grading: a Rhai check that errors when the
-student returns nothing. Guard it:
+**A checker that fails on the student's answer rejects it.** A Rhai error, a checker
+script that crashes, times out or prints no verdict, or a function checker that raises
+anything — each on this student's value — marks the case `failed` with fault `student`
+and cause `checker`: a `None` reaching `len()` is a wrong answer. Only teacher code that
+cannot load, or a checker still running when the unit stopped, is yours. When every
+student fails an item through its checker, grading prints a warning naming it: that is
+usually a bug in the checker, not a class that got it wrong. Rhai checks are dry-run
+against `expect` before grading, and a guard keeps a wrong answer a plain `wrong`:
 
 ```toml
 check = { rhai = "result != () && result.len() > 2" }
 check = { rhai = "type_of(result) == \"array\" && result.contains(5)" }
 ```
 
-A Rhai expression may run at most a million operations; one that loops past that has not
-decided, and is a `checker` error like any other.
+A Rhai expression may run at most a million operations; one that loops past that on an
+answer has rejected it, like any other checker failure.
 
 ## Files
 
@@ -190,6 +193,7 @@ Every case that does not pass says whose it is (`fault`) and why (`cause`):
 | -- | -- | -- | -- |
 | `failed` | student | `wrong` | a value, exception, output or file was wrong |
 | `failed` | student | `rejected` | a function checker raised `AssertionError` |
+| `failed` | student | `checker` | a checker failed on the answer: raised, crashed, timed out, or gave no verdict |
 | `error` | student | `raised` / `syntax` / `load` / `unserialisable` | the student's code crashed |
 | `timeout` | student | `timeout` / `killed` | it ran too long |
 | `error` | student | `killed` | the process died during the call (a signal) |
@@ -198,7 +202,7 @@ Every case that does not pass says whose it is (`fault`) and why (`cause`):
 | `error` | student or teacher | `setup` | a setup call failed: the student's or the teacher's, by who owns the call |
 | `error` | the culprit's | `not_run` | an earlier call in the unit hung or killed the process |
 | `error` | student | `protocol` | the unit's records were forged or repeated |
-| `error` | teacher | `checker` / `teacher_import` / `nothing_to_judge` | the bundle's fault |
+| `error` | teacher | `checker` / `teacher_import` / `nothing_to_judge` | the bundle's fault: a checker still running at the deadline, a module that failed to import, a case with nothing to judge |
 | `error` | environment | `spawn` / `harness` | the machine's, or the grader's own, fault |
 
 An error message, or a function checker's message, longer than 65,536 characters is cut,

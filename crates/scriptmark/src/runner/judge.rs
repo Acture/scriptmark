@@ -683,12 +683,14 @@ fn check_value(
 					Cause::Rejected,
 					message.clone(),
 				)),
+				// The checker raised on this answer: a `None` reaching `len()` is a wrong
+				// answer, not a broken bundle.
 				Some(CheckObservation::Error(e)) => Some(take(verdict).fail(
-					TestStatus::Error,
-					Fault::Teacher,
+					TestStatus::Failed,
+					Fault::Student,
 					Cause::Checker,
 					format!(
-						"checker '{name}' could not decide: {}: {}",
+						"checker '{name}' failed on this answer: {}: {}",
 						e.type_name, e.message
 					),
 				)),
@@ -728,7 +730,11 @@ fn check_value(
 				Ok(out) if out.pass => None,
 				Ok(out) => Some(take(verdict).wrong(out.message)),
 				Err(e) => {
-					Some(take(verdict).fail(TestStatus::Error, e.fault, Cause::Checker, e.message))
+					let status = match e.fault {
+						Fault::Student => TestStatus::Failed,
+						Fault::Teacher | Fault::Environment => TestStatus::Error,
+					};
+					Some(take(verdict).fail(status, e.fault, Cause::Checker, e.message))
 				}
 			}
 		}
@@ -961,7 +967,7 @@ mod tests {
 	}
 
 	#[test]
-	fn test_checkers_that_cannot_decide_are_the_teachers() {
+	fn test_a_checker_failing_on_the_answer_is_the_students() {
 		let p = plan(1);
 		let rhai = case("check = { rhai = \"result.len() > 0\" }");
 		assert_eq!(
@@ -971,8 +977,8 @@ mod tests {
 				&finished(vec![record(0, returned(Value::Null))])
 			)),
 			(
-				TestStatus::Error,
-				Some(Fault::Teacher),
+				TestStatus::Failed,
+				Some(Fault::Student),
 				Some(Cause::Checker)
 			)
 		);
@@ -1005,8 +1011,8 @@ mod tests {
 		assert_eq!(
 			verdict(&one(&c, &p, &with_check(CheckObservation::Error(error)))),
 			(
-				TestStatus::Error,
-				Some(Fault::Teacher),
+				TestStatus::Failed,
+				Some(Fault::Student),
 				Some(Cause::Checker)
 			)
 		);
