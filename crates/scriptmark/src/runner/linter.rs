@@ -9,10 +9,15 @@ use crate::models::LintConfig;
 /// outside `ok_exit_codes`. A tool that failed has found nothing, and reading that as a
 /// clean file would hand out full marks for a broken grader.
 pub fn run_lint(config: &LintConfig, file_path: &Path) -> Result<f64, String> {
-	let command = config
+	// Split the template before filling in the path, so a path with a space in it stays one
+	// argument.
+	let file = file_path.display().to_string();
+	let parts: Vec<String> = config
 		.command
-		.replace("{file}", &file_path.display().to_string());
-	let parts: Vec<&str> = command.split_whitespace().collect();
+		.split_whitespace()
+		.map(|part| part.replace("{file}", &file))
+		.collect();
+	let command = parts.join(" ");
 	let Some((program, args)) = parts.split_first() else {
 		return Err("the lint command is empty".into());
 	};
@@ -82,6 +87,20 @@ mod tests {
 		let (_dir, file) = student_file();
 		assert_eq!(run_lint(&config("echo warning1", 10), &file), Ok(90.0));
 		assert_eq!(run_lint(&config("true", 0), &file), Ok(100.0));
+	}
+
+	#[test]
+	fn test_a_path_with_a_space_stays_one_argument() {
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("Zhang San_1").join("lab.py");
+		std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+		std::fs::write(&file, "x = 1\n").unwrap();
+		// `test -f` fails, exit 1 outside [0], unless it gets the path whole.
+		let lint = LintConfig {
+			ok_exit_codes: vec![0],
+			..config("test -f {file}", 10)
+		};
+		assert_eq!(run_lint(&lint, &file), Ok(100.0));
 	}
 
 	#[test]

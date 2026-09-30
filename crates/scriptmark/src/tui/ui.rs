@@ -177,8 +177,10 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 					},
 					reason,
 				) => format!(
-					"graded {final_grade}  ({score}/{} points){}",
-					grade.max,
+					"graded {}  ({}/{} points){}",
+					crate::export::number(*final_grade, grade.basis.decimals),
+					crate::export::number(*score, crate::export::POINTS_DECIMALS),
+					crate::export::number(grade.max, crate::export::POINTS_DECIMALS),
 					reason
 						.map(|r| format!(", {}", crate::export::word(&r)))
 						.unwrap_or_default()
@@ -200,7 +202,11 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 				.and_then(|g| g.items.iter().find(|i| i.item_id == tr.item_id))
 				.map(|i| match &i.outcome {
 					crate::models::ItemOutcome::Graded { score, .. } => {
-						format!("  {score}/{}", i.points)
+						format!(
+							"  {}/{}",
+							crate::export::number(*score, crate::export::POINTS_DECIMALS),
+							i.points
+						)
 					}
 					crate::models::ItemOutcome::Withheld { reason, .. } => {
 						format!("  withheld: {}", crate::export::word(reason))

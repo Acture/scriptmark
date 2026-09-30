@@ -484,3 +484,37 @@ Items and cases are walked in `Vec` order: no hash iteration, clock or randomnes
 - Removing the flags and `LintConfig.weight`, and refusing old results and databases, are
   breaking changes by decision.
 - The pushed scale is not checked against Canvas `points_possible`; that is P-680's.
+
+## Implementation notes
+
+Where the code differs from the plan, and why:
+
+- **Commits.** The scorer, the assignment module, lint, export, the database and every
+  consumer landed together (`921c5c2`), because the result type they share changed
+  shape. Only D15 (`9c6f16b`) and the docs (`2bfd4de`) stand apart.
+- **The grade is one record, not loose fields.** `StudentReport.grade: Option<Grade>`,
+  where `GradeOutcome` is `Graded { score, raw_grade, final_grade, reason }` or
+  `Withheld { reason, detail }`. `final_grade` is `None` exactly when withheld because
+  the type cannot say otherwise. `None` for the whole grade means unscored `run` output.
+- **Old results are refused by the type.** `StudentReport` has `deny_unknown_fields` and
+  a required `submission_state`, so a file carrying a top-level `final_grade` does not
+  parse. The database checks `PRAGMA user_version`.
+- **A teacher module that fails to import is refused before grading**, as P-674 already
+  did — stricter than D5's per-student `TeacherFault`, which remains for a teacher fault
+  that only appears while running.
+- **`missing_file = "zero"` on every item** is a policy zero like `missing`'s: raw and
+  final 0, reason `missing_file`, no curve. A missing file on some items only is a 0 for
+  those items inside a normally curved total.
+- **Numbers are shown one way.** `export::number` rounds half away from zero and trims:
+  grades to `decimals`, points to 4 places, in the terminal, the TUI, the CSV and `db`.
+- **The database and TUI colour by share of points earned**, since a stored row does not
+  carry the scale.
+- **The lint command is split before `{file}` is filled in**, so a path with a space is
+  one argument rather than a failed lint that would withhold the student.
+- **`course.toml`** refuses unknown keys, so a leftover `[grading]` table is an error
+  instead of silently ignored.
+
+Reviewed after implementation by five lenses (scoring, wrong-number paths, runner,
+tests, code quality) with a skeptic per lens: 9 findings confirmed and fixed (the curve on
+an all-`missing_file` zero, CSV and display rounding, TUI float noise, the HTML score sort,
+lint paths with spaces, and missing tests for checker ownership and lint orchestration).

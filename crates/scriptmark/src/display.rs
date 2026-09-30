@@ -41,9 +41,14 @@ pub fn display_summary(reports: &[&StudentReport], title: &str) {
 					} => (
 						Cell::new("GRADED").fg(Color::Green),
 						reason,
-						format!("{}/{}", trim(score), trim(grade.max)),
-						trim(raw_grade),
-						right(trim(final_grade)).fg(grade_color(final_grade / grade.basis.scale)),
+						format!(
+							"{}/{}",
+							export::number(score, export::POINTS_DECIMALS),
+							export::number(grade.max, export::POINTS_DECIMALS)
+						),
+						export::number(raw_grade, grade.basis.decimals),
+						right(export::number(final_grade, grade.basis.decimals))
+							.fg(grade_color(final_grade / grade.basis.scale)),
 					),
 					GradeOutcome::Withheld { .. } => (
 						Cell::new("WITHHELD").fg(Color::Magenta),
@@ -91,12 +96,6 @@ fn grade_color(fraction: f64) -> Color {
 	} else {
 		Color::Red
 	}
-}
-
-/// A number without trailing zeros.
-fn trim(x: f64) -> String {
-	let s = format!("{x:.2}");
-	s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
 /// Display detailed failure reports for students with failures.
@@ -222,6 +221,10 @@ pub fn display_failures(reports: &[&StudentReport]) {
 /// Print a one-line status summary: who has a grade, and why the rest do not.
 pub fn display_stats(reports: &[&StudentReport]) {
 	let graded: Vec<f64> = reports.iter().filter_map(|r| r.final_grade()).collect();
+	let decimals = reports
+		.iter()
+		.find_map(|r| r.grade.as_ref())
+		.map_or(2, |g| g.basis.decimals);
 	let zeros = graded.iter().filter(|g| **g == 0.0).count();
 	let mut withheld = std::collections::BTreeMap::<String, usize>::new();
 	for grade in reports.iter().filter_map(|r| r.grade.as_ref()) {
@@ -234,7 +237,7 @@ pub fn display_stats(reports: &[&StudentReport]) {
 	let average = if graded.is_empty() {
 		"-".to_string()
 	} else {
-		trim(graded.iter().sum::<f64>() / graded.len() as f64)
+		export::number(graded.iter().sum::<f64>() / graded.len() as f64, decimals)
 	};
 	println!(
 		"\n{} {} students: {} graded ({} zero, average {}), {} withheld",

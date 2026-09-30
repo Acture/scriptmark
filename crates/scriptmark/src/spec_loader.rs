@@ -861,11 +861,6 @@ expect_error = "TypeError"
 [course]
 name = "GEEC Python"
 language = "python"
-
-[grading]
-template = "sqrt"
-lower = 60
-upper = 100
 "#,
 		)
 		.unwrap();
@@ -873,6 +868,15 @@ upper = 100
 		let config = load_course_config(&config_path).unwrap();
 		assert_eq!(config.course.name, "GEEC Python");
 		assert_eq!(config.course.language, "python");
+
+		// Grading policy is an assignment's, in assignment.toml; a course-level one would
+		// be ignored, so it is refused.
+		std::fs::write(
+			&config_path,
+			"[course]\nname = \"x\"\n[grading]\ntemplate = \"sqrt\"\n",
+		)
+		.unwrap();
+		assert!(load_course_config(&config_path).is_err());
 	}
 
 	#[test]

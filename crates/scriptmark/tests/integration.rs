@@ -476,6 +476,49 @@ expect = 1
 	assert_eq!(grades[0], grades[1]);
 }
 
+/// Lint runs on the file of the item that asks for it — not whichever file came first —
+/// and says when there was no such file, or when the tool itself failed.
+#[tokio::test]
+async fn test_lint_runs_on_the_declaring_items_file() {
+	let bench = Bench::new();
+	// Each item its own file and function, so one file cannot stand in for the other.
+	let spec = |name: &str, file: &str, lint: &str| {
+		let function = &name[..1];
+		bench.spec(&format!(
+			"[meta]\nname = \"{name}\"\nfile = \"{file}\"\nfunction = \"{function}\"\nlanguage = \"python\"\n\
+			 {lint}\n[[cases]]\nname = \"one\"\nexpect = 1\n"
+		))
+	};
+	// A line per `BAD`: a finding for each.
+	let grep = "[lint]\ncommand = \"grep BAD {file}\"\nmax_warnings = 1\n";
+	let specs = vec![spec("first", "a.py", ""), spec("second", "b.py", grep)];
+	let dirty = "def f():\n    return 1  # BAD\n";
+	let clean = "def s():\n    return 1\n";
+
+	let both = StudentSubmission::from_files(
+		"alice",
+		&[
+			bench.write("students/alice/a.py", dirty),
+			bench.write("students/alice/b.py", clean),
+		],
+	);
+	let first_only = bench.student("bob", "a.py", dirty);
+	let results = grade(specs, &[both, first_only]).await;
+	assert_eq!(
+		by_id(&results, "alice").lint,
+		Some(LintOutcome::Scored { score: 100.0 })
+	);
+	assert_eq!(by_id(&results, "bob").lint, Some(LintOutcome::NoFile));
+
+	let broken = "[lint]\ncommand = \"sh -c exit${IFS}3\"\n";
+	let results = grade(
+		vec![spec("second", "b.py", broken)],
+		&[bench.student("carol", "b.py", clean)],
+	)
+	.await;
+	assert!(matches!(results[0].lint, Some(LintOutcome::Failed { .. })));
+}
+
 /// A teacher module that cannot load is refused before any student runs — never a class
 /// of zeros for the teacher's bug. (A teacher fault that only shows up while running is
 /// withheld per student; `grading` pins that.)

@@ -174,7 +174,7 @@ function renderTable(filter) {
   if(filter){const f=filter.toLowerCase();d=d.filter(r=>r.student_id.includes(f)||(r.student_name||'').toLowerCase().includes(f));}
   d.sort((a,b)=>{
     // Ungraded students sort after every graded one, whichever way the column runs.
-    const key=r=>sortKey==='name'?(r.student_name||''):sortKey==='id'?r.student_id:sortKey==='grade'||sortKey==='score'?(r._graded?r._frac:Infinity*sortDir):sortKey==='passed'?r._passed:sortKey==='failed'?r._failed:sortKey==='total'?r._total:r._state+r._reason;
+    const key=r=>sortKey==='name'?(r.student_name||''):sortKey==='id'?r.student_id:sortKey==='grade'?(r._graded?r._frac:Infinity*sortDir):sortKey==='score'?(r._graded?r.grade.score/r.grade.max:Infinity*sortDir):sortKey==='passed'?r._passed:sortKey==='failed'?r._failed:sortKey==='total'?r._total:r._state+r._reason;
     const va=key(a), vb=key(b);
     if(va===vb) return 0;
     return typeof va==='number'?(va-vb)*sortDir:String(va).localeCompare(String(vb))*sortDir;

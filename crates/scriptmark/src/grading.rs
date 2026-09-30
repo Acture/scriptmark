@@ -296,6 +296,29 @@ fn grade_one(
 		return Ok(grade(withheld(reason), scores));
 	}
 
+	// Nothing handed in for any item, zeroed by `missing_file`: a policy zero like
+	// `missing`'s, so no curve lifts it and it says why.
+	let all_missing = scores.iter().all(|s| {
+		matches!(
+			s.outcome,
+			ItemOutcome::Graded {
+				reason: Some(Reason::MissingFile),
+				..
+			}
+		)
+	});
+	if all_missing {
+		return Ok(grade(
+			GradeOutcome::Graded {
+				score: 0.0,
+				raw_grade: 0.0,
+				final_grade: 0.0,
+				reason: Some(Reason::MissingFile),
+			},
+			scores,
+		));
+	}
+
 	let outcome = match policy.curve(score, max) {
 		Ok(curved) => GradeOutcome::Graded {
 			score,
@@ -662,6 +685,31 @@ mod tests {
 			ItemOutcome::Graded {
 				score: 0.0,
 				reason: Some(Reason::MissingFile)
+			}
+		);
+
+		// With nothing handed in at all, it is a policy zero: no curve lifts it.
+		let curved_zero = policy(GradingConfig {
+			missing_file: MissingPolicy::Zero,
+			curve: Curve::Template {
+				name: CurveTemplate::Linear,
+				lower: 60.0,
+				upper: 100.0,
+			},
+			..GradingConfig::default()
+		});
+		let g = grade(
+			student(vec![no_file("a"), no_file("b")]),
+			&items,
+			&curved_zero,
+		);
+		assert_eq!(
+			g.outcome,
+			GradeOutcome::Graded {
+				score: 0.0,
+				raw_grade: 0.0,
+				final_grade: 0.0,
+				reason: Some(Reason::MissingFile),
 			}
 		);
 	}

@@ -217,6 +217,7 @@ mod tests {
 			})
 			.unwrap_err();
 		assert!(output.message.contains("could not evaluate"));
+		assert_eq!(output.fault, crate::models::Fault::Student);
 	}
 
 	#[test]
@@ -230,5 +231,6 @@ mod tests {
 			})
 			.unwrap_err();
 		assert!(output.message.contains("not a bool"));
+		assert_eq!(output.fault, crate::models::Fault::Student);
 	}
 }

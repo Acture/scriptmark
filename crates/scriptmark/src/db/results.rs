@@ -57,7 +57,9 @@ impl ResultRow {
 	/// The grade as a cell: the number, or why there is none — never a stand-in 0.
 	pub fn grade_text(&self) -> String {
 		match (self.state, self.final_grade) {
-			(RowState::Graded, Some(grade)) => format!("{grade}"),
+			(RowState::Graded, Some(grade)) => {
+				crate::export::number(grade, crate::export::POINTS_DECIMALS)
+			}
 			(RowState::Withheld, _) => format!(
 				"- ({})",
 				self.reason

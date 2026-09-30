@@ -223,6 +223,32 @@ print(json.dumps({"pass": False, "message": "custom failure message"}))
 	}
 
 	#[test]
+	fn test_a_python_checker_that_hangs_or_gives_no_verdict_rejects_the_answer() {
+		let dir = tempfile::tempdir().unwrap();
+		let input = CheckInput {
+			result: json!(1),
+			expected: json!(null),
+			context: json!({}),
+		};
+		let hangs = PythonChecker {
+			timeout_secs: 1,
+			..PythonChecker::new(write_checker_script(
+				dir.path(),
+				"hang.py",
+				"import time\ntime.sleep(30)\n",
+			))
+		};
+		let output = hangs.check(&input).unwrap_err();
+		assert_eq!(output.fault, crate::models::Fault::Student);
+		assert!(output.message.contains("timed out"));
+
+		let mute = PythonChecker::new(write_checker_script(dir.path(), "mute.py", "print('hi')\n"));
+		let output = mute.check(&input).unwrap_err();
+		assert_eq!(output.fault, crate::models::Fault::Student);
+		assert!(output.message.contains("no verdict"));
+	}
+
+	#[test]
 	fn test_python_checker_missing_script() {
 		let checker = PythonChecker::new("/nonexistent/checker.py");
 		let output = checker

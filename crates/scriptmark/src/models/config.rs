@@ -103,6 +103,7 @@ impl From<ItemDecl> for GradingItem {
 
 /// Course-level configuration (from course.toml).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CourseConfig {
 	pub course: CourseInfo,
 }

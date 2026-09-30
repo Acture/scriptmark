@@ -92,7 +92,8 @@ pub fn write_grades_csv<W: Write>(
 				report.student_id
 			);
 		};
-		let number = |x: f64| format_grade(x, grade.basis.decimals);
+		let grade_cell = |x: f64| number(x, grade.basis.decimals);
+		let points_cell = |x: f64| number(x, POINTS_DECIMALS);
 		let reason = |r: Option<Reason>| r.map(|r| word(&r)).unwrap_or_default();
 		let (state, score, raw, fin) = match grade.outcome {
 			GradeOutcome::Graded {
@@ -102,9 +103,9 @@ pub fn write_grades_csv<W: Write>(
 				..
 			} => (
 				"graded",
-				number(score),
-				number(raw_grade),
-				number(final_grade),
+				points_cell(score),
+				grade_cell(raw_grade),
+				grade_cell(final_grade),
 			),
 			GradeOutcome::Withheld { .. } => {
 				("withheld", String::new(), String::new(), String::new())
@@ -120,7 +121,7 @@ pub fn write_grades_csv<W: Write>(
 			state.to_string(),
 			reason(grade.reason()),
 			score,
-			number(grade.max),
+			points_cell(grade.max),
 			raw,
 			fin,
 		];
@@ -128,7 +129,7 @@ pub fn write_grades_csv<W: Write>(
 			match grade.items.iter().find(|s| s.item_id == item.id) {
 				Some(scored) => match &scored.outcome {
 					ItemOutcome::Graded { score, reason: r } => {
-						row.extend([number(*score), "graded".into(), reason(*r)])
+						row.extend([points_cell(*score), "graded".into(), reason(*r)])
 					}
 					ItemOutcome::Withheld { reason: r, .. } => {
 						row.extend([String::new(), "withheld".into(), reason(Some(*r))])
@@ -144,19 +145,39 @@ pub fn write_grades_csv<W: Write>(
 	Ok(())
 }
 
-/// A grade to its declared decimals, without trailing zeros: `87.5`, `0`, `66.67`.
-fn format_grade(x: f64, decimals: u8) -> String {
-	let s = format!("{:.*}", usize::from(decimals), x);
-	if s.contains('.') {
-		s.trim_end_matches('0').trim_end_matches('.').to_string()
+/// Places points are shown to: finer than any grade, so item scores still add up.
+pub const POINTS_DECIMALS: u8 = 4;
+
+/// A number rounded half away from zero, as grades are, without trailing zeros: `87.5`,
+/// `0`, `66.67`.
+pub fn number(x: f64, decimals: u8) -> String {
+	let s = format!(
+		"{:.*}",
+		usize::from(decimals),
+		crate::grading::round_half_away(x, decimals)
+	);
+	let s = if s.contains('.') {
+		s.trim_end_matches('0').trim_end_matches('.')
 	} else {
-		s
-	}
+		&s
+	};
+	if s == "-0" { "0".into() } else { s.into() }
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn test_number_rounds_half_away_and_trims() {
+		assert_eq!(number(86.5, 0), "87");
+		assert_eq!(number(2.0 / 3.0, 2), "0.67");
+		assert_eq!(number(2.0 / 3.0, POINTS_DECIMALS), "0.6667");
+		assert_eq!(number(100.0, 2), "100");
+		assert_eq!(number(0.0, 2), "0");
+		assert_eq!(number(-0.0001, 2), "0");
+	}
+
 	use crate::models::fixtures::{graded, withheld};
 	use crate::models::{Grade, SubmissionOutcome};
 
@@ -232,7 +253,7 @@ mod tests {
 			"student_id,student_name,canvas_user_id,grade,reason,score,max,raw_grade,final_grade,\
 			 q1_score,q1_state,q1_reason"
 		);
-		assert_eq!(lines[1], "alice,,,graded,,0.88,1,87.5,87.5,,,");
+		assert_eq!(lines[1], "alice,,,graded,,0.875,1,87.5,87.5,,,");
 		assert_eq!(lines[2], "bob,,,graded,not_submitted,0,1,0,0,,,");
 		assert_eq!(lines[3], "carol,,,withheld,environment_fault,,1,,,,,");
 	}
