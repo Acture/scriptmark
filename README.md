@@ -119,11 +119,13 @@ expect = -1
 
 [[cases]]
 name = "random inputs"
-[cases.parametrize]
-count = 20
-seed = 42
-[cases.parametrize.args]
+[[cases.parametrize.args]]           # one block per parameter, in call order
 nums = "list(int(-100, 100), 5, 20)"
+[cases.parametrize]
+samples = [[[7]], [[0, 0, 0]]]        # inputs always run, like fixed args
+[cases.parametrize.random]
+count = 20
+seed = 42                             # omit for 0; "random" draws one and records it
 [cases.parametrize.oracle]
 rhai = "nums.sort(); nums[nums.len() - 1]"
 ```

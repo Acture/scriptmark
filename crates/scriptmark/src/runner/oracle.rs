@@ -78,7 +78,7 @@ pub async fn resolve_oracle<E: Executor>(
 		for (name, value) in arg_names.iter().zip(&case.args) {
 			scope.push_dynamic(
 				name.as_str(),
-				crate::checker::rhai_checker::json_to_dynamic(value),
+				crate::checker::rhai_checker::json_to_dynamic(&literal(value)),
 			);
 		}
 		let result = engine
@@ -96,6 +96,20 @@ pub async fn resolve_oracle<E: Executor>(
 		case.check = Some(crate::models::CheckMethod::Builtin(name.clone()));
 	}
 	Ok(())
+}
+
+/// A value as the student receives it: the harness turns each `$$…` string into `$…`, in
+/// lists and dict values alike. A generated value holds no `$name` reference.
+pub fn literal(value: &serde_json::Value) -> serde_json::Value {
+	use serde_json::Value;
+	match value {
+		Value::String(s) if s.starts_with("$$") => Value::String(s[1..].to_string()),
+		Value::Array(items) => Value::Array(items.iter().map(literal).collect()),
+		Value::Object(map) => {
+			Value::Object(map.iter().map(|(k, v)| (k.clone(), literal(v))).collect())
+		}
+		other => other.clone(),
+	}
 }
 
 /// A Rhai value as JSON, arrays and maps included. `None` for `()` and anything else
@@ -141,6 +155,18 @@ mod tests {
 
 	fn eval(expr: &str) -> Option<serde_json::Value> {
 		dynamic_to_json(&rhai::Engine::new().eval::<rhai::Dynamic>(expr).unwrap())
+	}
+
+	#[test]
+	fn test_a_literal_is_what_the_harness_hands_the_student() {
+		assert_eq!(literal(&json!("$$5")), json!("$5"));
+		assert_eq!(literal(&json!("$$$x")), json!("$$x"));
+		assert_eq!(literal(&json!("a$$")), json!("a$$"));
+		assert_eq!(
+			literal(&json!([["$$a"], {"$$k": "$$v"}, 3])),
+			json!([["$a"], {"$$k": "$v"}, 3]),
+			"dict keys are left alone, as the harness leaves them"
+		);
 	}
 
 	#[test]

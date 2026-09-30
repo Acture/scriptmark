@@ -4,6 +4,8 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::Value;
 
 use crate::checker::rhai_checker;
+use crate::runner::generation::{MAX_COUNT, MAX_GENERATED, concrete_name, origins};
+use crate::runner::generator::Rule;
 
 use crate::models::{
 	AssignmentConfig, Check, CourseConfig, Scenario, SetupStep, Target, TestCase, TestSpec,
@@ -123,17 +125,18 @@ pub const STDOUT_LIMIT: usize = 64 * 1024;
 ///
 /// `prepare` runs this again, so a `TestSpec` built by hand cannot skip it.
 pub fn validate(spec: &TestSpec) -> Vec<String> {
-	let mut v = Validator {
-		spec,
-		problems: Vec::new(),
-	};
-	v.meta();
-	v.body();
-	v.problems
+	Validator::run(spec, false)
+}
+
+/// `validate` for a spec whose templates `prepare` has expanded. An `expect` there may hold
+/// a null: an oracle computed it, and the null is Python's `None`, not a lost `inf`.
+pub fn validate_expanded(spec: &TestSpec) -> Vec<String> {
+	Validator::run(spec, true)
 }
 
 struct Validator<'a> {
 	spec: &'a TestSpec,
+	expanded: bool,
 	problems: Vec<String>,
 }
 
@@ -153,7 +156,18 @@ impl Bound {
 	}
 }
 
-impl Validator<'_> {
+impl<'a> Validator<'a> {
+	fn run(spec: &'a TestSpec, expanded: bool) -> Vec<String> {
+		let mut v = Validator {
+			spec,
+			expanded,
+			problems: Vec::new(),
+		};
+		v.meta();
+		v.body();
+		v.problems
+	}
+
 	fn problem(&mut self, at: &str, message: impl AsRef<str>) {
 		self.problems.push(format!("{at}: {}", message.as_ref()));
 	}
@@ -240,13 +254,11 @@ impl Validator<'_> {
 		for case in &spec.cases {
 			let at = format!("case '{}'", case.name);
 			self.case(case, &top, false, &at);
-			match &case.parametrize {
-				Some(param) => {
-					for i in 0..param.count {
-						self.unique_name(&mut names, format!("{} [{i}]", case.name));
-					}
+			self.unique_name(&mut names, case.name.clone());
+			if let Some(param) = &case.parametrize {
+				for origin in origins(&param.inputs()) {
+					self.unique_name(&mut names, concrete_name(&case.name, origin));
 				}
-				None => self.unique_name(&mut names, case.name.clone()),
 			}
 		}
 		for scenario in &spec.scenarios {
@@ -328,7 +340,7 @@ impl Validator<'_> {
 		if step.file.is_some() {
 			self.problem(
 				at,
-				"setup.file is not supported: put fixed data in [vars], data_files or a teacher module; generated inputs arrive with P-675",
+				"setup.file is not supported: put fixed data in [vars], data_files or a teacher module, and generate inputs with [cases.parametrize]",
 			);
 			return;
 		}
@@ -420,6 +432,7 @@ impl Validator<'_> {
 			);
 		}
 		if let Some(expect) = &case.expect
+			&& !self.expanded
 			&& contains_null(expect)
 		{
 			self.problem(
@@ -638,12 +651,18 @@ impl Validator<'_> {
 	}
 
 	fn parametrize(&mut self, case: &TestCase, param: &crate::models::Parametrize, at: &str) {
-		if param.count == 0 {
-			self.problem(at, "parametrize.count must be at least 1");
+		for (moved, field) in [(&param.count, "count"), (&param.seed, "seed")] {
+			if moved.is_some() {
+				self.problem(at, format!("{field} moved to [cases.parametrize.random]"));
+			}
 		}
 		if !case.args.is_empty() {
-			self.problem(at, "a parametrized case generates its args; remove args");
+			self.problem(
+				at,
+				"a template takes its inputs from samples and [cases.parametrize.random]; remove the case's args",
+			);
 		}
+		self.template_inputs(param, at);
 		let oracle = &param.oracle;
 		let kinds = [
 			oracle.reference.is_some(),
@@ -704,11 +723,10 @@ impl Validator<'_> {
 				Ok(check) => self.both_can_hold(&check, case.expect.as_ref(), at),
 			}
 		}
-		if let Some(expr) = &oracle.rhai {
-			let names: Vec<&str> = param.args.keys().map(String::as_str).collect();
-			if let Err(e) = rhai_checker::compile(expr, &names) {
-				self.problem(at, format!("rhai oracle does not compile: {e}"));
-			}
+		if let Some(expr) = &oracle.rhai
+			&& let Err(e) = rhai_checker::compile(expr, &param.inputs().names())
+		{
+			self.problem(at, format!("rhai oracle does not compile: {e}"));
 		}
 		if let Some(reference) = &oracle.reference
 			&& !Path::new(reference).is_file()
@@ -719,6 +737,94 @@ impl Validator<'_> {
 			);
 		}
 	}
+
+	/// The parameters, samples and draws of a template: everything that decides its inputs.
+	fn template_inputs(&mut self, param: &crate::models::Parametrize, at: &str) {
+		let mut names = BTreeSet::new();
+		let mut draw_size = Some(0u64);
+		for p in &param.args {
+			if !is_identifier(&p.name) {
+				self.problem(
+					at,
+					format!(
+						"parameter '{}' must be a name of letters, digits and _, not starting with a digit, so a Rhai oracle can use it",
+						p.name
+					),
+				);
+			}
+			if !names.insert(p.name.as_str()) {
+				self.problem(at, format!("parameter '{}' is declared twice", p.name));
+			}
+			match Rule::parse(&p.rule) {
+				Ok(rule) => draw_size = draw_size.map(|n| n.saturating_add(rule.max_size())),
+				Err(e) => {
+					self.problem(at, format!("parameter '{}': {e}", p.name));
+					draw_size = None;
+				}
+			}
+		}
+
+		if let Some(random) = &param.random {
+			if random.count == 0 {
+				self.problem(
+					at,
+					"count must be at least 1: drop [cases.parametrize.random] to run only the samples",
+				);
+			}
+			if random.count > MAX_COUNT {
+				self.problem(at, format!("count must be at most {MAX_COUNT}"));
+			}
+			if param.args.is_empty() && random.seed.is_some() {
+				self.problem(
+					at,
+					"a template without args has nothing random to seed: remove seed",
+				);
+			}
+			let total = draw_size.map(|n| n.saturating_mul(random.count as u64));
+			if let Some(total) = total.filter(|t| *t > MAX_GENERATED) {
+				self.problem(
+					at,
+					format!(
+						"its draws could generate up to {total} values or characters, past the {MAX_GENERATED} a template may: lower count or the rules' lengths"
+					),
+				);
+			}
+		}
+		if param.samples.is_empty() && param.random.is_none() {
+			self.problem(
+				at,
+				"nothing to run: add samples or [cases.parametrize.random]",
+			);
+		}
+
+		let arity = param.args.len();
+		for (j, sample) in param.samples.iter().enumerate() {
+			if sample.len() != arity {
+				self.problem(
+					at,
+					format!(
+						"sample {j} has {}, but the template has {arity} parameter{}",
+						plural(sample.len(), "value"),
+						if arity == 1 { "" } else { "s" }
+					),
+				);
+			}
+			if sample.iter().any(contains_null) {
+				self.problem(
+					at,
+					format!("sample {j} holds a value TOML cannot pass (inf or nan?)"),
+				);
+			}
+			if let Some(name) = refs(sample).first() {
+				self.problem(
+					at,
+					format!(
+						"sample {j} holds '${name}', a reference: a sample is frozen as written, so write '$${name}' for the literal text"
+					),
+				);
+			}
+		}
+	}
 }
 
 /// A relative path that cannot climb out of the directory it is joined to.
@@ -727,6 +833,19 @@ fn is_contained(path: &str) -> bool {
 		&& Path::new(path)
 			.components()
 			.all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
+/// A name a Rhai oracle can bind: letters, digits and `_`, not starting with a digit.
+fn is_identifier(name: &str) -> bool {
+	let mut chars = name.chars();
+	chars
+		.next()
+		.is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+		&& chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn plural(n: usize, noun: &str) -> String {
+	format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
 /// TOML has no null, so a null in a parsed value is a non-finite float serde_json lost.
@@ -809,6 +928,7 @@ impl SpecError {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::models::Seed;
 
 	#[test]
 	fn test_load_spec() {
@@ -889,39 +1009,248 @@ language = "python"
 			&path,
 			r#"
 [meta]
-name = "random_max"
+name = "clamp"
 file = "lab5.py"
-function = "find_larger_number"
+function = "clamp"
 language = "python"
 
 [[cases]]
-name = "random pairs"
+name = "random clamps"
+
+[[cases.parametrize.args]]
+value = "int(-100, 100)"
+[[cases.parametrize.args]]
+low = "int(-49, -26)"
+[[cases.parametrize.args]]
+high = "int(26, 49)"
 
 [cases.parametrize]
+samples = [[-30, -30, 30], [30, -30, 30]]
+
+[cases.parametrize.random]
 count = 20
 seed = 42
 
-[cases.parametrize.args]
-a = "int(-100, 100)"
-b = "int(-100, 100)"
-
 [cases.parametrize.oracle]
 reference = "solutions/lab5.py"
+
+[[cases]]
+name = "inline"
+[cases.parametrize]
+args = [{ z = "bool()" }, { a = "int(0, 1)" }]
+[cases.parametrize.random]
+count = 1
+seed = "random"
+[cases.parametrize.oracle]
+rhai = "a"
 "#,
 		)
 		.unwrap();
 
 		let spec = load_spec(&path).unwrap();
-		assert_eq!(spec.cases.len(), 1);
+		assert_eq!(spec.cases.len(), 2);
 		let param = spec.cases[0].parametrize.as_ref().unwrap();
-		assert_eq!(param.count, 20);
-		assert_eq!(param.seed, Some(42));
-		assert_eq!(param.args.len(), 2);
+		// Call order is the order written, not the alphabetical one.
+		assert_eq!(param.inputs().names(), ["value", "low", "high"]);
+		assert_eq!(param.samples.len(), 2);
+		let random = param.random.as_ref().unwrap();
+		assert_eq!((random.count, random.seed), (20, Some(Seed::Fixed(42))));
 		let reference = param.oracle.reference.as_deref().unwrap();
 		assert!(
 			Path::new(reference).is_absolute(),
 			"reference is resolved against the spec, not the grader's cwd"
 		);
+		let inline = spec.cases[1].parametrize.as_ref().unwrap();
+		assert_eq!(inline.inputs().names(), ["z", "a"]);
+		assert_eq!(inline.random.as_ref().unwrap().seed, Some(Seed::Random));
+	}
+
+	#[test]
+	fn test_the_old_spelling_is_refused_with_the_fix() {
+		refused(
+			"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nb = \"int(0, 1)\"\na = \"int(0, 1)\"\n",
+			"write a [[cases.parametrize.args]] block for each of b, a, in the order the function takes them",
+		);
+		for field in ["count = 3", "seed = 1"] {
+			refused(
+				&format!(
+					"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n[cases.parametrize]\n{field}\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n"
+				),
+				"moved to [cases.parametrize.random]",
+			);
+		}
+	}
+
+	/// A template body: `check = "sorted"` judges it, so only `parametrize` is at issue.
+	fn template(parametrize: &str) -> String {
+		format!("[[cases]]\nname = \"x\"\ncheck = \"sorted\"\n{parametrize}")
+	}
+
+	const ONE_PARAM: &str = "[[cases.parametrize.args]]\na = \"int(0, 1)\"\n";
+	const TWO_PARAMS: &str = "[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[[cases.parametrize.args]]\nb = \"int(0, 1)\"\n";
+
+	#[test]
+	fn test_templates_are_checked_before_grading() {
+		let table = [
+			(
+				template(
+					"[cases.parametrize]\nargs = [{ a = \"int(0, 1)\", b = \"int(0, 1)\" }]\n[cases.parametrize.random]\ncount = 1\n",
+				),
+				"a parameter is one",
+			),
+			(
+				template(
+					"[[cases.parametrize.args]]\n\"my-x\" = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
+				),
+				"parameter 'my-x' must be a name",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}{ONE_PARAM}[cases.parametrize.random]\ncount = 1\n"
+				)),
+				"parameter 'a' is declared twice",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}[cases.parametrize.random]\ncount = 0\n"
+				)),
+				"count must be at least 1",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}[cases.parametrize.random]\ncount = 10001\n"
+				)),
+				"count must be at most 10000",
+			),
+			(
+				template("[cases.parametrize.random]\ncount = 2\nseed = 3\n"),
+				"a template without args has nothing random to seed",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}[cases.parametrize.random]\ncount = 1\nseed = -1\n"
+				)),
+				"seed -1 is negative",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}[cases.parametrize.random]\ncount = 1\nseed = \"sometimes\"\n"
+				)),
+				"is not a seed",
+			),
+			(
+				template("[cases.parametrize.oracle]\ncheck = \"sorted\"\n")
+					.replace("check = \"sorted\"\n[cases", "[cases"),
+				"nothing to run: add samples or [cases.parametrize.random]",
+			),
+			(
+				template(&format!(
+					"{TWO_PARAMS}[cases.parametrize]\nsamples = [[1]]\n"
+				)),
+				"sample 0 has 1 value, but the template has 2 parameters",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}[cases.parametrize]\nsamples = [[inf]]\n"
+				)),
+				"sample 0 holds a value TOML cannot pass",
+			),
+			(
+				template(&format!(
+					"{ONE_PARAM}[cases.parametrize]\nsamples = [[[\"$v\"]]]\n"
+				)),
+				"sample 0 holds '$v', a reference",
+			),
+			(
+				template(
+					"[[cases.parametrize.args]]\na = \"int(5, 1)\"\n[cases.parametrize.random]\ncount = 1\n",
+				),
+				"parameter 'a': int(5, 1): the minimum 5 is greater than the maximum 1",
+			),
+			(
+				template(
+					"[[cases.parametrize.args]]\na = \"nope()\"\n[cases.parametrize]\nsamples = [[1]]\n",
+				),
+				"parameter 'a': unknown rule",
+			),
+			(
+				template(
+					"[[cases.parametrize.args]]\na = \"list(int(0, 1), 0, 1000)\"\n[cases.parametrize.random]\ncount = 10000\n",
+				),
+				"could generate up to",
+			),
+			(
+				format!(
+					"[[cases]]\nname = \"x [sample 0]\"\nexpect = 1\n{}{ONE_PARAM}[cases.parametrize]\nsamples = [[1]]\n",
+					template("")
+				),
+				"two cases have this name",
+			),
+			(
+				format!(
+					"{}{ONE_PARAM}[cases.parametrize]\nsamples = [[1]]\n{}{ONE_PARAM}[cases.parametrize.random]\ncount = 1\n",
+					template(""),
+					template("")
+				),
+				"two cases have this name",
+			),
+			(
+				format!(
+					"[[cases]]\nname = \"x\"\nargs = [1]\ncheck = \"sorted\"\n{ONE_PARAM}[cases.parametrize.random]\ncount = 1\n"
+				),
+				"a template takes its inputs from samples and [cases.parametrize.random]",
+			),
+			(
+				format!(
+					"[[cases]]\nname = \"x\"\n{TWO_PARAMS}[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"a + c\"\n"
+				),
+				"rhai oracle does not compile",
+			),
+		];
+		for (body, needle) in &table {
+			refused(body, needle);
+		}
+	}
+
+	#[test]
+	fn test_templates_combine_and_each_part_may_be_absent() {
+		for body in [
+			// Samples only, answered by a Rhai oracle that names the parameters.
+			format!(
+				"[[cases]]\nname = \"x\"\n{TWO_PARAMS}[cases.parametrize]\nsamples = [[1, 2], [\"$$lit\", 0]]\n[cases.parametrize.oracle]\nrhai = \"a\"\n"
+			),
+			// Draws only, with a drawn seed.
+			template(&format!(
+				"{ONE_PARAM}[cases.parametrize.random]\ncount = 3\nseed = \"random\"\n"
+			)),
+			// No parameters: a function without arguments, called three times.
+			template("[cases.parametrize.random]\ncount = 3\n"),
+			// Samples and draws together, beside a fixed case.
+			format!(
+				"[[cases]]\nname = \"fixed\"\nargs = [1, 2]\nexpect = [1, 2]\n{}{TWO_PARAMS}[cases.parametrize]\nsamples = [[0, 1]]\n[cases.parametrize.random]\ncount = 2\nseed = 9\n",
+				template("")
+			),
+		] {
+			assert_eq!(problems(&body), Vec::<String>::new(), "{body}");
+		}
+	}
+
+	#[test]
+	fn test_an_expanded_case_may_expect_a_null_an_oracle_computed() {
+		let dir = tempfile::tempdir().unwrap();
+		let spec = load_spec_str(
+			&format!("{META}[[cases]]\nname = \"x\"\nexpect = [1]\n"),
+			dir.path(),
+		)
+		.unwrap();
+		let mut expanded = spec.clone();
+		expanded.cases[0].expect = Some(serde_json::json!([1, null]));
+		assert!(
+			validate(&expanded)
+				.iter()
+				.any(|p| p.contains("TOML cannot hold"))
+		);
+		assert_eq!(validate_expanded(&expanded), Vec::<String>::new());
 	}
 
 	const META: &str =
@@ -955,7 +1284,7 @@ reference = "solutions/lab5.py"
 			"[[cases]]\nname = \"x\"\ncheck = { rhai = \"result.len() == 3\" }\nexpect = [1, 2, 3]\n",
 			// In call mode stdout is judged on its own, beside the checker.
 			"[[cases]]\nname = \"x\"\ncheck = \"sorted\"\nexpected_stdout = \"hi\\n\"\n",
-			"[[cases]]\nname = \"x\"\nexpect = [1]\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"[[cases]]\nname = \"x\"\nexpect = [1]\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 		] {
 			assert_eq!(problems(body), Vec::<String>::new(), "{body}");
 		}
@@ -1082,19 +1411,19 @@ expect = 150
 			"the sorted checker judges a list, but a script's value is its printed text",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\nexpect = [2, 1]\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"[[cases]]\nname = \"x\"\nexpect = [2, 1]\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 			"expect fails the sorted check itself",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\na = \"int(0, 1)\"\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+			"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 			"expect_error conflicts with oracle.check",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 2\n[cases.parametrize.args]\na = \"int(0, 1)\"\n",
+			"[[cases]]\nname = \"x\"\n[[cases.parametrize.args]]\na = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 2\n",
 			"declares nothing to judge",
 		);
 		refused(
-			"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 2\n[cases.parametrize.oracle]\ncheck = \"approx\"\n",
+			"[[cases]]\nname = \"x\"\n[cases.parametrize.random]\ncount = 2\n[cases.parametrize.oracle]\ncheck = \"approx\"\n",
 			"oracle.check 'approx' compares against an expectation",
 		);
 	}
@@ -1131,7 +1460,7 @@ expect = 150
 		);
 		refused("[[scenarios]]\nname = \"s\"\n", "has no steps");
 		refused(
-			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"p\"\n[scenarios.steps.parametrize]\ncount = 1\n[scenarios.steps.parametrize.oracle]\nrhai = \"1\"\n",
+			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"p\"\n[scenarios.steps.parametrize.random]\ncount = 1\n[scenarios.steps.parametrize.oracle]\nrhai = \"1\"\n",
 			"cannot be parametrized",
 		);
 		refused(
@@ -1224,23 +1553,23 @@ expect = 150
 				"checker script",
 			),
 			(
-				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\ncheck = \"sorted\"\n",
+				"[[cases]]\nname = \"x\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\ncheck = \"sorted\"\n",
 				"names exactly one of reference, rhai, check",
 			),
 			(
-				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"nope\"\n",
+				"[[cases]]\nname = \"x\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"nope\"\n",
 				"oracle.check: unknown checker 'nope'",
 			),
 			(
-				"[[cases]]\nname = \"x\"\ncheck = { rhai = \"result != ()\" }\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
+				"[[cases]]\nname = \"x\"\ncheck = { rhai = \"result != ()\" }\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\ncheck = \"sorted\"\n",
 				"check conflicts with oracle.check",
 			),
 			(
-				"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\n",
+				"[[cases]]\nname = \"x\"\nexpect_error = \"E\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\n",
 				"expect_error conflicts with an oracle",
 			),
 			(
-				"[[setup]]\nid = \"a\"\nfunction = \"A\"\n[[cases]]\nname = \"x\"\nattribute = \"b\"\nobject = \"a\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\n",
+				"[[setup]]\nid = \"a\"\nfunction = \"A\"\n[[cases]]\nname = \"x\"\nattribute = \"b\"\nobject = \"a\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nrhai = \"1\"\n",
 				"cannot be parametrized",
 			),
 			(

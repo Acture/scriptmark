@@ -375,23 +375,23 @@ language = "python"
 
 [[cases]]
 name = "rhai"
-[cases.parametrize]
+[[cases.parametrize.args]]
+a = "int(-100, 100)"
+[[cases.parametrize.args]]
+b = "int(-100, 100)"
+[cases.parametrize.random]
 count = 5
 seed = 42
-[cases.parametrize.args]
-a = "int(-100, 100)"
-b = "int(-100, 100)"
 [cases.parametrize.oracle]
 rhai = "if a >= b { a } else { b }"
 
 [[cases]]
 name = "reference"
 [cases.parametrize]
+args = [{ a = "int(-100, 100)" }, { b = "int(-100, 100)" }]
+[cases.parametrize.random]
 count = 5
 seed = 7
-[cases.parametrize.args]
-a = "int(-100, 100)"
-b = "int(-100, 100)"
 [cases.parametrize.oracle]
 reference = "reference/lab.py"
 "#,
@@ -425,12 +425,13 @@ language = "python"
 
 [[cases]]
 name = "random"
-[cases.parametrize]
+[[cases.parametrize.args]]
+a = "int(0, 10)"
+[[cases.parametrize.args]]
+b = "int(20, 30)"
+[cases.parametrize.random]
 count = {count}
 seed = 1
-[cases.parametrize.args]
-a = "int(0, 10)"
-b = "int(20, 30)"
 [cases.parametrize.oracle]
 rhai = "if a >= b {{ a }} else {{ b }}"
 "#
@@ -1100,7 +1101,7 @@ async fn test_a_bundle_that_cannot_be_honoured_is_refused_before_grading() {
 		),
 		(
 			spec(
-				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\n",
+				"[[cases]]\nname = \"x\"\n[[cases.parametrize.args]]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\n",
 			),
 			"reference implementation 'f' did not return a value",
 		),
@@ -1174,7 +1175,7 @@ async fn test_every_name_must_mean_exactly_one_thing() {
 		),
 		(
 			spec(
-				"[[cases]]\nname = \"x\"\n[cases.parametrize]\ncount = 1\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\n",
+				"[[cases]]\nname = \"x\"\n[[cases.parametrize.args]]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\n",
 				&[],
 			),
 			"returned None",

@@ -1,13 +1,14 @@
 //! Preparing a test bundle: everything that runs teacher code, once, before any student.
 //!
 //! `prepare` re-runs the static validation, so no hand-built `TestSpec` reaches execution
-//! unchecked; imports the teacher modules to learn their exports; expands parametrized
-//! cases and resolves their oracles; checks every name a call uses; dry-runs Rhai checks
-//! against the most common wrong answer; and plans the units. `run_all` takes only
+//! unchecked; imports the teacher modules to learn their exports; expands each template
+//! into its concrete cases, records them, and resolves their oracles; validates the
+//! expanded cases again; checks every name a call uses; dry-runs Rhai checks against the
+//! most common wrong answer; and plans the units. `run_all` takes only
 //! `Bundle`s, and the CLI and bindings build them only here: every bundle they run has
 //! been through all of it.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -20,18 +21,20 @@ use crate::models::{Check, SetupStep, TestCase, TestSpec};
 use crate::runner::executor::{
 	CallPlan, Executor, InProcessCheck, ScriptRun, Subject, TeacherRuntime, UnitPlan,
 };
-use crate::runner::expander::expand_case;
+use crate::runner::generation::{Generated, generate, os_seed, seed_for};
 use crate::runner::judge::Scored;
 use crate::runner::oracle::resolve_oracle;
-use crate::spec_loader::{MAX_TIMEOUT_SECS, RESERVED, refs, validate};
+use crate::spec_loader::{MAX_TIMEOUT_SECS, RESERVED, refs, validate, validate_expanded};
 
 /// A prepared test bundle: one spec, ready to run against any student.
 #[derive(Debug, Serialize)]
 pub struct Bundle {
-	/// Validated, paths absolute, parametrized cases expanded, oracles resolved.
+	/// Validated, paths absolute, templates expanded, oracles resolved.
 	pub spec: TestSpec,
 	/// What the teacher modules export.
 	pub teacher: TeacherRuntime,
+	/// Each template's concrete inputs and how they were made, by template name.
+	pub generated: BTreeMap<String, Generated>,
 	/// The units to run per student, derived from `spec`.
 	#[serde(skip)]
 	pub units: Vec<Unit>,
@@ -89,6 +92,12 @@ pub async fn prepare<E: Executor>(
 	}
 
 	let names: Vec<String> = specs.iter().map(|s| s.meta.name.clone()).collect();
+	let mut seen = BTreeSet::new();
+	if let Some(twice) = names.iter().find(|n| !seen.insert(n.as_str())) {
+		return refuse(&format!(
+			"two specs are named '{twice}': results and frozen inputs are kept by spec name"
+		));
+	}
 	let mut tasks = tokio::task::JoinSet::new();
 	let mut index_of = std::collections::HashMap::new();
 	for (index, spec) in specs.into_iter().enumerate() {
@@ -151,31 +160,50 @@ async fn prepare_one<E: Executor>(
 
 	let mut problems = Vec::new();
 	let mut cases = Vec::new();
+	let mut generated = BTreeMap::new();
 	for case in &spec.cases {
-		let generated = expand_case(case);
-		match &case.parametrize {
-			Some(param) => {
-				let arg_names: Vec<String> = param.args.keys().cloned().collect();
-				for mut g in generated {
-					if let Err(e) = resolve_oracle(
-						&mut g,
-						&param.oracle,
-						&spec,
-						executor,
-						&arg_names,
-						timeout_secs,
-					)
-					.await
-					{
-						problems.push(format!("case '{}': {e}", g.name));
-					}
-					cases.push(g);
-				}
+		let Some(param) = &case.parametrize else {
+			cases.push(case.clone());
+			continue;
+		};
+		let inputs = param.inputs();
+		let made = match seed_for(&inputs, os_seed)
+			.map_err(|e| vec![e])
+			.and_then(|seed| generate(&case.name, &inputs, seed))
+		{
+			Ok(made) => made,
+			Err(errors) => {
+				let at = format!("case '{}'", case.name);
+				problems.extend(errors.into_iter().map(|e| format!("{at}: {e}")));
+				continue;
 			}
-			None => cases.extend(generated),
+		};
+		let names: Vec<String> = inputs.names().into_iter().map(String::from).collect();
+		// A concrete case keeps everything its template says but `parametrize`: its
+		// target, checks and timeout included.
+		for concrete in &made.cases {
+			let mut g = TestCase {
+				name: concrete.name.clone(),
+				args: concrete.args.clone(),
+				parametrize: None,
+				..case.clone()
+			};
+			if let Err(e) =
+				resolve_oracle(&mut g, &param.oracle, &spec, executor, &names, timeout_secs).await
+			{
+				problems.push(format!("case '{}': {e}", g.name));
+			}
+			cases.push(g);
 		}
+		generated.insert(case.name.clone(), made);
 	}
 	spec.cases = cases;
+	// The expanded cases meet the static rules too — an oracle answer that cannot fit its
+	// checker is refused now. Only once everything resolved: a case whose oracle failed has
+	// no expectation, and would only add "nothing to judge" beside the real error.
+	if problems.is_empty() {
+		problems.extend(validate_expanded(&spec));
+	}
 
 	problems.extend(check_names(&spec, &teacher));
 	problems.extend(dry_run_rhai(&spec));
@@ -187,6 +215,7 @@ async fn prepare_one<E: Executor>(
 	Ok(Bundle {
 		spec,
 		teacher,
+		generated,
 		units,
 	})
 }
