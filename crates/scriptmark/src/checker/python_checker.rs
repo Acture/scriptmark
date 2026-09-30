@@ -10,6 +10,9 @@ use super::{CheckError, CheckInput, CheckOutput, Checker};
 /// Protocol:
 /// - stdin:  JSON `{"result": ..., "expected": ..., "context": {...}}`
 /// - stdout: JSON `{"pass": true/false, "message": "..."}`
+///
+/// The script's existence is checked when the spec loads, so a script that then times out,
+/// crashes or prints no verdict did so on this student's value: the answer is rejected.
 pub struct PythonChecker {
 	pub script_path: PathBuf,
 	pub python_cmd: String,
@@ -83,7 +86,7 @@ impl Checker for PythonChecker {
 		let Some(status) = status else {
 			let _ = child.kill();
 			let _ = child.wait();
-			return Err(CheckError::teacher(format!(
+			return Err(CheckError::student(format!(
 				"checker '{script}' timed out after {}s",
 				self.timeout_secs
 			)));
@@ -92,13 +95,13 @@ impl Checker for PythonChecker {
 		let stdout = stdout.join().unwrap_or_default();
 		if !status.success() && stdout.trim().is_empty() {
 			let stderr = stderr.join().unwrap_or_default();
-			return Err(CheckError::teacher(format!(
+			return Err(CheckError::student(format!(
 				"checker '{script}' exited with {status}: {}",
 				stderr.trim()
 			)));
 		}
 		serde_json::from_str::<CheckOutput>(stdout.trim()).map_err(|e| {
-			CheckError::teacher(format!(
+			CheckError::student(format!(
 				"checker '{script}' printed no verdict ({e}): {}",
 				stdout.trim()
 			))
@@ -215,8 +218,34 @@ print(json.dumps({"pass": False, "message": "custom failure message"}))
 				context: json!({}),
 			})
 			.unwrap_err();
-		assert_eq!(output.fault, crate::models::Fault::Teacher);
+		assert_eq!(output.fault, crate::models::Fault::Student);
 		assert!(output.message.contains("exited with"));
+	}
+
+	#[test]
+	fn test_a_python_checker_that_hangs_or_gives_no_verdict_rejects_the_answer() {
+		let dir = tempfile::tempdir().unwrap();
+		let input = CheckInput {
+			result: json!(1),
+			expected: json!(null),
+			context: json!({}),
+		};
+		let hangs = PythonChecker {
+			timeout_secs: 1,
+			..PythonChecker::new(write_checker_script(
+				dir.path(),
+				"hang.py",
+				"import time\ntime.sleep(30)\n",
+			))
+		};
+		let output = hangs.check(&input).unwrap_err();
+		assert_eq!(output.fault, crate::models::Fault::Student);
+		assert!(output.message.contains("timed out"));
+
+		let mute = PythonChecker::new(write_checker_script(dir.path(), "mute.py", "print('hi')\n"));
+		let output = mute.check(&input).unwrap_err();
+		assert_eq!(output.fault, crate::models::Fault::Student);
+		assert!(output.message.contains("no verdict"));
 	}
 
 	#[test]
@@ -231,8 +260,8 @@ print(json.dumps({"pass": False, "message": "custom failure message"}))
 			.unwrap_err();
 		assert_eq!(
 			output.fault,
-			crate::models::Fault::Teacher,
-			"python ran; the script is missing"
+			crate::models::Fault::Student,
+			"python ran; spec loading is what refuses a missing script"
 		);
 		assert!(output.message.contains("exited with"));
 	}

@@ -21,6 +21,13 @@ pub enum DbError {
 	Io(#[from] std::io::Error),
 	#[error("two reports share student id '{0}'; refusing to overwrite one with the other")]
 	DuplicateStudent(String),
+	#[error(
+		"this database is schema version {found}, and this build reads only {expected}; \
+		 databases from before per-item grading are not read — use a new file"
+	)]
+	Version { found: i64, expected: i64 },
+	#[error("unreadable stored value: {0}")]
+	Stored(String),
 }
 
 pub struct Database {
@@ -54,6 +61,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+	use crate::models::fixtures::{graded, withheld};
 	use crate::models::*;
 	use crate::roster::Roster;
 	use crate::similarity::SimilarityPair;
@@ -86,7 +94,6 @@ mod tests {
 		let db = Database::open_memory().unwrap();
 
 		let reports = vec![StudentReport {
-			student_id: "alice".to_string(),
 			student_name: Some("Alice".to_string()),
 			test_results: vec![TestResult {
 				file: None,
@@ -101,8 +108,7 @@ mod tests {
 					..Default::default()
 				}],
 			}],
-			final_grade: Some(95.0),
-			..Default::default()
+			..graded("alice", 95.0)
 		}];
 
 		let session_id = db.save_session("hw5", &reports, None).unwrap();
@@ -123,16 +129,8 @@ mod tests {
 	fn test_student_history() {
 		let db = Database::open_memory().unwrap();
 
-		let report1 = vec![StudentReport {
-			student_id: "alice".to_string(),
-			final_grade: Some(80.0),
-			..Default::default()
-		}];
-		let report2 = vec![StudentReport {
-			student_id: "alice".to_string(),
-			final_grade: Some(95.0),
-			..Default::default()
-		}];
+		let report1 = vec![graded("alice", 80.0)];
+		let report2 = vec![graded("alice", 95.0)];
 
 		db.save_session("hw5", &report1, None).unwrap();
 		db.save_session("hw8", &report2, None).unwrap();
@@ -188,18 +186,7 @@ mod tests {
 	#[test]
 	fn test_duplicate_student_ids_are_refused_rather_than_merged() {
 		let db = Database::open_memory().unwrap();
-		let reports = vec![
-			StudentReport {
-				student_id: "alice".to_string(),
-				final_grade: Some(80.0),
-				..Default::default()
-			},
-			StudentReport {
-				student_id: "alice".to_string(),
-				final_grade: Some(95.0),
-				..Default::default()
-			},
-		];
+		let reports = vec![graded("alice", 80.0), graded("alice", 95.0)];
 
 		let err = db.save_session("hw5", &reports, None).unwrap_err();
 		assert!(matches!(err, DbError::DuplicateStudent(id) if id == "alice"));
@@ -208,15 +195,18 @@ mod tests {
 	#[test]
 	fn test_ungraded_students_read_back_as_none_not_zero() {
 		let db = Database::open_memory().unwrap();
-		let reports = vec![StudentReport {
-			student_id: "absent".to_string(),
-			submission_state: Some(SubmissionOutcome::NotSubmitted),
-			..Default::default()
-		}];
+		let reports = vec![withheld(
+			"absent",
+			SubmissionOutcome::NotSubmitted,
+			Reason::NotSubmitted,
+		)];
 		let session_id = db.save_session("hw5", &reports, None).unwrap();
 
 		// A student who was never graded must not come back as a zero.
-		assert_eq!(db.get_results(session_id).unwrap()[0].final_grade, None);
+		let row = &db.get_results(session_id).unwrap()[0];
+		assert_eq!(row.final_grade, None);
+		assert_eq!(row.state, RowState::Withheld);
+		assert_eq!(row.reason, Some(Reason::NotSubmitted));
 		assert_eq!(
 			db.get_student_history("absent").unwrap()[0].1.final_grade,
 			None
@@ -231,11 +221,7 @@ mod tests {
 		// including a non-numeric one, which a character-set trim would have mangled.
 		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
 			.unwrap();
-		let reports = vec![StudentReport {
-			student_id: "local:alice".to_string(),
-			final_grade: Some(88.0),
-			..Default::default()
-		}];
+		let reports = vec![graded("local:alice", 88.0)];
 		let session_id = db.save_session("hw5", &reports, None).unwrap();
 
 		let results = db.get_results(session_id).unwrap();
@@ -259,11 +245,7 @@ mod tests {
 			)
 			.unwrap();
 
-		let reports = vec![StudentReport {
-			student_id: "local:alice".to_string(),
-			final_grade: Some(88.0),
-			..Default::default()
-		}];
+		let reports = vec![graded("local:alice", 88.0)];
 		let session_id = db.save_session("hw5", &reports, None).unwrap();
 
 		let results = db.get_results(session_id).unwrap();
@@ -276,16 +258,8 @@ mod tests {
 		let db = Database::open_memory().unwrap();
 		db.import_roster(&Roster::from_pairs(&[("alice", "Alice Smith")]))
 			.unwrap();
-		db.save_session(
-			"hw5",
-			&[StudentReport {
-				student_id: "local:alice".to_string(),
-				final_grade: Some(70.0),
-				..Default::default()
-			}],
-			None,
-		)
-		.unwrap();
+		db.save_session("hw5", &[graded("local:alice", 70.0)], None)
+			.unwrap();
 
 		// Whichever form the teacher copies out of the summary must find the run.
 		for id in ["alice", "local:alice"] {
@@ -315,40 +289,108 @@ mod tests {
 	}
 
 	#[test]
-	fn test_an_errored_report_is_not_graded() {
-		let mut reports = vec![StudentReport {
-			student_id: "alice".to_string(),
-			submission_state: Some(SubmissionOutcome::Executable),
-			error: Some("grading task failed: panicked".to_string()),
-			..Default::default()
-		}];
-		assert!(!reports[0].is_gradeable());
-
-		crate::grading::apply_grading(&mut reports, &GradingPolicy::default());
-		// An infrastructure failure must not become a defensible-looking number.
-		assert_eq!(reports[0].final_grade, None);
-	}
-
-	#[test]
 	fn test_average_ignores_ungraded_students() {
 		let db = Database::open_memory().unwrap();
 		let reports = vec![
-			StudentReport {
-				student_id: "alice".to_string(),
-				final_grade: Some(90.0),
-				..Default::default()
-			},
-			StudentReport {
-				student_id: "absent".to_string(),
-				submission_state: Some(SubmissionOutcome::NotSubmitted),
-				..Default::default()
-			},
+			graded("alice", 90.0),
+			withheld(
+				"absent",
+				SubmissionOutcome::NotSubmitted,
+				Reason::NotSubmitted,
+			),
 		];
 
 		db.save_session("hw5", &reports, None).unwrap();
 		let sessions = db.list_sessions().unwrap();
 		assert_eq!(sessions[0].student_count, 2);
 		// A missing grade is not a zero, so it must not halve the mean.
-		assert!((sessions[0].avg_grade - 90.0).abs() < 0.1);
+		assert_eq!(sessions[0].avg_grade, Some(90.0));
+	}
+
+	#[test]
+	fn test_session_average_is_none_when_nobody_is_graded() {
+		let db = Database::open_memory().unwrap();
+		let reports = [withheld(
+			"alice",
+			SubmissionOutcome::Executable,
+			Reason::TeacherFault,
+		)];
+		db.save_session("hw5", &reports, None).unwrap();
+		assert_eq!(db.list_sessions().unwrap()[0].avg_grade, None);
+	}
+
+	#[test]
+	fn test_a_zero_and_a_withheld_grade_read_back_apart() {
+		let db = Database::open_memory().unwrap();
+		let mut policy_zero = graded("bob", 0.0);
+		if let Some(Grade {
+			outcome: GradeOutcome::Graded { reason, .. },
+			..
+		}) = &mut policy_zero.grade
+		{
+			*reason = Some(Reason::NotSubmitted);
+		}
+		let reports = [
+			graded("alice", 0.0),
+			policy_zero,
+			withheld(
+				"carol",
+				SubmissionOutcome::Executable,
+				Reason::EnvironmentFault,
+			),
+			StudentReport::new("dan", SubmissionOutcome::Executable),
+		];
+		let session_id = db.save_session("hw5", &reports, None).unwrap();
+		let rows = db.get_results(session_id).unwrap();
+		let row = |id: &str| rows.iter().find(|r| r.student_id == id).unwrap();
+
+		assert_eq!(row("alice").state, RowState::Graded);
+		assert_eq!(row("alice").final_grade, Some(0.0));
+		assert_eq!(row("alice").reason, None);
+		assert_eq!(row("bob").final_grade, Some(0.0));
+		assert_eq!(row("bob").reason, Some(Reason::NotSubmitted));
+		assert_eq!(row("carol").state, RowState::Withheld);
+		assert_eq!(row("carol").final_grade, None);
+		assert_eq!(row("carol").reason, Some(Reason::EnvironmentFault));
+		assert_eq!(row("dan").state, RowState::Unscored);
+		// Graded rows come first, withheld and unscored after.
+		assert!(rows[..2].iter().all(|r| r.state == RowState::Graded));
+	}
+
+	#[test]
+	fn test_a_database_reopens_but_an_old_one_is_refused() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("grades.db");
+		Database::open(&path)
+			.unwrap()
+			.save_session("hw5", &[], None)
+			.unwrap();
+		let reopened = Database::open(&path).unwrap();
+		assert_eq!(reopened.list_sessions().unwrap().len(), 1);
+
+		// A database from before per-item grading: tables, but no schema version.
+		let old = dir.path().join("old.db");
+		rusqlite::Connection::open(&old)
+			.unwrap()
+			.execute_batch(
+				"CREATE TABLE sessions (id INTEGER PRIMARY KEY, avg_grade REAL DEFAULT 0);",
+			)
+			.unwrap();
+		let err = Database::open(&old)
+			.err()
+			.expect("an old database is refused");
+		assert!(matches!(err, DbError::Version { found: 0, .. }), "{err}");
+	}
+
+	#[test]
+	fn test_an_unknown_stored_state_is_an_error_not_a_dropped_row() {
+		let db = Database::open_memory().unwrap();
+		let session_id = db
+			.save_session("hw5", &[graded("alice", 90.0)], None)
+			.unwrap();
+		db.conn
+			.execute("UPDATE results SET reason = 'no_such_reason'", [])
+			.unwrap();
+		assert!(db.get_results(session_id).is_err());
 	}
 }

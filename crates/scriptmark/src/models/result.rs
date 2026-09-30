@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::models::SubmissionOutcome;
+use crate::models::{Aggregation, Curve, SubmissionOutcome};
 
 /// Status of a single test case or an overall student report.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +61,8 @@ pub enum Cause {
 	Protocol,
 	/// A teacher module failed to import.
 	TeacherImport,
-	/// A checker could not decide.
+	/// A checker failed: on the student's answer (student), or could not run (environment),
+	/// or was still running when the process stopped (teacher).
 	Checker,
 	/// The case declared nothing that was judged.
 	NothingToJudge,
@@ -126,8 +127,7 @@ pub struct CaseResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestResult {
 	/// The [`crate::models::GradingItem`] this evidence belongs to — the test spec's
-	/// `[meta] name`. Read from `spec_name` in results written before items were modelled.
-	#[serde(alias = "spec_name")]
+	/// `[meta] name`.
 	pub item_id: String,
 	/// The student file these cases ran against, as submitted. `None` when no file matched,
 	/// or in results written before it was recorded.
@@ -173,9 +173,10 @@ impl TestResult {
 
 /// Complete report for a single student across all test specs.
 ///
-/// New fields are `Option` rather than defaulted enums: a results file written before this
-/// model existed must not claim a `submission_state` it never recorded.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Results written before grades were scored per item are refused, not reinterpreted:
+/// unknown fields fail to parse, and `submission_state` is required.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct StudentReport {
 	/// `StudentKey`'s rendering — a bare 学号, or a `canvas:` / `local:` prefixed form that
 	/// can never be mistaken for one.
@@ -185,40 +186,59 @@ pub struct StudentReport {
 	#[serde(default)]
 	pub test_results: Vec<TestResult>,
 	#[serde(default)]
-	pub final_grade: Option<f64>,
-	#[serde(default)]
 	pub backend_name: Option<String>,
-	/// Lint-based style score (0-100). Set by linter, used by grading.
-	#[serde(default)]
-	pub lint_score: Option<f64>,
 	/// Canvas user id, kept separate from `student_id` so grade push never has to guess it
 	/// by parsing the student id as an integer.
 	#[serde(default)]
 	pub canvas_user_id: Option<u64>,
-	/// How the submission arrived. `None` on records written before this field existed.
+	/// How the submission arrived.
+	pub submission_state: SubmissionOutcome,
+	/// The source excused this student. A teacher's decision, so never a number.
 	#[serde(default)]
-	pub submission_state: Option<SubmissionOutcome>,
+	pub excused: bool,
+	/// The style check, when a spec declares `[lint]`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub lint: Option<LintOutcome>,
 	/// An infrastructure failure that stopped this student being graded at all — a panicked
 	/// task, not a wrong answer. Kept out of `test_results` so it can never be counted as a
 	/// failed test case and scored.
 	#[serde(default)]
 	pub error: Option<String>,
+	/// The grade and how it was reached. `None` until scored: `run` writes evidence only.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub grade: Option<Grade>,
 }
 
 impl StudentReport {
-	/// True when the student actually had runnable code and nothing went wrong running it —
-	/// the only case a numeric grade means anything. Reports from before these fields
-	/// existed are graded as they were.
-	pub fn is_gradeable(&self) -> bool {
-		self.error.is_none()
-			&& matches!(
-				self.submission_state,
-				None | Some(SubmissionOutcome::Executable)
-			)
+	/// A report with no evidence yet.
+	pub fn new(student_id: impl Into<String>, submission_state: SubmissionOutcome) -> Self {
+		Self {
+			student_id: student_id.into(),
+			student_name: None,
+			test_results: Vec::new(),
+			backend_name: None,
+			canvas_user_id: None,
+			submission_state,
+			excused: false,
+			lint: None,
+			error: None,
+			grade: None,
+		}
 	}
-}
 
-impl StudentReport {
+	/// The number to publish: `None` when unscored or withheld.
+	pub fn final_grade(&self) -> Option<f64> {
+		self.grade.as_ref().and_then(Grade::final_grade)
+	}
+
+	/// The lint score, when the tool ran on a file.
+	pub fn lint_score(&self) -> Option<f64> {
+		match self.lint {
+			Some(LintOutcome::Scored { score }) => Some(score),
+			_ => None,
+		}
+	}
+
 	pub fn total_cases(&self) -> usize {
 		self.test_results.iter().map(|t| t.total()).sum()
 	}
@@ -231,6 +251,8 @@ impl StudentReport {
 		self.total_cases() - self.total_passed()
 	}
 
+	/// Share of all cases passed. Informational only: grades come from items, where a
+	/// case's weight never depends on how many cases its item runs.
 	pub fn pass_rate(&self) -> f64 {
 		let total = self.total_cases();
 		if total == 0 {
@@ -251,6 +273,188 @@ impl StudentReport {
 			TestStatus::Passed
 		} else {
 			TestStatus::Failed
+		}
+	}
+}
+
+/// What the style check found.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum LintOutcome {
+	/// 0–100.
+	Scored { score: f64 },
+	/// The linted item's file was not handed in.
+	NoFile,
+	/// The tool did not run properly: the machine's or the bundle's problem, never a score.
+	Failed { message: String },
+}
+
+/// Why a grade was withheld, or why a graded 0 is a policy 0 rather than wrong answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reason {
+	NotSubmitted,
+	SubmittedEmpty,
+	Excused,
+	/// The submission could not be matched to a roster student.
+	PendingReview,
+	/// Grading this student failed outright.
+	GradingTaskFailed,
+	/// An item's file was not handed in.
+	MissingFile,
+	TeacherFault,
+	EnvironmentFault,
+	/// The declared formula failed, or gave a value outside `0..=scale`, for this student.
+	FormulaError,
+	/// The lint tool did not run properly.
+	LintFailed,
+}
+
+/// A student's grade and its basis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Grade {
+	#[serde(flatten)]
+	pub outcome: GradeOutcome,
+	/// Every item's points, plus lint points when declared.
+	pub max: f64,
+	/// One per declared item, in declaration order.
+	pub items: Vec<ItemScore>,
+	pub basis: GradeBasis,
+}
+
+impl Grade {
+	pub fn final_grade(&self) -> Option<f64> {
+		match self.outcome {
+			GradeOutcome::Graded { final_grade, .. } => Some(final_grade),
+			GradeOutcome::Withheld { .. } => None,
+		}
+	}
+
+	pub fn reason(&self) -> Option<Reason> {
+		match self.outcome {
+			GradeOutcome::Graded { reason, .. } => reason,
+			GradeOutcome::Withheld { reason, .. } => Some(reason),
+		}
+	}
+
+	pub fn is_withheld(&self) -> bool {
+		matches!(self.outcome, GradeOutcome::Withheld { .. })
+	}
+}
+
+/// A number, or why there is none. There is no partial total: a grade missing one item
+/// would reach Canvas looking like a real low grade.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum GradeOutcome {
+	Graded {
+		/// Sum of item scores, unrounded.
+		score: f64,
+		/// `score / max * scale`, rounded.
+		raw_grade: f64,
+		/// The curved grade, rounded; equal to `raw_grade` without a curve.
+		final_grade: f64,
+		/// Set when this is a policy zero, so it never reads as wrong answers.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		reason: Option<Reason>,
+	},
+	Withheld {
+		reason: Reason,
+		/// The formula's error, when that is the reason.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		detail: Option<String>,
+	},
+}
+
+/// The policy a grade was reached under, so it can be explained without the config file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GradeBasis {
+	pub scale: f64,
+	pub decimals: u8,
+	pub curve: Curve,
+	/// Items were derived from the specs at 1 point each, not declared.
+	pub derived_items: bool,
+}
+
+/// One item's score for one student.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ItemScore {
+	pub item_id: String,
+	pub points: u32,
+	pub aggregation: Aggregation,
+	pub passed: usize,
+	pub cases: usize,
+	#[serde(flatten)]
+	pub outcome: ItemOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ItemOutcome {
+	Graded {
+		/// Unrounded.
+		score: f64,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		reason: Option<Reason>,
+	},
+	Withheld {
+		reason: Reason,
+		/// The case that decided it, and why it did not pass.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		blocking_case: Option<String>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		blocking_cause: Option<Cause>,
+	},
+}
+
+/// Reports with a grade already on them, for tests that are about what happens to a grade
+/// rather than how it was reached.
+#[cfg(test)]
+pub(crate) mod fixtures {
+	use super::*;
+
+	fn basis() -> GradeBasis {
+		GradeBasis {
+			scale: 100.0,
+			decimals: 2,
+			curve: Curve::Raw,
+			derived_items: true,
+		}
+	}
+
+	pub(crate) fn graded(student_id: &str, final_grade: f64) -> StudentReport {
+		StudentReport {
+			grade: Some(Grade {
+				outcome: GradeOutcome::Graded {
+					score: final_grade / 100.0,
+					raw_grade: final_grade,
+					final_grade,
+					reason: None,
+				},
+				max: 1.0,
+				items: Vec::new(),
+				basis: basis(),
+			}),
+			..StudentReport::new(student_id, SubmissionOutcome::Executable)
+		}
+	}
+
+	pub(crate) fn withheld(
+		student_id: &str,
+		state: SubmissionOutcome,
+		reason: Reason,
+	) -> StudentReport {
+		StudentReport {
+			grade: Some(Grade {
+				outcome: GradeOutcome::Withheld {
+					reason,
+					detail: None,
+				},
+				max: 1.0,
+				items: Vec::new(),
+				basis: basis(),
+			}),
+			..StudentReport::new(student_id, state)
 		}
 	}
 }

@@ -48,6 +48,10 @@ td.name-col{font-family:var(--font);font-size:.875rem}
 .status-failed{background:rgba(248,81,73,.15);color:var(--red)}
 .status-error{background:rgba(219,109,40,.15);color:var(--orange)}
 .status-missing{background:rgba(139,148,158,.15);color:var(--text-dim)}
+.status-graded{background:rgba(63,185,80,.15);color:var(--green)}
+.status-withheld{background:rgba(163,113,247,.15);color:#a371f7}
+.status-unscored{background:rgba(139,148,158,.15);color:var(--text-dim)}
+.reason{color:var(--text-dim);font-size:.75rem;margin-left:.4rem}
 .grade-cell{font-weight:700;font-size:.9rem}
 .detail-panel{display:none;background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:2rem}
 .detail-panel.active{display:block}
@@ -83,15 +87,15 @@ footer a{color:var(--accent);text-decoration:none}
   </div>
   <div id="detail-panel" class="detail-panel"></div>
   <div id="tab-overview" class="tab-content active">
-    <div class="chart-container"><h3>Grade Distribution</h3><div id="grade-chart" class="bar-chart"></div><div id="grade-labels" class="bar-labels"></div></div>
+    <div class="chart-container"><h3>Grade Distribution (% of scale, graded students)</h3><div id="grade-chart" class="bar-chart"></div><div id="grade-labels" class="bar-labels"></div></div>
     <div class="chart-container"><h3>Pass Rate Distribution</h3><div id="pass-chart" class="bar-chart"></div><div id="pass-labels" class="bar-labels"></div></div>
   </div>
   <div id="tab-students" class="tab-content">
     <div class="search-bar"><input type="text" id="search" placeholder="Search by ID or name..."></div>
     <table><thead><tr>
-      <th data-sort="name">Name</th><th data-sort="id">Student ID</th><th data-sort="status">Status</th>
+      <th data-sort="name">Name</th><th data-sort="id">Student ID</th><th data-sort="state">State</th>
       <th data-sort="passed">Passed</th><th data-sort="failed">Failed</th><th data-sort="total">Total</th>
-      <th data-sort="rate">Pass Rate</th><th data-sort="grade">Grade</th>
+      <th data-sort="score">Score</th><th data-sort="grade">Grade</th>
     </tr></thead><tbody id="student-table"></tbody></table>
   </div>
   <div id="tab-similarity" class="tab-content"><div id="sim-list"></div></div>
@@ -107,17 +111,27 @@ REPORTS.forEach(r => {
   r._passed = (r.test_results||[]).reduce((s,t) => s + (t.cases||[]).filter(c => c.status==='passed').length, 0);
   r._failed = r._total - r._passed;
   r._rate = r._total > 0 ? (r._passed / r._total * 100) : 0;
-  r._graded = r.final_grade !== null && r.final_grade !== undefined;
-  r._grade = r._graded ? r.final_grade : null;
+  // A grade is a number only when its state says so; a withheld grade is never a 0.
+  const g = r.grade;
+  r._state = !g ? 'unscored' : g.state;
+  r._graded = r._state === 'graded';
+  r._grade = r._graded ? g.final_grade : null;
+  r._raw = r._graded ? g.raw_grade : null;
+  r._scale = g ? g.basis.scale : 100;
+  r._frac = r._graded ? r._grade / r._scale : null;
+  r._reason = g && g.reason ? g.reason : '';
+  r._score = r._graded ? `${+g.score.toFixed(2)}/${g.max}` : '—';
   r._status = r.error ? 'error' : r._total === 0 ? 'missing' : r._failed > 0 ? 'failed' : 'passed';
 });
+const shade = f => f===null?'var(--text-dim)':f>=0.9?'var(--green)':f>=0.7?'var(--accent)':f>=0.6?'var(--yellow)':'var(--red)';
 
 const el = id => document.getElementById(id);
 const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 const totalStudents = REPORTS.length;
 const passedStudents = REPORTS.filter(r => r._status==='passed').length;
 const gradedReports = REPORTS.filter(r => r._graded);
-const avgGrade = gradedReports.reduce((s,r) => s+r._grade, 0) / Math.max(gradedReports.length,1);
+const avgGrade = gradedReports.length ? (gradedReports.reduce((s,r) => s+r._grade, 0) / gradedReports.length).toFixed(1) : '—';
+const withheldCount = REPORTS.filter(r => r._state==='withheld').length;
 const totalCases = REPORTS.reduce((s,r) => s+r._total, 0);
 const totalPassed = REPORTS.reduce((s,r) => s+r._passed, 0);
 
@@ -126,7 +140,8 @@ el('stats').textContent = '';
   {v: totalStudents, l:'Students', c:''},
   {v: passedStudents, l:'All Passed', c:'green'},
   {v: totalStudents-passedStudents, l:'Has Failures', c:'red'},
-  {v: avgGrade.toFixed(1), l:'Avg Grade', c:'yellow'},
+  {v: avgGrade, l:'Avg Grade (graded)', c:'yellow'},
+  {v: withheldCount, l:'Withheld', c:''},
   {v: `${totalPassed}/${totalCases}`, l:'Cases Passed', c:''},
   {v: SIMILARITY.length, l:'Similar Pairs', c:''}
 ].forEach(s => {
@@ -150,7 +165,7 @@ function drawChart(cid, lid, values, bs, mx, colorFn) {
     const sp=document.createElement('span'); sp.textContent=k; l.appendChild(sp);
   });
 }
-drawChart('grade-chart','grade-labels',gradedReports.map(r=>r._grade),5,100,k=>k>=90?'var(--green)':k>=70?'var(--accent)':k>=60?'var(--yellow)':'var(--red)');
+drawChart('grade-chart','grade-labels',gradedReports.map(r=>r._frac*100),5,100,k=>shade(k/100));
 drawChart('pass-chart','pass-labels',REPORTS.map(r=>r._rate),10,100,k=>k>=80?'var(--green)':k>=50?'var(--yellow)':'var(--red)');
 
 let sortKey='grade', sortDir=-1;
@@ -158,17 +173,20 @@ function renderTable(filter) {
   let d=[...REPORTS];
   if(filter){const f=filter.toLowerCase();d=d.filter(r=>r.student_id.includes(f)||(r.student_name||'').toLowerCase().includes(f));}
   d.sort((a,b)=>{
-    const va=sortKey==='name'?(a.student_name||''):sortKey==='id'?a.student_id:sortKey==='grade'?(a._graded?a._grade:-1):sortKey==='rate'?a._rate:sortKey==='passed'?a._passed:sortKey==='failed'?a._failed:sortKey==='total'?a._total:a._status;
-    const vb=sortKey==='name'?(b.student_name||''):sortKey==='id'?b.student_id:sortKey==='grade'?(b._graded?b._grade:-1):sortKey==='rate'?b._rate:sortKey==='passed'?b._passed:sortKey==='failed'?b._failed:sortKey==='total'?b._total:b._status;
+    // Ungraded students sort after every graded one, whichever way the column runs.
+    const key=r=>sortKey==='name'?(r.student_name||''):sortKey==='id'?r.student_id:sortKey==='grade'?(r._graded?r._frac:Infinity*sortDir):sortKey==='score'?(r._graded?r.grade.score/r.grade.max:Infinity*sortDir):sortKey==='passed'?r._passed:sortKey==='failed'?r._failed:sortKey==='total'?r._total:r._state+r._reason;
+    const va=key(a), vb=key(b);
+    if(va===vb) return 0;
     return typeof va==='number'?(va-vb)*sortDir:String(va).localeCompare(String(vb))*sortDir;
   });
   const tbody=el('student-table'); tbody.textContent='';
   d.forEach(r=>{
     const tr=document.createElement('tr'); tr.dataset.sid=r.student_id;
-    const gc=!r._graded?'var(--text-dim)':r._grade>=90?'var(--green)':r._grade>=70?'var(--accent)':r._grade>=60?'var(--yellow)':'var(--red)';
-    [{t:r.student_name||'N/A',c:'name-col'},{t:r.student_id},{t:r._status,badge:true},{t:r._passed},{t:r._failed},{t:r._total},{t:r._rate.toFixed(1)+'%'},{t:r._graded?r._grade.toFixed(1):'—',style:`color:${gc};font-weight:700`}].forEach(col=>{
+    const gradeText=!r._graded?'—':r._raw!==r._grade?`${r._grade} (raw ${r._raw})`:`${r._grade}`;
+    [{t:r.student_name||'N/A',c:'name-col'},{t:r.student_id},{t:r._state,badge:true,reason:r._reason},{t:r._passed},{t:r._failed},{t:r._total},{t:r._score},{t:gradeText,style:`color:${shade(r._frac)};font-weight:700`}].forEach(col=>{
       const td=document.createElement('td'); if(col.c)td.className=col.c; if(col.style)td.setAttribute('style',col.style);
-      if(col.badge){const sp=document.createElement('span');sp.className=`status-badge status-${col.t}`;sp.textContent=col.t;td.appendChild(sp);}
+      if(col.badge){const sp=document.createElement('span');sp.className=`status-badge status-${col.t}`;sp.textContent=col.t;td.appendChild(sp);
+        if(col.reason){const rs=document.createElement('span');rs.className='reason';rs.textContent=col.reason;td.appendChild(rs);}}
       else td.textContent=col.t;
       tr.appendChild(td);
     });
@@ -187,6 +205,12 @@ el('student-table').addEventListener('click',e=>{
   const h2=document.createElement('h2');h2.textContent=`${r.student_name||'N/A'} (${r.student_id})`;
   const btn=document.createElement('button');btn.className='close-btn';btn.textContent='Close';btn.onclick=()=>panel.classList.remove('active');
   hdr.appendChild(h2);hdr.appendChild(btn);panel.appendChild(hdr);
+  if(r.grade){
+    const summary=document.createElement('div');summary.className='case-msg';
+    const items=(r.grade.items||[]).map(i=>i.state==='graded'?`${i.item_id}: ${+i.score.toFixed(2)}/${i.points}${i.reason?' ('+i.reason+')':''}`:`${i.item_id}: withheld (${i.reason}${i.blocking_case?', '+i.blocking_case:''})`);
+    summary.textContent=[r._graded?`Grade ${r._grade} · raw ${r._raw} · ${r._score} points`:`Withheld: ${r._reason}${r.grade.detail?' — '+r.grade.detail:''}`,...items].join(' · ');
+    panel.appendChild(summary);
+  }
   const list=document.createElement('div');list.className='case-list';
   (r.test_results||[]).forEach(t=>(t.cases||[]).forEach(c=>{
     const item=document.createElement('div');item.className=`case-item ${c.status==='passed'?'passed':'failed'}`;

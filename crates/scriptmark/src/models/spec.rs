@@ -15,17 +15,18 @@ pub struct LintConfig {
 	/// Max warnings that maps to 0% style score.
 	#[serde(default = "default_max_warnings")]
 	pub max_warnings: usize,
-	/// Weight in final grade (0.0-1.0). 0.1 = 10% of grade.
-	#[serde(default = "default_weight")]
-	pub weight: f64,
+	/// Exit codes that mean the tool ran. Linters commonly exit 1 when they found
+	/// something; any other code is the tool failing, not a clean file.
+	#[serde(default = "default_ok_exit_codes")]
+	pub ok_exit_codes: Vec<i32>,
 }
 
 fn default_max_warnings() -> usize {
 	10
 }
 
-fn default_weight() -> f64 {
-	0.1
+fn default_ok_exit_codes() -> Vec<i32> {
+	vec![0, 1]
 }
 
 /// The built-in value checkers.

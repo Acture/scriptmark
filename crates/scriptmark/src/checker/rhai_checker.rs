@@ -91,18 +91,19 @@ impl Checker for RhaiChecker {
 		scope.push_dynamic("expected", json_to_dynamic(&input.expected));
 		scope.push_dynamic("context", json_to_dynamic(&input.context));
 
-		// An expression that cannot evaluate, or does not say yes or no, has not decided —
-		// even when a malformed answer is what tripped it. That is the teacher's to resolve.
+		// An expression that cannot evaluate, or does not say yes or no, on this answer has
+		// rejected it: the check was dry-run against the expectation before grading, so what
+		// differs now is the student's value.
 		let value = engine
 			.eval_with_scope::<Dynamic>(&mut scope, &self.expression)
 			.map_err(|e| {
-				CheckError::teacher(format!(
+				CheckError::student(format!(
 					"rhai check `{}` could not evaluate: {e}",
 					self.expression
 				))
 			})?;
 		let passed = value.as_bool().map_err(|_| {
-			CheckError::teacher(format!(
+			CheckError::student(format!(
 				"rhai check `{}` returned {}, not a bool",
 				self.expression,
 				value.type_name()
@@ -216,6 +217,7 @@ mod tests {
 			})
 			.unwrap_err();
 		assert!(output.message.contains("could not evaluate"));
+		assert_eq!(output.fault, crate::models::Fault::Student);
 	}
 
 	#[test]
@@ -229,5 +231,6 @@ mod tests {
 			})
 			.unwrap_err();
 		assert!(output.message.contains("not a bool"));
+		assert_eq!(output.fault, crate::models::Fault::Student);
 	}
 }

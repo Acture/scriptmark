@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use scriptmark::grading::apply_grading;
+use scriptmark::grading::{Policy, grade_all};
 use scriptmark::models::*;
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
@@ -74,6 +74,25 @@ async fn refusal(spec: TestSpec) -> String {
 		.map(|_| ())
 		.unwrap_err()
 		.to_string()
+}
+
+/// Score reports under the default policy: each spec an item worth 1 point.
+fn scored(mut reports: Vec<StudentReport>, specs: &[&TestSpec]) -> Vec<StudentReport> {
+	scored_with(&mut reports, specs, GradingConfig::default());
+	reports
+}
+
+fn scored_with(reports: &mut [StudentReport], specs: &[&TestSpec], config: GradingConfig) {
+	let items: Vec<GradingItem> = specs
+		.iter()
+		.map(|s| GradingItem::new(&s.meta.name))
+		.collect();
+	let policy = Policy::compile(config, true).unwrap_or_else(|e| panic!("{e}"));
+	grade_all(reports, &items, &policy).unwrap_or_else(|e| panic!("{e}"));
+}
+
+fn reason(report: &StudentReport) -> Option<Reason> {
+	report.grade.as_ref().and_then(|g| g.reason())
 }
 
 /// Reports come back as a list in input order, so tests look a student up by the id the
@@ -254,27 +273,26 @@ async fn test_run_all_stamps_identity_and_outcome_onto_every_report() {
 	dan_identity.canvas_user_id = Some(105);
 	let absent = StudentSubmission::not_submitted(dan_identity, 1, None);
 
-	let results = grade(vec![bench.spec(LARGER)], &[alice, absent]).await;
+	let spec = bench.spec(LARGER);
+	let results = grade(vec![spec.clone()], &[alice, absent]).await;
 	assert_eq!(results.len(), 2, "a non-submitter must still get a row");
 
 	let alice = by_id(&results, "alice");
-	assert_eq!(alice.submission_state, Some(SubmissionOutcome::Executable));
+	assert_eq!(alice.submission_state, SubmissionOutcome::Executable);
 	assert_eq!(alice.canvas_user_id, Some(101));
 	assert_eq!(alice.student_name.as_deref(), Some("Alice"));
-	assert!(alice.is_gradeable());
 
 	let dan = by_id(&results, "dan");
-	assert_eq!(dan.submission_state, Some(SubmissionOutcome::NotSubmitted));
+	assert_eq!(dan.submission_state, SubmissionOutcome::NotSubmitted);
 	assert_eq!(dan.canvas_user_id, Some(105));
 	assert!(dan.test_results.is_empty());
-	assert!(!dan.is_gradeable());
 
-	// And the consumer honours it: no grade, rather than a zero that would be pushed to
-	// Canvas as if the student had earned it.
-	let mut graded = results;
-	apply_grading(&mut graded, &GradingPolicy::default());
-	assert!(by_id(&graded, "alice").final_grade.is_some());
-	assert_eq!(by_id(&graded, "dan").final_grade, None);
+	// And grading honours it: no grade by default, rather than a zero that would be pushed
+	// to Canvas as if the student had earned it.
+	let graded = scored(results, &[&spec]);
+	assert_eq!(by_id(&graded, "alice").final_grade(), Some(100.0));
+	assert_eq!(by_id(&graded, "dan").final_grade(), None);
+	assert_eq!(reason(by_id(&graded, "dan")), Some(Reason::NotSubmitted));
 }
 
 /// A submitter the roster does not list still has runnable code, and a teacher needs that
@@ -286,16 +304,17 @@ async fn test_a_submitter_absent_from_the_roster_is_still_executed() {
 	stranger.roster_match = RosterMatch::NotInRoster;
 	assert_eq!(stranger.outcome(), SubmissionOutcome::ReceivedUnmatched);
 
-	let results = grade(vec![bench.spec(LARGER)], &[stranger]).await;
+	let spec = bench.spec(LARGER);
+	let results = grade(vec![spec.clone()], &[stranger]).await;
 	assert_eq!(results[0].total_passed(), 4, "their tests must still run");
 	assert_eq!(
 		results[0].submission_state,
-		Some(SubmissionOutcome::ReceivedUnmatched)
+		SubmissionOutcome::ReceivedUnmatched
 	);
 	// Run, reported — but not graded until the identity clash is resolved.
-	let mut graded = results;
-	apply_grading(&mut graded, &GradingPolicy::default());
-	assert_eq!(graded[0].final_grade, None);
+	let graded = scored(results, &[&spec]);
+	assert_eq!(graded[0].final_grade(), None);
+	assert_eq!(reason(&graded[0]), Some(Reason::PendingReview));
 }
 
 #[tokio::test]
@@ -388,6 +407,145 @@ reference = "reference/lab.py"
 	let results = grade(vec![spec], &students).await;
 	assert_eq!(by_id(&results, "alice").total_passed(), 10);
 	assert!(by_id(&results, "bob").total_passed() < 10);
+}
+
+/// More random cases in an item never change what the item is worth — the P-677 case: the
+/// grade is by item points, not by how many cases each item happens to run.
+#[tokio::test]
+async fn test_more_generated_cases_do_not_change_an_items_worth() {
+	let bench = Bench::new();
+	let random = |count: usize| {
+		bench.spec(&format!(
+			r#"
+[meta]
+name = "random"
+file = "lab.py"
+function = "larger"
+language = "python"
+
+[[cases]]
+name = "random"
+[cases.parametrize]
+count = {count}
+seed = 1
+[cases.parametrize.args]
+a = "int(0, 10)"
+b = "int(20, 30)"
+[cases.parametrize.oracle]
+rhai = "if a >= b {{ a }} else {{ b }}"
+"#
+		))
+	};
+	let fixed = bench.spec(
+		r#"
+[meta]
+name = "fixed"
+file = "lab.py"
+function = "larger"
+language = "python"
+
+[[cases]]
+name = "equal"
+args = [1, 1]
+expect = 1
+"#,
+	);
+	let students = [
+		bench.student(
+			"alice",
+			"lab.py",
+			"def larger(a, b):\n    return max(a, b)\n",
+		),
+		bench.student("bob", "lab.py", "def larger(a, b):\n    return min(a, b)\n"),
+	];
+
+	let mut grades = Vec::new();
+	for count in [5, 50] {
+		let random = random(count);
+		let results = grade(vec![random.clone(), fixed.clone()], &students).await;
+		assert_eq!(by_id(&results, "bob").total_cases(), count + 1);
+		let graded = scored(results, &[&random, &fixed]);
+		let grade = |id: &str| {
+			let g = by_id(&graded, id).grade.clone().unwrap();
+			(g.max, g.final_grade())
+		};
+		grades.push((grade("alice"), grade("bob")));
+	}
+	// Bob misses every random case and gets the fixed one: half, at 5 cases or 50.
+	assert_eq!(grades[0], ((2.0, Some(100.0)), (2.0, Some(50.0))));
+	assert_eq!(grades[0], grades[1]);
+}
+
+/// Lint runs on the file of the item that asks for it — not whichever file came first —
+/// and says when there was no such file, or when the tool itself failed.
+#[tokio::test]
+async fn test_lint_runs_on_the_declaring_items_file() {
+	let bench = Bench::new();
+	// Each item its own file and function, so one file cannot stand in for the other.
+	let spec = |name: &str, file: &str, lint: &str| {
+		let function = &name[..1];
+		bench.spec(&format!(
+			"[meta]\nname = \"{name}\"\nfile = \"{file}\"\nfunction = \"{function}\"\nlanguage = \"python\"\n\
+			 {lint}\n[[cases]]\nname = \"one\"\nexpect = 1\n"
+		))
+	};
+	// A line per `BAD`: a finding for each.
+	let grep = "[lint]\ncommand = \"grep BAD {file}\"\nmax_warnings = 1\n";
+	let specs = vec![spec("first", "a.py", ""), spec("second", "b.py", grep)];
+	let dirty = "def f():\n    return 1  # BAD\n";
+	let clean = "def s():\n    return 1\n";
+
+	let both = StudentSubmission::from_files(
+		"alice",
+		&[
+			bench.write("students/alice/a.py", dirty),
+			bench.write("students/alice/b.py", clean),
+		],
+	);
+	let first_only = bench.student("bob", "a.py", dirty);
+	let results = grade(specs, &[both, first_only]).await;
+	assert_eq!(
+		by_id(&results, "alice").lint,
+		Some(LintOutcome::Scored { score: 100.0 })
+	);
+	assert_eq!(by_id(&results, "bob").lint, Some(LintOutcome::NoFile));
+
+	let broken = "[lint]\ncommand = \"sh -c exit${IFS}3\"\n";
+	let results = grade(
+		vec![spec("second", "b.py", broken)],
+		&[bench.student("carol", "b.py", clean)],
+	)
+	.await;
+	assert!(matches!(results[0].lint, Some(LintOutcome::Failed { .. })));
+}
+
+/// A teacher module that cannot load is refused before any student runs — never a class
+/// of zeros for the teacher's bug. (A teacher fault that only shows up while running is
+/// withheld per student; `grading` pins that.)
+#[tokio::test]
+async fn test_a_teacher_module_that_fails_to_load_grades_nobody() {
+	let bench = Bench::new();
+	bench.write("helpers/broken.py", "raise RuntimeError('teacher bug')\n");
+	let spec = bench.spec(
+		r#"
+[meta]
+name = "larger"
+file = "lab.py"
+function = "larger"
+language = "python"
+imports = ["helpers/broken.py"]
+
+[[cases]]
+name = "one"
+args = [1, 2]
+expect = 2
+"#,
+	);
+	assert!(
+		refusal(spec)
+			.await
+			.contains("teacher module failed to import")
+	);
 }
 
 // ============================================================================
@@ -789,14 +947,14 @@ expect = 5
 		),
 		("raises", (S::Error, Some(Student), Some(Raised))),
 		("wrong", (S::Failed, Some(Student), Some(Wrong))),
-		("checker crashes", (S::Error, Some(Teacher), Some(Checker))),
+		("checker crashes", (S::Failed, Some(Student), Some(Checker))),
 		(
 			"checker rejects",
 			(S::Failed, Some(Student), Some(Rejected)),
 		),
 		(
 			"rhai cannot decide",
-			(S::Error, Some(Teacher), Some(Checker)),
+			(S::Failed, Some(Student), Some(Checker)),
 		),
 		(
 			"unserialisable",
@@ -857,9 +1015,16 @@ async fn test_failures_before_any_call_have_owners_too() {
 		(TestStatus::Error, Some(Fault::Student), Some(Cause::Load))
 	);
 
+	// A missing file withholds that student by default; syntax and load errors are the
+	// student's and score 0.
+	let graded = scored(results, &[&spec]);
+	assert_eq!(reason(by_id(&graded, "nofile")), Some(Reason::MissingFile));
+	assert_eq!(by_id(&graded, "syntax").final_grade(), Some(0.0));
+	assert_eq!(by_id(&graded, "exits").final_grade(), Some(0.0));
+
 	// A grader that cannot start Python blames nobody's code.
 	let results = grade_with(
-		vec![spec],
+		vec![spec.clone()],
 		&[bench.student("alice", "lab5.py", ALICE)],
 		PythonExecutor::with_python_cmd("/nonexistent/python3"),
 		5,
@@ -873,6 +1038,10 @@ async fn test_failures_before_any_call_have_owners_too() {
 			Some(Cause::Spawn)
 		)
 	);
+	// And it is no grade at all, never a zero.
+	let graded = scored(results, &[&spec]);
+	assert_eq!(graded[0].final_grade(), None);
+	assert_eq!(reason(&graded[0]), Some(Reason::EnvironmentFault));
 }
 
 // ============================================================================

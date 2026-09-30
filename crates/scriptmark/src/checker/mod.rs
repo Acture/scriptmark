@@ -41,15 +41,17 @@ pub struct CheckOutput {
 /// A checker that could not reach a verdict — which is not the same as "no".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckError {
-	/// Teacher when the checker itself misbehaved; environment when it could not run.
+	/// Student when the checker failed on the student's value — a `None` reaching `len()`
+	/// is a wrong answer, however the checker phrased it; environment when it could not
+	/// run. Teacher code that fails to load is caught before any checker runs.
 	pub fault: Fault,
 	pub message: String,
 }
 
 impl CheckError {
-	pub fn teacher(message: impl Into<String>) -> Self {
+	pub fn student(message: impl Into<String>) -> Self {
 		Self {
-			fault: Fault::Teacher,
+			fault: Fault::Student,
 			message: message.into(),
 		}
 	}

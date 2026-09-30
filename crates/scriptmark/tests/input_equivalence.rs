@@ -337,18 +337,9 @@ fn test_local_input_is_byte_identical_across_runs() {
 }
 
 #[test]
-fn test_results_written_before_this_model_still_load() {
+fn test_results_written_before_per_item_grading_are_refused() {
+	// What their numbers meant — a flat pass rate under a curve — cannot be recovered, so
+	// they are not read as if they were today's results.
 	let raw = std::fs::read_to_string(fixture_root().join("legacy_results.json")).unwrap();
-	let reports: Vec<StudentReport> = serde_json::from_str(&raw).expect("legacy results must load");
-
-	assert_eq!(reports.len(), 2);
-	for report in &reports {
-		// A record that never carried a submission state must not claim one.
-		assert!(report.submission_state.is_none());
-		assert!(report.canvas_user_id.is_none());
-		// And it is still graded exactly as it was.
-		assert!(report.is_gradeable());
-	}
-	assert_eq!(reports[0].student_id, "alice");
-	assert_eq!(reports[0].final_grade, Some(95.0));
+	assert!(serde_json::from_str::<Vec<StudentReport>>(&raw).is_err());
 }

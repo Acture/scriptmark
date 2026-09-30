@@ -23,22 +23,26 @@ scriptmark grade submissions/ -t tests/
 ```
 
 ```
-┌─────────┬─────────────┬────────┬────────┬────────┬───────┬───────────┬───────┐
-│ Student ┆ ID          ┆ Status ┆ Passed ┆ Failed ┆ Total ┆ Pass Rate ┆ Grade │
-╞═════════╪═════════════╪════════╪════════╪════════╪═══════╪═══════════╪═══════╡
-│ Alice   ┆ 20000000001 ┆ PASSED ┆     10 ┆      0 ┆    10 ┆   100.0%  ┆ 100.0 │
-│ Bob     ┆ 20000000002 ┆ FAILED ┆      7 ┆      3 ┆    10 ┆    70.0%  ┆  83.7 │
-│ Carol   ┆ 20000000003 ┆ FAILED ┆      3 ┆      7 ┆    10 ┆    30.0%  ┆  69.0 │
-└─────────┴─────────────┴────────┴────────┴────────┴───────┴───────────┴───────┘
+┌─────────┬─────────────┬──────────┬─────────────────┬───────┬─────┬───────┬───────┐
+│ Student ┆ ID          ┆ State    ┆ Reason          ┆ Score ┆ Raw ┆ Grade ┆ Cases │
+╞═════════╪═════════════╪══════════╪═════════════════╪═══════╪═════╪═══════╪═══════╡
+│ Alice   ┆ 20000000001 ┆ GRADED   ┆                 ┆ 10/10 ┆ 100 ┆   100 ┆ 12/12 │
+│ Bob     ┆ 20000000002 ┆ GRADED   ┆                 ┆  7/10 ┆  70 ┆    70 ┆  9/12 │
+│ Carol   ┆ 20000000003 ┆ WITHHELD ┆ not_submitted   ┆     - ┆   - ┆     - ┆   0/0 │
+└─────────┴─────────────┴──────────┴─────────────────┴───────┴─────┴───────┴───────┘
 ```
+
+Each test spec is a grading item, worth its declared points however many cases it runs.
+A teacher's or the machine's failure withholds a grade — shown as `-` with a reason, and
+never pushed — instead of scoring it as 0.
 
 83 students graded in under 2 seconds on an M1 Mac.
 
 ## CLI Usage
 
 ```bash
-# Grade with roster, grading curve, and database storage
-scriptmark grade submissions/ -t tests/ -r roster.csv -g sqrt --db grades.db
+# Grade with roster and database storage; points and any curve come from assignment.toml
+scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 
 # Run tests only (raw JSON output)
 scriptmark run submissions/ -t tests/ -o results.json
@@ -69,10 +73,13 @@ scriptmark tui grades.db
 ```python
 import scriptmark
 
-# One-shot grading
+# One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...)
 results = scriptmark.grade(["submissions/"], "tests/")
 for r in results:
-    print(f"{r.student_id}: {r.grade:.1f} ({r.passed}/{r.total})")
+    if r.grade is None:
+        print(f"{r.student_id}: withheld ({r.reason})")
+    else:
+        print(f"{r.student_id}: {r.grade} ({r.score}/{r.max} points)")
 
 # Discover student files (convenience view — drops non-submitters and orphan files)
 # Keys are rendered student keys: a bare 学号 once a roster confirms it, otherwise
@@ -153,6 +160,32 @@ whose it is: the student's, the teacher's, or the machine's. See
 [docs/test-bundles.md](docs/test-bundles.md) for the full contract, and
 [examples/bundles](examples/bundles) for a pure function, a shared object and file I/O.
 
+### Scoring
+
+`assignment.toml` beside the tests directory says what each item is worth and how a
+grade is reached. Every field has a default; without the file, each spec is an item worth
+1 point and the grade is `score / max × 100`.
+
+```toml
+[assignment]
+name = "lab5"
+
+[grading]
+missing = "withheld"       # or "zero": a student who submitted nothing
+missing_file = "withheld"  # or "zero": a submission without an item's file
+scale = 100
+decimals = 2
+# curve = { kind = "template", name = "sqrt", lower = 60, upper = 100 }  # shown beside the raw grade
+# lint_points = 1           # lint counts only when given points
+
+[[items]]
+id = "find_max"            # a spec's [meta] name
+points = 3
+aggregation = "proportional"  # points × pass rate; or "all_or_nothing"
+```
+
+See [docs/test-bundles.md](docs/test-bundles.md#scoring) for every rule.
+
 ### Checkers
 
 | Checker | Usage |
@@ -172,6 +205,7 @@ whose it is: the student's, the teacher's, or the machine's. See
 - **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](docs/test-bundles.md#what-grading-does-not-defend-against))
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
+- **Per-item scoring** -- declared points and aggregation; zero and withheld kept apart in every export
 - **Canvas LMS** -- roster pull, grades push
 - **Similarity detection** -- style + structural code comparison
 - **TUI + HTML reports** -- interactive browser and standalone dashboards

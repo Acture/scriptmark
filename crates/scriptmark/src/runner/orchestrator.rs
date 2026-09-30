@@ -5,7 +5,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::models::{
-	CaseResult, Cause, FailureDetail, Fault, StudentFile, StudentReport, StudentSubmission,
+	CaseResult, Cause, FailureDetail, Fault, LintOutcome, StudentReport, StudentSubmission,
 	SubmissionState, TestResult, TestStatus,
 };
 use crate::runner::executor::Executor;
@@ -63,6 +63,7 @@ pub async fn run_all<E: Executor>(
 	for student in students {
 		let identity = student.identity.clone();
 		let outcome = student.outcome();
+		let excused = student.is_excused();
 		// Gate on the delivery axis, not the collapsed outcome: a submitter who is missing
 		// from the roster still has runnable code, and refusing to run it would hide the
 		// very output a teacher needs to resolve the mismatch.
@@ -77,18 +78,14 @@ pub async fn run_all<E: Executor>(
 
 		let handle = tokio::spawn(async move {
 			let sid = identity.key.to_string();
-			let mut report = if runnable {
-				run_student(sid, files, bundles, executor, semaphore, python).await
-			} else {
-				// Nothing to run, but the student still gets a row.
-				StudentReport {
-					student_id: sid,
-					..Default::default()
-				}
-			};
+			let mut report = StudentReport::new(sid, outcome);
+			if runnable {
+				run_student(&mut report, files, bundles, executor, semaphore, python).await;
+			}
+			// Nothing to run, but the student still gets a row.
 			report.student_name = identity.name.clone();
 			report.canvas_user_id = identity.canvas_user_id;
-			report.submission_state = Some(outcome);
+			report.excused = excused;
 			report
 		});
 		handles.push((student, handle));
@@ -99,30 +96,29 @@ pub async fn run_all<E: Executor>(
 		match handle.await {
 			Ok(report) => reports.push(report),
 			// A panicked task must not make the student disappear — but it must not look
-			// like a failed test case either. Recorded as an error, so `is_gradeable()`
-			// withholds a grade rather than scoring an infrastructure failure.
+			// like a failed test case either. Recorded as an error, so grading withholds a
+			// grade rather than scoring an infrastructure failure.
 			Err(e) => reports.push(StudentReport {
-				student_id: student.identity.key.to_string(),
 				student_name: student.identity.name.clone(),
 				canvas_user_id: student.identity.canvas_user_id,
-				submission_state: Some(student.outcome()),
+				excused: student.is_excused(),
 				error: Some(format!("grading task failed: {e}")),
-				..Default::default()
+				..StudentReport::new(student.identity.key.to_string(), student.outcome())
 			}),
 		}
 	}
 	reports
 }
 
-/// Run every unit of every bundle for one student.
+/// Run every unit of every bundle for one student, and lint what a spec asks to.
 async fn run_student<E: Executor>(
-	sid: String,
-	files: Vec<StudentFile>,
+	report: &mut StudentReport,
+	files: Vec<crate::models::StudentFile>,
 	bundles: Arc<[Bundle]>,
 	executor: Arc<E>,
 	semaphore: Arc<Semaphore>,
 	python: Arc<str>,
-) -> StudentReport {
+) {
 	let mut slots: Vec<Vec<Option<Vec<CaseResult>>>> =
 		bundles.iter().map(|b| vec![None; b.units.len()]).collect();
 	let mut tasks = JoinSet::new();
@@ -193,7 +189,8 @@ async fn run_student<E: Executor>(
 		}
 	}
 
-	let test_results = bundles
+	report.lint = lint(&bundles, &graded_files, &semaphore).await;
+	report.test_results = bundles
 		.iter()
 		.zip(slots)
 		.zip(graded_files)
@@ -203,24 +200,34 @@ async fn run_student<E: Executor>(
 			cases: units.into_iter().flatten().flatten().collect(),
 		})
 		.collect();
-
-	StudentReport {
-		student_id: sid,
-		test_results,
-		backend_name: Some(executor.language().to_string()),
-		lint_score: lint(&bundles, &files, &semaphore).await,
-		..Default::default()
-	}
+	report.backend_name = Some(executor.language().to_string());
 }
 
-/// Style score from the first spec that asks for one.
-async fn lint(bundles: &[Bundle], files: &[StudentFile], semaphore: &Semaphore) -> Option<f64> {
-	let config = bundles.iter().find_map(|b| b.spec.lint.clone())?;
-	let file = files.first()?.path.clone();
-	let _permit = semaphore.acquire().await.ok()?;
-	tokio::task::spawn_blocking(move || crate::runner::linter::run_lint(&config, &file).style_score)
-		.await
-		.ok()
+/// Lint the file of the first spec that asks for it — that item's file, not whichever the
+/// student happened to hand in first.
+async fn lint(
+	bundles: &[Bundle],
+	graded_files: &[Option<String>],
+	semaphore: &Semaphore,
+) -> Option<LintOutcome> {
+	let (b, config) = bundles
+		.iter()
+		.enumerate()
+		.find_map(|(b, bundle)| bundle.spec.lint.clone().map(|c| (b, c)))?;
+	let Some(file) = graded_files[b].clone() else {
+		return Some(LintOutcome::NoFile);
+	};
+	let _permit = semaphore.acquire().await.expect("semaphore closed");
+	let outcome = tokio::task::spawn_blocking(move || {
+		crate::runner::linter::run_lint(&config, std::path::Path::new(&file))
+	})
+	.await
+	.map_err(|e| format!("linting failed: {e}"))
+	.and_then(|scored| scored);
+	Some(match outcome {
+		Ok(score) => LintOutcome::Scored { score },
+		Err(message) => LintOutcome::Failed { message },
+	})
 }
 
 fn blanket(
