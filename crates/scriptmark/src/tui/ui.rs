@@ -32,8 +32,12 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 		.and_then(|i| app.sessions.get(i))
 		.map(|s| {
 			format!(
-				"  |  {}  |  {} students  |  avg {:.1}",
-				s.assignment, s.student_count, s.avg_grade
+				"  |  {}  |  {} students  |  avg {}",
+				s.assignment,
+				s.student_count,
+				s.avg_grade
+					.map(|a| format!("{a:.1}"))
+					.unwrap_or_else(|| "—".into())
 			)
 		})
 		.unwrap_or_default();
@@ -103,18 +107,16 @@ fn draw_student_list(f: &mut Frame, area: Rect, app: &App) {
 		.iter()
 		.enumerate()
 		.map(|(i, r)| {
-			let grade_color = match r.final_grade {
-				Some(g) if g >= 90.0 => Color::Green,
-				Some(g) if g >= 70.0 => Color::Blue,
-				Some(g) if g >= 60.0 => Color::Yellow,
+			// By the share of points earned, whatever the scale.
+			let grade_color = match r.fraction() {
+				Some(f) if f >= 0.9 => Color::Green,
+				Some(f) if f >= 0.7 => Color::Blue,
+				Some(f) if f >= 0.6 => Color::Yellow,
 				Some(_) => Color::Red,
-				// Not graded at all — a dash, never a red zero.
+				// Not graded at all — a dash and its reason, never a red zero.
 				None => Color::DarkGray,
 			};
-			let grade_text = r
-				.final_grade
-				.map(|g| format!("{g:.1}"))
-				.unwrap_or_else(|| "—".to_string());
+			let grade_text = r.grade_text();
 
 			let style = if i == app.selected {
 				Style::default().bg(Color::DarkGray)
@@ -146,7 +148,7 @@ fn draw_student_list(f: &mut Frame, area: Rect, app: &App) {
 		[
 			Constraint::Min(15),
 			Constraint::Min(12),
-			Constraint::Min(7),
+			Constraint::Min(22),
 			Constraint::Min(6),
 			Constraint::Min(10),
 		],
@@ -167,9 +169,46 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 	if let Some(json) = &app.detail_json
 		&& let Ok(report) = serde_json::from_str::<crate::models::StudentReport>(json)
 	{
-		for tr in &report.test_results {
+		if let Some(grade) = &report.grade {
+			let head = match (&grade.outcome, grade.reason()) {
+				(
+					crate::models::GradeOutcome::Graded {
+						score, final_grade, ..
+					},
+					reason,
+				) => format!(
+					"graded {final_grade}  ({score}/{} points){}",
+					grade.max,
+					reason
+						.map(|r| format!(", {}", crate::export::word(&r)))
+						.unwrap_or_default()
+				),
+				(crate::models::GradeOutcome::Withheld { .. }, reason) => format!(
+					"withheld: {}",
+					reason.map(|r| crate::export::word(&r)).unwrap_or_default()
+				),
+			};
 			lines.push(Line::from(Span::styled(
-				format!("--- {} ---", tr.item_id),
+				head,
+				Style::default().fg(Color::Yellow),
+			)));
+		}
+		for tr in &report.test_results {
+			let item = report
+				.grade
+				.as_ref()
+				.and_then(|g| g.items.iter().find(|i| i.item_id == tr.item_id))
+				.map(|i| match &i.outcome {
+					crate::models::ItemOutcome::Graded { score, .. } => {
+						format!("  {score}/{}", i.points)
+					}
+					crate::models::ItemOutcome::Withheld { reason, .. } => {
+						format!("  withheld: {}", crate::export::word(reason))
+					}
+				})
+				.unwrap_or_default();
+			lines.push(Line::from(Span::styled(
+				format!("--- {}{item} ---", tr.item_id),
 				Style::default().fg(Color::Cyan),
 			)));
 			for case in &tr.cases {
@@ -234,7 +273,11 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &App) {
 				Cell::from(s.id.to_string()).style(Style::default().fg(Color::Cyan)),
 				Cell::from(s.assignment.as_str()),
 				Cell::from(s.student_count.to_string()),
-				Cell::from(format!("{:.1}", s.avg_grade)),
+				Cell::from(
+					s.avg_grade
+						.map(|a| format!("{a:.1}"))
+						.unwrap_or_else(|| "—".into()),
+				),
 				Cell::from(s.created_at.as_str()).style(Style::default().fg(Color::DarkGray)),
 			])
 			.style(style)

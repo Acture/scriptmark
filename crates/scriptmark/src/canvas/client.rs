@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
@@ -273,7 +273,7 @@ impl CanvasClient {
 		&self,
 		course_id: u64,
 		assignment_id: u64,
-		grades: &HashMap<u64, f64>,
+		grades: &BTreeMap<u64, f64>,
 	) -> Result<Vec<CanvasSubmission>, CanvasError> {
 		let mut results = Vec::new();
 

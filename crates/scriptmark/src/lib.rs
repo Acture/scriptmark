@@ -1,7 +1,9 @@
 pub(crate) mod archive;
 pub mod models;
 
+pub mod assignment;
 pub mod discovery;
+pub mod export;
 pub mod grading;
 pub mod input;
 pub mod roster;

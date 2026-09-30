@@ -6,8 +6,9 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
-use scriptmark::grading::apply_grading;
-use scriptmark::models::{AssignmentInput, StudentReport, TestSpec};
+use scriptmark::export::word;
+use scriptmark::grading::grade_all;
+use scriptmark::models::{AssignmentInput, GradeOutcome, StudentReport, TestSpec};
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
@@ -82,9 +83,53 @@ impl PyStudentResult {
 		self.inner.student_name.as_deref()
 	}
 
+	/// The grade to publish; `None` when withheld.
 	#[getter]
 	fn grade(&self) -> Option<f64> {
-		self.inner.final_grade
+		self.inner.final_grade()
+	}
+
+	/// "graded" or "withheld".
+	#[getter]
+	fn state(&self) -> Option<&'static str> {
+		self.inner.grade.as_ref().map(|g| match g.outcome {
+			GradeOutcome::Graded { .. } => "graded",
+			GradeOutcome::Withheld { .. } => "withheld",
+		})
+	}
+
+	/// Why the grade is withheld, or why a graded 0 is a policy 0.
+	#[getter]
+	fn reason(&self) -> Option<String> {
+		self.inner
+			.grade
+			.as_ref()
+			.and_then(|g| g.reason())
+			.map(|r| word(&r))
+	}
+
+	/// Points earned, unrounded; `None` when withheld.
+	#[getter]
+	fn score(&self) -> Option<f64> {
+		match self.inner.grade.as_ref()?.outcome {
+			GradeOutcome::Graded { score, .. } => Some(score),
+			GradeOutcome::Withheld { .. } => None,
+		}
+	}
+
+	/// Points available.
+	#[getter]
+	fn max(&self) -> Option<f64> {
+		self.inner.grade.as_ref().map(|g| g.max)
+	}
+
+	/// `score / max * scale`, before any curve.
+	#[getter]
+	fn raw_grade(&self) -> Option<f64> {
+		match self.inner.grade.as_ref()?.outcome {
+			GradeOutcome::Graded { raw_grade, .. } => Some(raw_grade),
+			GradeOutcome::Withheld { .. } => None,
+		}
 	}
 
 	#[getter]
@@ -113,10 +158,11 @@ impl PyStudentResult {
 		format!(
 			"StudentResult(id='{}', grade={}, passed={}/{})",
 			self.inner.student_id,
-			self.inner
-				.final_grade
-				.map(|g| format!("{g:.1}"))
-				.unwrap_or_else(|| "None".to_string()),
+			match (self.inner.final_grade(), self.reason()) {
+				(Some(g), _) => format!("{g}"),
+				(None, Some(reason)) => format!("None ({reason})"),
+				(None, None) => "None".to_string(),
+			},
 			self.inner.total_passed(),
 			self.inner.total_cases(),
 		)
@@ -214,34 +260,38 @@ fn run(
 	timeout: u64,
 	python: &str,
 ) -> PyResult<PyObject> {
-	let results = run_grading(&submissions, &tests, timeout, python)?;
+	let specs = load_specs_from_dir(Path::new(&tests)).map_err(spec_error)?;
+	let results = run_grading(&submissions, specs, timeout, python)?;
 	let json_val = serde_json::to_value(&results)
 		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 	json_to_py(py, &json_val)
 }
 
-/// Grade all students: run tests + apply grading policy.
+/// Grade all students: run the tests, then score each item under the assignment's
+/// policy — `assignment.toml`, given or found beside the tests directory, exactly as the
+/// CLI reads it.
 ///
 /// Returns a list of StudentResult objects.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", policy="linear"))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None))]
 fn grade(
 	submissions: Vec<String>,
 	tests: String,
 	timeout: u64,
 	python: &str,
-	policy: &str,
+	assignment: Option<String>,
 ) -> PyResult<Vec<PyStudentResult>> {
-	let mut reports = run_grading(&submissions, &tests, timeout, python)?;
+	let value_error = |e: anyhow::Error| pyo3::exceptions::PyValueError::new_err(format!("{e:#}"));
+	let mut declared =
+		scriptmark::assignment::load(assignment.as_deref().map(Path::new), Path::new(&tests))
+			.map_err(value_error)?;
+	let specs = load_specs_from_dir(Path::new(&tests)).map_err(spec_error)?;
+	let policy =
+		scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
+			.map_err(value_error)?;
 
-	// Apply grading policy
-	let grading_policy =
-		scriptmark::models::GradingPolicy::Template(scriptmark::models::TemplatePolicy {
-			template: policy.to_string(),
-			lower: 60.0,
-			upper: 100.0,
-		});
-	apply_grading(&mut reports, &grading_policy);
+	let mut reports = run_grading(&submissions, specs, timeout, python)?;
+	grade_all(&mut reports, &declared.assignment.items, &policy).map_err(value_error)?;
 
 	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
 	Ok(reports
@@ -250,16 +300,14 @@ fn grade(
 		.collect())
 }
 
-/// Shared logic: discover submissions, load specs, run orchestrator.
+/// Shared logic: discover submissions, run the specs through the orchestrator.
 fn run_grading(
 	submissions: &[String],
-	tests: &str,
+	specs: Vec<TestSpec>,
 	timeout: u64,
 	python: &str,
 ) -> PyResult<Vec<StudentReport>> {
 	let input = local_input(submissions)?;
-
-	let specs = load_specs_from_dir(Path::new(tests)).map_err(spec_error)?;
 
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
 	let options = RunOptions {

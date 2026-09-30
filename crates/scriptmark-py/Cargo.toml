@@ -16,4 +16,5 @@ scriptmark = { path = "../scriptmark" }
 pyo3 = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
+anyhow = { workspace = true }
 toml = { workspace = true }

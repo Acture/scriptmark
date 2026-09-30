@@ -698,24 +698,47 @@ pub enum InputSource {
 	},
 }
 
-/// One thing a student is marked on.
+/// One thing a student is marked on, and what it is worth.
 ///
 /// `id` is the test spec's `[meta] name`, which is what `TestResult.item_id` carries — so
 /// the assignment's declared items and the results reference the same identity rather than
-/// two parallel notions of "a question". Scores, weights and how evidence inside an item
-/// aggregates are P-677's; this is identity only.
+/// two parallel notions of "a question". An item's worth is its `points`, however many
+/// cases it runs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GradingItem {
 	pub id: String,
 	#[serde(default)]
 	pub title: Option<String>,
+	#[serde(default = "one_point")]
+	pub points: u32,
+	#[serde(default)]
+	pub aggregation: Aggregation,
+}
+
+fn one_point() -> u32 {
+	1
+}
+
+/// How an item's cases become its score.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Aggregation {
+	/// `points * passed / cases`: the item's pass rate.
+	#[default]
+	Proportional,
+	/// `points` when every case passed, else 0.
+	AllOrNothing,
 }
 
 impl GradingItem {
+	/// An item worth 1 point, scored on its pass rate: what an item the teacher did not
+	/// declare is worth.
 	pub fn new(id: impl Into<String>) -> Self {
 		Self {
 			id: id.into(),
 			title: None,
+			points: 1,
+			aggregation: Aggregation::Proportional,
 		}
 	}
 
@@ -1126,8 +1149,8 @@ mod tests {
 		let assignment = Assignment::named("hw1").with_items(vec![
 			GradingItem::new("find_larger_number"),
 			GradingItem {
-				id: "sum_pair".to_string(),
 				title: Some("第二题 求和".to_string()),
+				..GradingItem::new("sum_pair")
 			},
 		]);
 
@@ -1145,14 +1168,6 @@ mod tests {
 			"find_larger_number"
 		);
 		assert!(assignment.item("nope").is_none());
-	}
-
-	#[test]
-	fn test_results_written_as_spec_name_still_load() {
-		// The field was called `spec_name` before items were modelled.
-		let legacy = r#"{"spec_name": "find_larger_number", "cases": []}"#;
-		let result: crate::models::TestResult = serde_json::from_str(legacy).unwrap();
-		assert_eq!(result.item_id, "find_larger_number");
 	}
 
 	#[test]
