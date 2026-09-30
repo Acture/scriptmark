@@ -511,6 +511,12 @@ Where the code differs from the plan, and why:
   carry the scale.
 - **The lint command is split before `{file}` is filled in**, so a path with a space is
   one argument rather than a failed lint that would withhold the student.
+- **A duplicate `[meta] name` is refused in `assignment::settle`**, with the other
+  policy problems, rather than in `load_specs_from_dir`: `run` and the Python `run()`
+  load specs without scoring them.
+- **Failure details skip students with nothing to run.** Non-submitters and empty or
+  excused submissions are in the summary with their reason; listing each would bury the
+  failures.
 - **`course.toml`** refuses unknown keys, so a leftover `[grading]` table is an error
   instead of silently ignored.
 

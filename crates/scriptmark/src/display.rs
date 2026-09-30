@@ -1,7 +1,9 @@
 use comfy_table::{Cell, CellAlignment, Color, ContentArrangement, Table, presets::UTF8_FULL};
 use owo_colors::OwoColorize;
 use scriptmark::export;
-use scriptmark::models::{Fault, GradeOutcome, ItemOutcome, StudentReport, TestStatus};
+use scriptmark::models::{
+	Fault, GradeOutcome, ItemOutcome, StudentReport, SubmissionOutcome, TestStatus,
+};
 
 /// Display a summary table of all student results.
 pub fn display_summary(reports: &[&StudentReport], title: &str) {
@@ -102,6 +104,12 @@ fn grade_color(fraction: f64) -> Color {
 pub fn display_failures(reports: &[&StudentReport]) {
 	let failed: Vec<_> = reports
 		.iter()
+		// Students with nothing to run are in the summary already; listing every absent
+		// one here would bury the failures a teacher has to read.
+		.filter(|r| {
+			r.submission_state == SubmissionOutcome::Executable
+				|| r.submission_state == SubmissionOutcome::ReceivedUnmatched
+		})
 		.filter(|r| {
 			r.error.is_some()
 				|| r.grade.as_ref().is_some_and(|g| g.is_withheld())
