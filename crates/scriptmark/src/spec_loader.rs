@@ -255,8 +255,11 @@ impl<'a> Validator<'a> {
 			let at = format!("case '{}'", case.name);
 			self.case(case, &top, false, &at);
 			self.unique_name(&mut names, case.name.clone());
-			if let Some(param) = &case.parametrize {
-				for origin in origins(&param.inputs()) {
+			// Past the cap the count is already refused; naming every draw would not end.
+			if let Some(inputs) = case.parametrize.as_ref().map(|p| p.inputs())
+				&& inputs.draws() <= MAX_COUNT
+			{
+				for origin in origins(&inputs) {
 					self.unique_name(&mut names, concrete_name(&case.name, origin));
 				}
 			}
@@ -571,10 +574,17 @@ impl<'a> Validator<'a> {
 		if let Ok(out) = checker.check(&input)
 			&& !out.pass
 		{
+			// Expanded, an expectation that passed the first validation can only have come
+			// from an oracle.
+			let what = if self.expanded {
+				"the oracle's answer"
+			} else {
+				"expect"
+			};
 			self.problem(
 				at,
 				format!(
-					"expect fails the {name} check itself, so no value can pass both: {}",
+					"{what} fails the {name} check itself, so no value can pass both: {}",
 					out.message
 				),
 			);
@@ -768,7 +778,11 @@ impl<'a> Validator<'a> {
 			if random.count == 0 {
 				self.problem(
 					at,
-					"count must be at least 1: drop [cases.parametrize.random] to run only the samples",
+					if param.samples.is_empty() {
+						"count must be at least 1"
+					} else {
+						"count must be at least 1: drop [cases.parametrize.random] to run only the samples"
+					},
 				);
 			}
 			if random.count > MAX_COUNT {
@@ -803,9 +817,9 @@ impl<'a> Validator<'a> {
 				self.problem(
 					at,
 					format!(
-						"sample {j} has {}, but the template has {arity} parameter{}",
+						"sample {j} has {}, but the template has {}",
 						plural(sample.len(), "value"),
-						if arity == 1 { "" } else { "s" }
+						plural(arity, "parameter")
 					),
 				);
 			}
@@ -844,12 +858,13 @@ fn is_identifier(name: &str) -> bool {
 		&& chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn plural(n: usize, noun: &str) -> String {
+pub(crate) fn plural(n: usize, noun: &str) -> String {
 	format!("{n} {noun}{}", if n == 1 { "" } else { "s" })
 }
 
-/// TOML has no null, so a null in a parsed value is a non-finite float serde_json lost.
-fn contains_null(value: &Value) -> bool {
+/// Whether a value holds a null anywhere. In a spec, TOML has no null, so a null is a
+/// non-finite float serde_json lost.
+pub(crate) fn contains_null(value: &Value) -> bool {
 	match value {
 		Value::Null => true,
 		Value::Array(items) => items.iter().any(contains_null),
@@ -1210,6 +1225,60 @@ rhai = "a"
 		for (body, needle) in &table {
 			refused(body, needle);
 		}
+	}
+
+	#[test]
+	fn test_a_huge_count_is_refused_not_enumerated() {
+		let started = std::time::Instant::now();
+		refused(
+			&template(&format!(
+				"{ONE_PARAM}[cases.parametrize.random]\ncount = 9000000000000000000\n"
+			)),
+			"count must be at most 10000",
+		);
+		assert!(started.elapsed() < std::time::Duration::from_secs(5));
+	}
+
+	#[test]
+	fn test_count_zero_names_a_fix_that_works() {
+		let with_samples = problems(&template(&format!(
+			"{ONE_PARAM}[cases.parametrize]\nsamples = [[1]]\n[cases.parametrize.random]\ncount = 0\n"
+		)));
+		assert!(
+			with_samples
+				.iter()
+				.any(|p| p.contains("drop [cases.parametrize.random] to run only the samples")),
+			"{with_samples:?}"
+		);
+		let alone = problems(&template(&format!(
+			"{ONE_PARAM}[cases.parametrize.random]\ncount = 0\n"
+		)));
+		assert!(
+			alone.iter().any(|p| p.contains("count must be at least 1")),
+			"{alone:?}"
+		);
+		assert!(
+			!alone.iter().any(|p| p.contains("only the samples")),
+			"{alone:?}"
+		);
+	}
+
+	#[test]
+	fn test_an_oracle_answer_is_not_called_expect() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut spec = load_spec_str(
+			&format!("{META}[[cases]]\nname = \"x [0]\"\ncheck = \"sorted\"\n"),
+			dir.path(),
+		)
+		.unwrap();
+		spec.cases[0].expect = Some(serde_json::json!([2, 1]));
+		let found = validate_expanded(&spec);
+		assert!(
+			found
+				.iter()
+				.any(|p| p.contains("the oracle's answer fails the sorted check itself")),
+			"{found:?}"
+		);
 	}
 
 	#[test]

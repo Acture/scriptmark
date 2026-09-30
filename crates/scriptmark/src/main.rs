@@ -537,20 +537,19 @@ async fn run_bundles(
 	let inputs = Frozen::of(&bundles);
 	let beside = frozen::beside(output);
 	if options.replay.is_none() {
+		// Even a batch without templates: what sits beside the results must be theirs.
+		frozen::check_replaceable(&beside, &inputs, options.fresh)
+			.map_err(anyhow::Error::msg)
+			.context("refusing to grade")?;
 		for (spec, templates) in &inputs.specs {
 			for (case, made) in templates {
 				if let (Some(seed), Some(SeedSource::Drawn)) = (made.seed, made.seed_source) {
 					eprintln!(
-						"  note: case '{case}' in '{spec}' drew seed {seed}. Write `seed = {seed}` in its [cases.parametrize.random] to keep these inputs, or grade with --replay {}",
+						"  note: case '{case}' in '{spec}' drew seed {seed}. Write `seed = {seed}` in its [cases.parametrize.random] to keep these inputs, or, once this run is done, grade with --replay {}",
 						beside.display()
 					);
 				}
 			}
-		}
-		if !inputs.is_empty() {
-			frozen::check_replaceable(&beside, &inputs, options.fresh)
-				.map_err(anyhow::Error::msg)
-				.context("refusing to grade")?;
 		}
 	}
 	let run_options = RunOptions {
@@ -569,12 +568,17 @@ async fn run_bundles(
 }
 
 /// Write the inputs a batch was graded on beside its results — after them, so an
-/// interrupted or failed run replaces neither.
+/// interrupted or failed run replaces neither. A batch without templates has none, and
+/// takes away any an earlier batch left there.
 fn save_frozen(inputs: &Frozen, output: &Path) -> Result<()> {
+	let path = frozen::beside(output);
 	if inputs.is_empty() {
+		if path.exists() {
+			std::fs::remove_file(&path)
+				.with_context(|| format!("failed to remove {}", path.display()))?;
+		}
 		return Ok(());
 	}
-	let path = frozen::beside(output);
 	inputs
 		.write(&path)
 		.with_context(|| format!("failed to write {}", path.display()))?;

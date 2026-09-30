@@ -48,8 +48,8 @@ scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 scriptmark run submissions/ -t tests/ -o results.json
 
 # Generated inputs are frozen beside the results (output/results.cases.json);
-# grade late submissions on exactly the same inputs
-scriptmark grade late/ -t tests/ --replay output/results.cases.json
+# grade late submissions on exactly the same inputs, into results of their own
+scriptmark grade late/ -t tests/ --replay output/results.cases.json -o output/late.json
 
 # Detect plagiarism
 scriptmark similarity submissions/ --threshold 0.8

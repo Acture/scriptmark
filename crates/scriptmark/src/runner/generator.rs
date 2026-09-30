@@ -8,6 +8,8 @@ use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::RngCore;
 use serde_json::Value;
 
+use crate::spec_loader::{contains_null, refs};
+
 /// The version of the value mapping. Any change to what a seed draws bumps it.
 pub const GENERATOR_VERSION: u32 = 1;
 
@@ -76,7 +78,8 @@ impl Rule {
 	/// The most values or characters one draw can produce, saturating.
 	pub fn max_size(&self) -> u64 {
 		match self {
-			Rule::Int { .. } | Rule::Float { .. } | Rule::Bool | Rule::Choice(_) => 1,
+			Rule::Int { .. } | Rule::Float { .. } | Rule::Bool => 1,
+			Rule::Choice(items) => items.iter().map(value_size).max().unwrap_or(1),
 			Rule::Str { max, .. } => (*max as u64).max(1),
 			Rule::List { item, max, .. } => (*max as u64)
 				.saturating_mul(item.max_size())
@@ -231,29 +234,66 @@ fn choice(inner: &str) -> Result<Vec<Value>, RuleError> {
 	if items.is_empty() {
 		return fail("choice([]) is empty: list at least one value".into());
 	}
-	if items.iter().any(|v| any(v, &Value::is_null)) {
+	if items.iter().any(contains_null) {
 		return fail("choice holds null, which no test can pass as an argument".into());
 	}
-	if let Some(name) = crate::spec_loader::refs(&items).first() {
+	if let Some(name) = refs(&items).first() {
 		return fail(format!(
 			"choice holds '${name}', a reference: a generated value is frozen as written, so write '$${name}' for the literal text"
 		));
 	}
-	let wide = |v: &Value| v.as_u64().is_some() && v.as_i64().is_none();
-	if let Some(n) = items.iter().find(|v| any(v, &wide)) {
+	// serde_json reads an integer past 64 bits as a float; the text says what was meant.
+	if let Some(n) = integer_literals(inner)
+		.into_iter()
+		.find(|n| n.parse::<i64>().is_err())
+	{
 		return fail(format!("choice holds {n}, beyond a 64-bit signed integer"));
 	}
 	Ok(items)
 }
 
-/// Whether `value`, or anything inside it, satisfies `pred`.
-fn any(value: &Value, pred: &dyn Fn(&Value) -> bool) -> bool {
-	pred(value)
-		|| match value {
-			Value::Array(items) => items.iter().any(|v| any(v, pred)),
-			Value::Object(map) => map.values().any(|v| any(v, pred)),
-			_ => false,
+/// The integer literals written in JSON `text`, outside its strings.
+fn integer_literals(text: &str) -> Vec<&str> {
+	let bytes = text.as_bytes();
+	let (mut literals, mut i) = (Vec::new(), 0);
+	let (mut in_string, mut escaped) = (false, false);
+	while i < bytes.len() {
+		let b = bytes[i];
+		if in_string {
+			match b {
+				_ if escaped => escaped = false,
+				b'\\' => escaped = true,
+				b'"' => in_string = false,
+				_ => {}
+			}
+		} else if b == b'"' {
+			in_string = true;
+		} else if b == b'-' || b.is_ascii_digit() {
+			let start = i;
+			while i < bytes.len()
+				&& matches!(bytes[i], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+			{
+				i += 1;
+			}
+			let literal = &text[start..i];
+			if !literal.contains(['.', 'e', 'E']) {
+				literals.push(literal);
+			}
+			continue;
 		}
+		i += 1;
+	}
+	literals
+}
+
+/// How many values or characters a JSON value holds, counting itself.
+fn value_size(value: &Value) -> u64 {
+	match value {
+		Value::String(text) => (text.chars().count() as u64).max(1),
+		Value::Array(items) => items.iter().map(value_size).fold(1, u64::saturating_add),
+		Value::Object(map) => map.values().map(value_size).fold(1, u64::saturating_add),
+		_ => 1,
+	}
 }
 
 /// A uniform integer in `0..span`, for `1 <= span <= 2^64`, by rejection: no modulo bias.
@@ -337,6 +377,15 @@ mod tests {
 			parse(r#"choice(["$$5"])"#),
 			Rule::Choice(vec![json!("$$5")])
 		);
+		// A float may be as large as it likes; only an integer must fit 64 bits.
+		assert_eq!(
+			parse(r#"choice([1e20, -9223372036854775808, "99999999999999999999"])"#),
+			Rule::Choice(vec![
+				json!(1e20),
+				json!(i64::MIN),
+				json!("99999999999999999999")
+			])
+		);
 	}
 
 	#[test]
@@ -362,6 +411,9 @@ mod tests {
 			(r#"choice(["$x"])"#, "reference"),
 			(r#"choice([[{"k": "$y"}]])"#, "reference"),
 			("choice([18446744073709551615])", "64-bit"),
+			("choice([18446744073709551616])", "64-bit"),
+			("choice([-9223372036854775809])", "64-bit"),
+			("choice([[1, 99999999999999999999]])", "64-bit"),
 			("list(nope(), 0, 2)", "unknown rule"),
 			("list(int(0, 1), 3)", "takes 3 arguments"),
 			("list(int(0, 1), 3, 1)", "greater than"),
@@ -468,6 +520,16 @@ mod tests {
 		assert_eq!(parse("int(0, 1)").max_size(), 1);
 		assert_eq!(parse("str(0, 40)").max_size(), 40);
 		assert_eq!(parse("list(str(0, 10), 0, 5)").max_size(), 51);
+		// A choice is as large as its largest value.
+		assert_eq!(parse(r#"choice(["abc", 1])"#).max_size(), 3);
+		assert_eq!(
+			parse(r#"choice([[1, [2, 3]], {"k": "abcd"}])"#).max_size(),
+			5
+		);
+		assert_eq!(
+			parse(r#"list(choice(["abcdefghij"]), 0, 10)"#).max_size(),
+			101
+		);
 		assert_eq!(
 			parse("list(list(bool(), 0, 1000000), 0, 1000000)").max_size(),
 			1_000_001_000_001

@@ -75,16 +75,15 @@ pub fn concrete_name(case: &str, origin: Origin) -> String {
 
 /// Where each concrete case of a template comes from, in order: samples, then draws.
 pub fn origins(inputs: &Inputs) -> impl Iterator<Item = Origin> {
-	let draws = inputs.random.as_ref().map_or(0, |r| r.count);
 	(0..inputs.samples.len())
 		.map(Origin::Sample)
-		.chain((0..draws).map(Origin::Draw))
+		.chain((0..inputs.draws()).map(Origin::Draw))
 }
 
 /// The seed a template draws with, and how it was chosen. `None` when nothing is random:
 /// no draws, or no parameters to draw.
 pub fn seed_for(inputs: &Inputs, draw: DrawSeed) -> Result<Option<(u64, SeedSource)>, String> {
-	let Some(random) = inputs.random.as_ref().filter(|_| !inputs.args.is_empty()) else {
+	let Some(random) = inputs.random.as_ref().filter(|_| inputs.seeded()) else {
 		return Ok(None);
 	};
 	Ok(Some(match random.seed {
@@ -100,7 +99,7 @@ pub fn draws_a_seed(specs: &[TestSpec]) -> Option<(&str, &str)> {
 	specs.iter().find_map(|spec| {
 		spec.cases.iter().find_map(|case| {
 			let inputs = case.parametrize.as_ref()?.inputs();
-			let random = inputs.random.as_ref().filter(|_| !inputs.args.is_empty())?;
+			let random = inputs.random.as_ref().filter(|_| inputs.seeded())?;
 			(random.seed == Some(Seed::Random))
 				.then_some((spec.meta.name.as_str(), case.name.as_str()))
 		})
@@ -394,6 +393,22 @@ mod tests {
 			Some((3, Some(Seed::Fixed(42)))),
 		);
 		let g = generate("clamp", &t, declared(42)).unwrap();
+		let origins: Vec<Origin> = g.cases.iter().map(|c| c.origin).collect();
+		assert_eq!(
+			origins,
+			[
+				Origin::Sample(0),
+				Origin::Sample(1),
+				Origin::Draw(0),
+				Origin::Draw(1),
+				Origin::Draw(2)
+			]
+		);
+		assert_eq!(
+			serde_json::to_value(Origin::Sample(0)).unwrap(),
+			json!({"sample": 0}),
+			"the frozen file's spelling"
+		);
 		let got: Vec<(String, Vec<Value>)> =
 			g.cases.into_iter().map(|c| (c.name, c.args)).collect();
 		let row = |name: &str, args: [i64; 3]| (name.to_string(), args.map(Value::from).to_vec());

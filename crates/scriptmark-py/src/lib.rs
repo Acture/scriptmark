@@ -9,7 +9,7 @@ use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::export::word;
 use scriptmark::grading::grade_all;
 use scriptmark::models::{AssignmentInput, GradeOutcome, StudentReport, TestSpec};
-use scriptmark::runner::frozen::{Frozen, FrozenError, Generation};
+use scriptmark::runner::frozen::{self, Frozen, FrozenError, Generation};
 use scriptmark::runner::generation::draws_a_seed;
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
@@ -271,6 +271,18 @@ struct Freezing<'a> {
 	replay: Option<&'a str>,
 }
 
+impl Freezing<'_> {
+	/// Write the inputs graded on, once everything else has succeeded.
+	fn save(&self, inputs: &Frozen) -> PyResult<()> {
+		match self.freeze {
+			Some(path) => inputs
+				.write(Path::new(path))
+				.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}"))),
+			None => Ok(()),
+		}
+	}
+}
+
 /// Run tests for all students, returning a list of raw result dicts.
 ///
 /// `freeze` writes the generated inputs to a file; `replay` grades on the inputs frozen in
@@ -291,7 +303,8 @@ fn run(
 		freeze: freeze.as_deref(),
 		replay: replay.as_deref(),
 	};
-	let results = run_grading(&submissions, specs, timeout, python, &freezing)?;
+	let (results, inputs) = run_grading(&submissions, specs, timeout, python, &freezing)?;
+	freezing.save(&inputs)?;
 	let json_val = serde_json::to_value(&results)
 		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 	json_to_py(py, &json_val)
@@ -328,8 +341,9 @@ fn grade(
 		freeze: freeze.as_deref(),
 		replay: replay.as_deref(),
 	};
-	let mut reports = run_grading(&submissions, specs, timeout, python, &freezing)?;
+	let (mut reports, inputs) = run_grading(&submissions, specs, timeout, python, &freezing)?;
 	grade_all(&mut reports, &declared.assignment.items, &policy).map_err(value_error)?;
+	freezing.save(&inputs)?;
 
 	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
 	Ok(reports
@@ -338,9 +352,11 @@ fn grade(
 		.collect())
 }
 
-/// Shared logic: discover submissions, run the specs through the orchestrator.
+/// Shared logic: discover submissions, run the specs through the orchestrator. Returns the
+/// reports and the inputs they were graded on, for `Freezing::save`.
 ///
-/// A seed drawn with nowhere to keep it could never be replayed, so that is refused
+/// A seed drawn with nowhere to keep it could never be replayed, and a `freeze` path that
+/// cannot be written would lose the inputs after the whole class ran: both are refused
 /// before any student runs.
 fn run_grading(
 	submissions: &[String],
@@ -348,7 +364,7 @@ fn run_grading(
 	timeout: u64,
 	python: &str,
 	freezing: &Freezing,
-) -> PyResult<Vec<StudentReport>> {
+) -> PyResult<(Vec<StudentReport>, Frozen)> {
 	let generation = match freezing.replay {
 		Some(path) => Generation::Replay(Frozen::load(Path::new(path)).map_err(frozen_error)?),
 		None => Generation::fresh(),
@@ -360,6 +376,10 @@ fn run_grading(
 		return Err(pyo3::exceptions::PyValueError::new_err(format!(
 			"case '{case}' in '{spec}' draws a random seed: pass freeze='cases.json' to keep it, or declare seed = N"
 		)));
+	}
+	if let Some(path) = freezing.freeze {
+		frozen::writable(Path::new(path))
+			.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}")))?;
 	}
 	let input = local_input(submissions)?;
 
@@ -373,20 +393,14 @@ fn run_grading(
 	let rt = tokio::runtime::Runtime::new()
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-	let (reports, inputs) = rt.block_on(async {
+	rt.block_on(async {
 		let bundles = prepare(specs, &generation, executor.clone(), timeout)
 			.await
 			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 		let inputs = Frozen::of(&bundles);
 		let reports = run_all(&input.students, bundles.into(), executor, &options).await;
-		Ok::<_, PyErr>((reports, inputs))
-	})?;
-	if let Some(path) = freezing.freeze {
-		inputs
-			.write(Path::new(path))
-			.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}")))?;
-	}
-	Ok(reports)
+		Ok((reports, inputs))
+	})
 }
 
 /// Convert serde_json::Value to a Python object.

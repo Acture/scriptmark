@@ -235,6 +235,16 @@ impl Inputs {
 	pub fn names(&self) -> Vec<&str> {
 		self.args.iter().map(|p| p.name.as_str()).collect()
 	}
+
+	/// How many random draws.
+	pub fn draws(&self) -> usize {
+		self.random.as_ref().map_or(0, |r| r.count)
+	}
+
+	/// Whether the draws use a seed: there are draws, and parameters to draw.
+	pub fn seeded(&self) -> bool {
+		self.random.is_some() && !self.args.is_empty()
+	}
 }
 
 /// One generated parameter, written `{ name = "rule" }`. Its place in `args` is its place

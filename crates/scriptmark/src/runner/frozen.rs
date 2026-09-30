@@ -15,6 +15,7 @@ use crate::runner::generation::{
 	DrawSeed, Generated, MAX_COUNT, Origin, concrete_name, origins, os_seed,
 };
 use crate::runner::prepare::Bundle;
+use crate::spec_loader::{contains_null, plural, refs};
 
 /// The layout of the file. A newer one is refused by name, never half-read.
 pub const FORMAT: u32 = 1;
@@ -99,21 +100,17 @@ impl Frozen {
 	}
 
 	/// Write through a temporary file and a rename, so the file is never half-written,
-	/// creating its directory if need be.
+	/// creating its directory if need be. It is as readable as any file the umask allows.
 	pub fn write(&self, path: &Path) -> std::io::Result<()> {
-		let dir = path
-			.parent()
-			.filter(|p| !p.as_os_str().is_empty())
-			.unwrap_or(Path::new("."));
-		std::fs::create_dir_all(dir)?;
-		let mut file = tempfile::NamedTempFile::new_in(dir)?;
+		let mut file = scratch(path)?;
 		file.write_all(self.to_json().as_bytes())?;
 		file.persist(path).map_err(|e| e.error)?;
 		Ok(())
 	}
 
-	/// The first template whose inputs differ between two freezes, or `None`. The build
-	/// that wrote each is not an input.
+	/// The first template whose inputs differ between two freezes, or `None`. The inputs
+	/// are the rows a student is given: how the seed was spelled or chosen, which generator
+	/// drew the rows and which build wrote the file do not make the same rows other inputs.
 	pub fn first_difference(&self, other: &Frozen) -> Option<String> {
 		let specs: BTreeSet<&String> = self.specs.keys().chain(other.specs.keys()).collect();
 		for spec in specs {
@@ -121,7 +118,8 @@ impl Frozen {
 				return Some(format!("spec '{spec}' differs"));
 			};
 			let cases: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
-			if let Some(case) = cases.into_iter().find(|c| a.get(*c) != b.get(*c)) {
+			let differs = |c: &&String| a.get(*c).map(|g| &g.cases) != b.get(*c).map(|g| &g.cases);
+			if let Some(case) = cases.into_iter().find(differs) {
 				return Some(format!("case '{case}' in '{spec}' differs"));
 			}
 		}
@@ -129,10 +127,33 @@ impl Frozen {
 	}
 }
 
+/// A temporary file beside `path`, its directory made first. Its mode is left to the umask,
+/// as `std::fs::write` leaves it, rather than tempfile's owner-only default.
+fn scratch(path: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+	let dir = path
+		.parent()
+		.filter(|p| !p.as_os_str().is_empty())
+		.unwrap_or(Path::new("."));
+	std::fs::create_dir_all(dir)?;
+	let mut builder = tempfile::Builder::new();
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		builder.permissions(std::fs::Permissions::from_mode(0o666));
+	}
+	builder.tempfile_in(dir)
+}
+
 /// Where the frozen inputs of `output` go: `results.json` → `results.cases.json`.
 pub fn beside(output: &Path) -> PathBuf {
 	let stem = output.file_stem().unwrap_or_default().to_string_lossy();
 	output.with_file_name(format!("{stem}.cases.json"))
+}
+
+/// Whether `path` can be written, found out before anything runs: its directory is made,
+/// and a scratch file is created in it and removed.
+pub fn writable(path: &Path) -> std::io::Result<()> {
+	scratch(path).map(drop)
 }
 
 /// Whether a fresh run may write `new` over what `path` holds: only if it holds nothing,
@@ -176,12 +197,11 @@ pub fn replay_entry(
 			Value::from(frozen.samples.clone())
 		));
 	}
-	let count = |i: &Inputs| i.random.as_ref().map_or(0, |r| r.count);
-	if count(inputs) != count(frozen) {
+	if inputs.draws() != frozen.draws() {
 		problems.push(format!(
 			"the spec says count = {}; the frozen inputs used count = {}: {RESTORE}",
-			count(inputs),
-			count(frozen)
+			inputs.draws(),
+			frozen.draws()
 		));
 	}
 	// A seed matters only where something was drawn; "random" accepts whichever was.
@@ -220,7 +240,7 @@ fn shown_args(inputs: &Inputs) -> String {
 fn consistency(case: &str, entry: &Generated) -> Vec<String> {
 	let inputs = &entry.inputs;
 	let arity = inputs.args.len();
-	let draws = inputs.random.as_ref().map_or(0, |r| r.count);
+	let draws = inputs.draws();
 	let mut problems = Vec::new();
 	if draws > MAX_COUNT {
 		return vec![format!(
@@ -246,8 +266,8 @@ fn consistency(case: &str, entry: &Generated) -> Vec<String> {
 			inputs.samples.len()
 		));
 	}
-	let drew = draws > 0 && arity > 0;
-	if entry.seed.is_some() != drew || entry.seed_source.is_some() != drew {
+	let seeded = inputs.seeded();
+	if entry.seed.is_some() != seeded || entry.seed_source.is_some() != seeded {
 		problems.push("the frozen seed does not fit the frozen settings".into());
 	}
 	for row in &entry.cases {
@@ -259,31 +279,21 @@ fn consistency(case: &str, entry: &Generated) -> Vec<String> {
 		}
 		if row.args.len() != arity {
 			problems.push(format!(
-				"{at} has {} value{}, but the template has {arity} parameter{}",
-				row.args.len(),
-				if row.args.len() == 1 { "" } else { "s" },
-				if arity == 1 { "" } else { "s" }
+				"{at} has {}, but the template has {}",
+				plural(row.args.len(), "value"),
+				plural(arity, "parameter")
 			));
 		}
-		if row.args.iter().any(holds_null) {
+		if row.args.iter().any(contains_null) {
 			problems.push(format!("{at} holds null, which no test can pass"));
 		}
-		if let Some(name) = crate::spec_loader::refs(&row.args).first() {
+		if let Some(name) = refs(&row.args).first() {
 			problems.push(format!(
 				"{at} holds '${name}', a reference: frozen inputs are values, so write '$${name}' for the literal text"
 			));
 		}
 	}
 	problems
-}
-
-fn holds_null(value: &Value) -> bool {
-	match value {
-		Value::Null => true,
-		Value::Array(items) => items.iter().any(holds_null),
-		Value::Object(map) => map.values().any(holds_null),
-		_ => false,
-	}
 }
 
 #[cfg(test)]
@@ -463,6 +473,111 @@ mod tests {
 		let mut e = a.clone();
 		e.scriptmark = "another build".into();
 		assert_eq!(a.first_difference(&e), None, "the writer is not an input");
+	}
+
+	/// The inputs are the rows a student is given. How the seed was spelled or chosen, and
+	/// which generator drew the rows, do not make the same rows other inputs.
+	#[test]
+	fn test_the_same_rows_are_the_same_inputs_however_the_seed_was_spelled() {
+		let drawn = frozen(made(
+			&inputs(3, Some(Seed::Random)),
+			(81234, SeedSource::Drawn),
+		));
+		let pasted = frozen(made(
+			&inputs(3, Some(Seed::Fixed(81234))),
+			(81234, SeedSource::Declared),
+		));
+		assert_eq!(drawn.first_difference(&pasted), None);
+		let omitted = frozen(made(&inputs(3, None), (0, SeedSource::Default)));
+		let zero = frozen(made(
+			&inputs(3, Some(Seed::Fixed(0))),
+			(0, SeedSource::Declared),
+		));
+		assert_eq!(omitted.first_difference(&zero), None);
+		let mut older = zero.clone();
+		older
+			.specs
+			.get_mut("spec")
+			.unwrap()
+			.get_mut("clamp")
+			.unwrap()
+			.generator = 999;
+		assert_eq!(zero.first_difference(&older), None);
+		assert_eq!(
+			drawn.first_difference(&zero).as_deref(),
+			Some("case 'clamp' in 'spec' differs")
+		);
+	}
+
+	/// Format 1 as it is written to disk: a rename or a new variant spelling breaks every
+	/// file already written, so the layout is pinned here literally.
+	#[test]
+	fn test_format_1_reads_as_written() {
+		let text = r#"{
+			"format": 1,
+			"scriptmark": "0.3.0",
+			"specs": { "clamp": { "clamp": {
+				"generator": 1,
+				"inputs": {
+					"args": [{"value": "int(-100, 100)"}, {"low": "int(-49, -26)"}],
+					"samples": [[-30, -30]],
+					"random": { "count": 1, "seed": "random" }
+				},
+				"seed": 81234,
+				"seed_source": "drawn",
+				"cases": [
+					{ "name": "clamp [sample 0]", "origin": {"sample": 0}, "args": [-30, -30] },
+					{ "name": "clamp [0]", "origin": {"draw": 0}, "args": [75, -31] }
+				]
+			} } }
+		}"#;
+		let f = Frozen::from_json(text).unwrap_or_else(|e| panic!("{e}"));
+		let entry = &f.specs["clamp"]["clamp"];
+		assert_eq!((entry.generator, entry.seed), (1, Some(81234)));
+		assert_eq!(entry.seed_source, Some(SeedSource::Drawn));
+		assert_eq!(entry.inputs.names(), ["value", "low"]);
+		assert_eq!(
+			entry.inputs.random,
+			Some(Random {
+				count: 1,
+				seed: Some(Seed::Random)
+			})
+		);
+		assert_eq!(
+			entry.cases[0].origin,
+			crate::runner::generation::Origin::Sample(0)
+		);
+		assert_eq!(
+			entry.cases[1].origin,
+			crate::runner::generation::Origin::Draw(0)
+		);
+		assert_eq!(entry.cases[1].args, [json!(75), json!(-31)]);
+		let written: Value = serde_json::from_str(&f.to_json()).unwrap();
+		assert_eq!(written, serde_json::from_str::<Value>(text).unwrap());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn test_the_file_is_as_readable_as_the_results_beside_it() {
+		use std::os::unix::fs::PermissionsExt;
+		let dir = tempfile::tempdir().unwrap();
+		let results = dir.path().join("results.json");
+		std::fs::write(&results, "[]").unwrap();
+		let path = beside(&results);
+		frozen(made(&inputs(1, None), (0, SeedSource::Default)))
+			.write(&path)
+			.unwrap();
+		let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode(&path), mode(&results));
+	}
+
+	#[test]
+	fn test_a_path_that_cannot_be_written_is_found_before_anything_runs() {
+		let dir = tempfile::tempdir().unwrap();
+		assert!(writable(&dir.path().join("new/dir/cases.json")).is_ok());
+		let blocker = dir.path().join("file");
+		std::fs::write(&blocker, "").unwrap();
+		assert!(writable(&blocker.join("cases.json")).is_err());
 	}
 
 	#[test]

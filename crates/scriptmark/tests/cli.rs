@@ -169,3 +169,75 @@ fn test_a_bundle_without_templates_freezes_nothing() {
 	assert!(output.status.success(), "{}", stderr(&output));
 	assert!(!dir.join("out/results.cases.json").exists());
 }
+
+/// Writing the drawn seed back, as the note says, keeps the same inputs: the next plain
+/// run goes ahead.
+#[test]
+fn test_a_pasted_drawn_seed_grades_again_without_flags() {
+	let dir = bench();
+	let dir = dir.path();
+	let mut args = GRADE.to_vec();
+	args.push("out/results.json");
+	let first = scriptmark(dir, &args);
+	assert!(first.status.success(), "{}", stderr(&first));
+	let inputs = frozen(dir);
+	let seed = inputs.specs["clamp"]["clamp"].seed.unwrap();
+
+	let spec = dir.join("tests/test_clamp.toml");
+	let text = std::fs::read_to_string(&spec).unwrap();
+	std::fs::write(
+		&spec,
+		text.replace("seed = \"random\"", &format!("seed = {seed}")),
+	)
+	.unwrap();
+	let pasted = scriptmark(dir, &args);
+	assert!(pasted.status.success(), "{}", stderr(&pasted));
+	assert_eq!(
+		frozen(dir).specs["clamp"]["clamp"].cases,
+		inputs.specs["clamp"]["clamp"].cases
+	);
+}
+
+/// A refused run grades nobody, so it offers no seed to keep.
+#[test]
+fn test_a_refused_run_offers_no_seed() {
+	let dir = bench();
+	let dir = dir.path();
+	let mut args = GRADE.to_vec();
+	args.push("out/results.json");
+	assert!(scriptmark(dir, &args).status.success());
+	let refused = scriptmark(dir, &args);
+	assert!(!refused.status.success());
+	assert!(
+		!stderr(&refused).contains("drew seed"),
+		"{}",
+		stderr(&refused)
+	);
+}
+
+/// Frozen inputs beside the results are what those results were graded on: a batch with
+/// no templates may not leave an earlier batch's there.
+#[test]
+fn test_a_batch_without_templates_does_not_keep_old_frozen_inputs() {
+	let dir = bench();
+	let dir = dir.path();
+	let mut args = GRADE.to_vec();
+	args.push("out/results.json");
+	assert!(scriptmark(dir, &args).status.success());
+	std::fs::write(
+		dir.join("tests/test_clamp.toml"),
+		"[meta]\nname = \"clamp\"\nfile = \"clamp.py\"\nfunction = \"clamp\"\nlanguage = \"python\"\n[[cases]]\nname = \"inside\"\nargs = [5, 0, 10]\nexpect = 5\n",
+	)
+	.unwrap();
+	let refused = scriptmark(dir, &args);
+	assert!(!refused.status.success());
+	assert!(
+		stderr(&refused).contains("holds other inputs (spec 'clamp' differs)"),
+		"{}",
+		stderr(&refused)
+	);
+	args.push("--fresh");
+	let fresh = scriptmark(dir, &args);
+	assert!(fresh.status.success(), "{}", stderr(&fresh));
+	assert!(!dir.join("out/results.cases.json").exists());
+}

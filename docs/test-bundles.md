@@ -247,11 +247,13 @@ gives new answers.
 A fresh run that would draw other inputs than the ones frozen beside `--output` refuses
 before any student runs: pass `--replay` to use them again, or `--fresh` to replace them.
 With a fixed or default seed and an unchanged spec the inputs are the same, and the run
-goes ahead.
+goes ahead; so does writing a drawn seed back as `seed = N`. A batch with no templates
+takes away the inputs an earlier batch left beside `--output`, after the same check.
 
 From Python, `scriptmark.grade(subs, tests, freeze="cases.json")` writes the file, and
 `replay="cases.json"` uses one. A `seed = "random"` template needs `freeze=`, so that the
-seed is never lost.
+seed is never lost, and a `freeze=` path that cannot be written is refused before any
+student runs. The file goes where you say, whatever it held before.
 
 ### Weight
 
