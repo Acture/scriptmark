@@ -1,13 +1,14 @@
 //! The example bundles grade exactly as a teacher would run them: specs from `tests/`,
 //! submissions discovered from `submissions/`, prepared, then run. They are the
 //! reference for the three fixture kinds P-674 names — a pure function, a shared object,
-//! and files read and written.
+//! and files read and written — and for scoring them: declared points, all or nothing
+//! under a curve, and items derived when nothing is declared.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
-use scriptmark::models::{Cause, Fault, StudentReport, TestStatus};
+use scriptmark::models::{Cause, Fault, GradeOutcome, StudentReport, TestStatus};
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
@@ -20,19 +21,39 @@ fn examples() -> PathBuf {
 async fn grade_example(name: &str) -> Vec<StudentReport> {
 	let root = examples().join("bundles").join(name);
 	let specs = load_specs_from_dir(&root.join("tests")).unwrap_or_else(|e| panic!("{e}"));
+	let mut declared = scriptmark::assignment::load(None, &root.join("tests")).unwrap();
+	let policy =
+		scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
+			.unwrap_or_else(|e| panic!("{e}"));
 	let submissions = root.join("submissions");
 	let input = load_local_input(&[submissions.as_path()], LocalInputOptions::default()).unwrap();
 	let executor = Arc::new(PythonExecutor::new());
 	let bundles = prepare(specs, executor.clone(), 5)
 		.await
 		.unwrap_or_else(|e| panic!("{e}"));
-	run_all(
+	let mut reports = run_all(
 		&input.students,
 		bundles.into(),
 		executor,
 		&RunOptions::default(),
 	)
-	.await
+	.await;
+	scriptmark::grading::grade_all(&mut reports, &declared.assignment.items, &policy)
+		.unwrap_or_else(|e| panic!("{e}"));
+	reports
+}
+
+/// `(score, raw_grade, final_grade)` of a graded student.
+fn graded(report: &StudentReport) -> (f64, f64, f64) {
+	match report.grade.as_ref().map(|g| &g.outcome) {
+		Some(GradeOutcome::Graded {
+			score,
+			raw_grade,
+			final_grade,
+			..
+		}) => (*score, *raw_grade, *final_grade),
+		other => panic!("{} is not graded: {other:?}", report.student_id),
+	}
 }
 
 fn student<'a>(reports: &'a [StudentReport], key: &str) -> &'a StudentReport {
@@ -81,6 +102,9 @@ async fn test_the_pure_function_example() {
 			),
 		]
 	);
+	// 10 points on the item's pass rate.
+	assert_eq!(graded(student(&reports, "alice")), (10.0, 100.0, 100.0));
+	assert_eq!(graded(student(&reports, "bob")), (6.0, 60.0, 60.0));
 }
 
 #[tokio::test]
@@ -122,6 +146,9 @@ async fn test_the_shared_object_example() {
 			.all(|c| c.fault != Some(Fault::Teacher)),
 		"a wrong answer is never the teacher's fault"
 	);
+	// All or nothing, curved onto 60..=100 — with the raw grade kept beside it.
+	assert_eq!(graded(student(&reports, "alice")), (5.0, 100.0, 100.0));
+	assert_eq!(graded(bob), (0.0, 0.0, 60.0));
 }
 
 #[tokio::test]
@@ -136,6 +163,11 @@ async fn test_the_file_io_example() {
 			Some(Cause::Wrong)
 		)]
 	);
+	// No assignment.toml: the one spec is an item worth 1 point.
+	assert_eq!(graded(student(&reports, "alice")), (1.0, 100.0, 100.0));
+	let (score, raw, final_grade) = graded(student(&reports, "bob"));
+	assert!((score - 2.0 / 3.0).abs() < 1e-9);
+	assert_eq!((raw, final_grade), (66.67, 66.67));
 }
 
 #[test]

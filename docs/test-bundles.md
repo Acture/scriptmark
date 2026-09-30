@@ -208,6 +208,80 @@ Every case that does not pass says whose it is (`fault`) and why (`cause`):
 An error message, or a function checker's message, longer than 65,536 characters is cut,
 and says how long it was.
 
+## Scoring
+
+Each test spec is a **grading item**, identified by its `[meta] name`. An item is worth
+its declared points however many cases it runs: adding fifty random cases to a question
+does not make it weigh more. `assignment.toml`, beside the tests directory, declares the
+items and the policy; without it, every spec is an item worth 1 point.
+
+```toml
+[[items]]
+id = "stats"                  # the spec's [meta] name
+title = "Mean and clamp"      # optional, for people
+points = 10                   # default 1
+aggregation = "proportional"  # required: "proportional" or "all_or_nothing"
+
+[grading]                     # optional; these are the defaults
+missing = "withheld"
+missing_file = "withheld"
+scale = 100
+decimals = 2
+curve = { kind = "raw" }
+```
+
+- **An item's score.** `proportional` is `points × passed / cases`, the item's pass
+  rate. `all_or_nothing` is `points` when every case passed, else 0.
+- **The grade.** `score` is the sum of item scores; `max` is the sum of points. The raw
+  grade is `score / max × scale`. A declared `curve` maps that fraction onto the grade —
+  `template` (`linear`, `sqrt`, `log`, `strict`, between `lower` and `upper`), or
+  `formula`, a Rhai expression over `score`, `max`, `fraction` and `scale`. The raw grade
+  is kept beside a curved one, in every output.
+- **Rounding.** The raw and final grades are rounded half away from zero to `decimals`
+  places, once. Item scores are kept unrounded in the JSON results.
+- **Lint** counts only through `lint_points = N`, which adds `N × lint score / 100` to
+  the score and `N` to the max. A linter that exits outside `[lint] ok_exit_codes`
+  (default `[0, 1]`) has failed, and is never read as a clean file.
+
+### Zero or no grade
+
+A grade is a number, or withheld with a reason. There is no partial total: a grade
+missing one item would reach Canvas looking like a real low grade.
+
+| Reason | When | Grade |
+|---|---|---|
+| `excused` | the source excused the student | withheld, whatever the policy |
+| `grading_task_failed` | grading this student failed outright | withheld |
+| `pending_review` | the submission matched no roster student | withheld |
+| `not_submitted` / `submitted_empty` | nothing, or only empty files, arrived | withheld; 0 under `missing = "zero"` |
+| `missing_file` | a submission lacks an item's file | withheld; that item 0 under `missing_file = "zero"` |
+| `teacher_fault` | a case failed through the bundle's fault | withheld |
+| `environment_fault` | a case failed through the machine's or grader's fault | withheld |
+| `formula_error` | the formula failed, or gave a value outside `0..=scale`, for this student | withheld, never clamped |
+| `lint_failed` | the linter did not run properly, with `lint_points` declared | withheld |
+
+A 0 comes only from the student's own evidence, a `missing` or `missing_file` policy —
+recorded with its reason, so it never reads as wrong answers — or a declared curve.
+Withholding one student never stops the others being graded.
+
+Everything that makes a policy unusable is refused before a student runs: an unknown key,
+an item declared twice, an item with no spec or a spec with no item, two specs with one
+name, 0 points in total, a bad `scale`, `decimals` or curve bound, a formula that does not
+compile, `lint_points` without a `[lint]`.
+
+After grading, an item every student failed through its checker, or where no student
+handed in the file, is flagged: that is usually a bug in the bundle, not the class.
+
+### Outputs
+
+The JSON results carry each student's `grade`: its `state`, `reason`, `score`, `max`,
+`raw_grade`, `final_grade`, every item's score, and the policy it was reached under.
+`grade --archive` also writes `grades_<tests>.csv`, one row per student, where a withheld
+grade is an empty cell and a zero is `0`. `grades-push` sends graded students only — real
+zeros included — and says how many it skipped and why. `summarize`, `report`, the TUI
+and the database show what `grade` stored; none of them re-scores. Results and databases
+written before per-item grading are refused, not reinterpreted.
+
 ## What grading does not defend against
 
 Every unit runs in its own process and directory, and its results travel on a channel of
@@ -262,9 +336,17 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 | `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module |
 | stdin → stdout cases with no function | add `script = true` |
 | a Rhai check like `result.len() > 0` | `result != () && result.len() > 0` |
+| `[lint] weight = 0.1` | delete it, and give lint points with `[grading] lint_points` |
+| `grade -g sqrt --range 60,100` or `--formula` | `[grading] curve = { kind = "template", name = "sqrt", lower = 60, upper = 100 }` or `{ kind = "formula", formula = "..." }` |
 
 Results can change on regrading. Students who printed inside a graded function, or who
 imported an allowed module such as `random` or `csv`, used to fail every case and now
 pass. Cases that a name-bound `@checker` used to judge silently are now judged by what
 they declare. A case that paired `sorted` with `expect` used to pass any sorted list; the
 value must now equal `expect` too.
+
+Grades change too. They were a curve — `sqrt` by default — over the pass rate of every
+case pooled, so an item with more cases weighed more. They are now the raw
+`score / max × scale` over declared items, and a curve applies only when declared. A
+checker that raised on a student's answer, and a missing file or a submission that never
+arrived, used to count as the teacher's fault or a 0; see [Scoring](#scoring).

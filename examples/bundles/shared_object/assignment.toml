@@ -1,0 +1,12 @@
+# All or nothing, under a declared curve. The curve is shown beside the raw grade, never
+# instead of it: a student with nothing right has raw 0 and a curved 60.
+[assignment]
+name = "account"
+
+[grading]
+curve = { kind = "template", name = "linear", lower = 60, upper = 100 }
+
+[[items]]
+id = "account"
+points = 5
+aggregation = "all_or_nothing"

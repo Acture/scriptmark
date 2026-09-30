@@ -1,0 +1,9 @@
+# One item worth 10 points, scored on its pass rate: 3 of 5 cases is 6 points.
+[assignment]
+name = "stats"
+
+[[items]]
+id = "stats"
+title = "Mean and clamp"
+points = 10
+aggregation = "proportional"
