@@ -367,9 +367,9 @@ in the tests directory.
 **D7. Replay (D-g).**
 
 - `prepare(specs, &Generation, executor, timeout)`, with
-  `enum Generation { Fresh(SeedSource), Replay(Frozen) }`. `SeedSource` is a
-  `fn() -> Result<u64, String>`; the CLI and the bindings pass `frozen::os_seed`, and
-  tests pass a failing one.
+  `enum Generation { Fresh(DrawSeed), Replay(Frozen) }` in `runner/frozen.rs`. `DrawSeed`
+  is a `fn() -> Result<u64, String>`; the CLI and the bindings use
+  `Generation::fresh()`, which draws from the OS, and tests pass a failing one.
 - Under `Replay`, each template's entry is taken from the artifact as it is — generator
   version and seed included — and its cases are never regenerated.
 - Everything else runs as it does for fresh inputs: validation, inspecting the teacher
@@ -596,13 +596,15 @@ gets the same rows.
 1. **Plan.** This document.
 2. **Generator.** `Rule`, `parse`/`draw`, ChaCha8 with our own mapping, `GENERATOR_VERSION`,
    the value goldens, `rand_chacha`, `float_roundtrip`.
-3. **Spelling and validation.** `Param`, `Random`, `Seed`, their deserialisers, the D8
-   static rules, `concrete_name`, and the repository's specs moved to the new spelling.
-4. **Generation in `prepare`.** `generation.rs` replaces `expander.rs`; `Bundle.generated`,
-   seeds, call-order binding, `literal()`, re-validation, duplicate spec names.
-5. **Freeze and replay.** `Frozen`, `Generation`, the `prepare` call sites, `--replay`,
+3. **Spelling, validation and generation.** `Param`, `Random`, `Seed`, their
+   deserialisers, the D8 static rules, and `generation.rs` in place of `expander.rs`:
+   `Bundle.generated`, seeds, call-order binding, `literal()`, re-validation, duplicate
+   spec names, and the repository's specs moved to the new spelling. Planned as two
+   commits; one, because the model change and the expander that read it cannot build
+   apart.
+4. **Freeze and replay.** `frozen.rs`, `Generation`, the `prepare` call sites, `--replay`,
    `--fresh`, the artifact, and the Python `freeze`/`replay`.
-6. **Docs, fixture, and the examples tests.**
+5. **Docs, fixture, and the examples tests.**
 
 ## Residual risks, accepted
 

@@ -1,0 +1,36 @@
+# Generated cases: the inputs come from samples and random draws, the answers from an
+# oracle. One fixed case sits beside the template in the same item.
+
+[meta]
+name = "clamp"
+file = "clamp.py"
+function = "clamp"
+language = "python"
+
+[[cases]]
+name = "inside"
+args = [5, 0, 10]
+expect = 5
+
+[[cases]]
+name = "clamp"
+
+# One block per parameter, in the order clamp(value, low, high) takes them.
+[[cases.parametrize.args]]
+value = "choice([-100, -75, -25, 0, 25, 75, 100])"
+[[cases.parametrize.args]]
+low = "int(-49, -26)"
+[[cases.parametrize.args]]
+high = "int(26, 49)"
+
+[cases.parametrize]
+# Inputs that always run, written like fixed args: on each bound, and below the range.
+# A sample is an input only; its answer comes from the oracle.
+samples = [[-30, -30, 30], [30, -30, 30], [-100, -30, 30]]
+
+[cases.parametrize.random]
+count = 12
+seed = 7        # omit for 0; "random" draws one and records it
+
+[cases.parametrize.oracle]
+rhai = "if value < low { low } else if value > high { high } else { value }"

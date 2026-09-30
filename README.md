@@ -47,6 +47,10 @@ scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 # Run tests only (raw JSON output)
 scriptmark run submissions/ -t tests/ -o results.json
 
+# Generated inputs are frozen beside the results (output/results.cases.json);
+# grade late submissions on exactly the same inputs
+scriptmark grade late/ -t tests/ --replay output/results.cases.json
+
 # Detect plagiarism
 scriptmark similarity submissions/ --threshold 0.8
 
@@ -73,8 +77,9 @@ scriptmark tui grades.db
 ```python
 import scriptmark
 
-# One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...)
-results = scriptmark.grade(["submissions/"], "tests/")
+# One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...).
+# freeze= keeps the generated inputs; replay= grades on ones kept earlier.
+results = scriptmark.grade(["submissions/"], "tests/", freeze="output/cases.json")
 for r in results:
     if r.grade is None:
         print(f"{r.student_id}: withheld ({r.reason})")

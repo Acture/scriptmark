@@ -1,0 +1,9 @@
+# One item worth 4 points on its pass rate, however many cases the template draws.
+[assignment]
+name = "clamp"
+
+[[items]]
+id = "clamp"
+title = "Clamp a value into a range"
+points = 4
+aggregation = "proportional"
