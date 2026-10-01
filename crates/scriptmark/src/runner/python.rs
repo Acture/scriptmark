@@ -561,6 +561,16 @@ impl Executor for PythonExecutor {
 		"python"
 	}
 
+	fn identity(&self) -> Result<String, String> {
+		let bytes = std::fs::read(&self.python_cmd)
+			.map_err(|e| format!("cannot fingerprint Python '{}': {e}", self.python_cmd))?;
+		Ok(format!(
+			"{}:{}",
+			self.python_cmd,
+			crate::runner::answers::digest(&bytes)
+		))
+	}
+
 	fn locate<'a>(&self, files: &'a [StudentFile], spec: &TestSpec) -> Option<&'a StudentFile> {
 		// The hint chain mode used: the first function a case names, else [meta] function.
 		// (Per-case specs named no case function, so this is their hint too.)

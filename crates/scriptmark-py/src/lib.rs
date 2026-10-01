@@ -285,8 +285,8 @@ impl Freezing<'_> {
 
 /// Run tests for all students, returning a list of raw result dicts.
 ///
-/// `freeze` writes the generated inputs to a file; `replay` grades on the inputs frozen in
-/// one instead of generating them.
+/// `freeze` writes generated inputs and oracle answers; `replay` verifies and reuses
+/// a frozen bundle without recomputing its answers.
 #[pyfunction]
 #[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", freeze=None, replay=None))]
 fn run(

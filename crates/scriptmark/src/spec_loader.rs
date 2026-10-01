@@ -103,10 +103,14 @@ fn resolve_paths(spec: &mut TestSpec) {
 		{
 			*script = absolute_in(&dir, script);
 		}
-		if let Some(param) = &mut case.parametrize
-			&& let Some(reference) = &mut param.oracle.reference
+		for oracle in case
+			.oracle
+			.iter_mut()
+			.chain(case.parametrize.iter_mut().map(|p| &mut p.oracle))
 		{
-			*reference = absolute_in(&dir, reference);
+			if let Some(reference) = &mut oracle.reference {
+				*reference = absolute_in(&dir, reference);
+			}
 		}
 	}
 }
@@ -452,10 +456,13 @@ impl<'a> Validator<'a> {
 			}
 		}
 
-		let oracle_expects = case
-			.parametrize
-			.as_ref()
-			.is_some_and(|p| p.oracle.reference.is_some() || p.oracle.rhai.is_some());
+		let oracle_expects = case.answer_source().is_some_and(|o| {
+			if case.script {
+				o.stdout
+			} else {
+				o.returns_value()
+			}
+		});
 		if let Some(method) = &case.check {
 			match method.resolve() {
 				Err(e) => self.problem(at, e),
@@ -468,6 +475,20 @@ impl<'a> Validator<'a> {
 			}
 			self.parametrize(case, param, at);
 		}
+		if let Some(oracle) = case.answer_source() {
+			self.oracle(case, oracle, is_step, at);
+		}
+		if case.oracle.is_some()
+			&& case
+				.parametrize
+				.as_ref()
+				.is_some_and(|p| p.oracle != crate::models::spec::Oracle::default())
+		{
+			self.problem(
+				at,
+				"case.oracle conflicts with parametrize.oracle: declare one answer source",
+			);
+		}
 
 		let judged = case.expect.is_some()
 			|| case.expect_error.is_some()
@@ -476,9 +497,8 @@ impl<'a> Validator<'a> {
 			|| case.check.is_some()
 			|| oracle_expects
 			|| case
-				.parametrize
-				.as_ref()
-				.is_some_and(|p| p.oracle.check.is_some());
+				.answer_source()
+				.is_some_and(|o| o.computes() || o.check.is_some());
 		if !judged {
 			self.problem(
 				at,
@@ -681,7 +701,21 @@ impl<'a> Validator<'a> {
 			);
 		}
 		self.template_inputs(param, at);
-		let oracle = &param.oracle;
+		if case.attribute.is_some() {
+			self.problem(
+				at,
+				"an attribute takes no args, so it cannot be parametrized",
+			);
+		}
+	}
+
+	fn oracle(
+		&mut self,
+		case: &TestCase,
+		oracle: &crate::models::spec::Oracle,
+		is_step: bool,
+		at: &str,
+	) {
 		let kinds = [
 			oracle.reference.is_some(),
 			oracle.rhai.is_some(),
@@ -690,16 +724,16 @@ impl<'a> Validator<'a> {
 		.iter()
 		.filter(|k| **k)
 		.count();
-		if kinds > 1 {
+		if kinds > 1 || (case.oracle.is_some() && kinds == 0) {
 			self.problem(at, "an oracle names exactly one of reference, rhai, check");
 		}
-		if (oracle.reference.is_some() || oracle.rhai.is_some()) && case.expect.is_some() {
+		if oracle.returns_value() && case.expect.is_some() {
 			self.problem(
 				at,
 				"expect conflicts with an oracle that computes the expectation",
 			);
 		}
-		if (oracle.reference.is_some() || oracle.rhai.is_some()) && case.expect_error.is_some() {
+		if oracle.computes() && case.expect_error.is_some() {
 			self.problem(
 				at,
 				"expect_error conflicts with an oracle that computes a returned value",
@@ -717,16 +751,87 @@ impl<'a> Validator<'a> {
 				"expect_error conflicts with oracle.check: a raised exception has no value to check",
 			);
 		}
-		if case.attribute.is_some() {
+		if oracle.computes()
+			&& (is_step || case.method.is_some() || case.attribute.is_some() || case.script)
+		{
 			self.problem(
 				at,
-				"an attribute takes no args, so it cannot be parametrized",
+				"an oracle answers independent function cases only; scenarios, methods, attributes and scripts are not supported",
 			);
 		}
-		if oracle.reference.is_some() && case.method.is_some() {
+		if oracle.computes() && !self.spec.setup.is_empty() {
 			self.problem(
 				at,
-				"a reference oracle calls a function; it cannot answer for a method call",
+				"an oracle cannot reproduce top-level setup; use fixed vars/data_files or an independent case",
+			);
+		}
+		if oracle.reference.is_some() {
+			if !oracle
+				.function
+				.as_deref()
+				.is_some_and(|s| is_identifier(s) && !s.starts_with('_'))
+			{
+				self.problem(
+					at,
+					"a reference oracle needs function = \"<exact public entry>\"",
+				);
+			}
+			if !oracle.returns_value()
+				&& !oracle.stdout
+				&& oracle.files.is_empty()
+				&& oracle.raises.is_none()
+			{
+				self.problem(
+					at,
+					"a reference oracle must observe a return, exception, stdout or files",
+				);
+			}
+			if oracle.raises.is_some()
+				&& (oracle.returns_value() || case.expect.is_some() || case.check.is_some())
+			{
+				self.problem(
+					at,
+					"oracle.raises conflicts with a return expectation or checker",
+				);
+			}
+			if oracle.raises.as_deref().is_some_and(|s| !is_identifier(s)) {
+				self.problem(at, "oracle.raises must name an exception type");
+			}
+			if oracle.stdout && case.expected_stdout.is_some() {
+				self.problem(at, "expected_stdout conflicts with oracle.stdout");
+			}
+			let file_key = |path: &str| -> PathBuf {
+				Path::new(path)
+					.components()
+					.filter(|c| *c != Component::CurDir)
+					.collect()
+			};
+			let mut files: BTreeSet<PathBuf> = BTreeSet::new();
+			for path in &oracle.files {
+				let key: PathBuf = file_key(path);
+				if !is_contained(path) || key.as_os_str().is_empty() || !files.insert(key.clone()) {
+					self.problem(
+						at,
+						format!("oracle file '{path}' must be unique and relative, without '..'"),
+					);
+				}
+				if case.expect_files.keys().any(|p| file_key(p) == key) {
+					self.problem(
+						at,
+						format!("expect_files conflicts with oracle file '{path}'"),
+					);
+				}
+			}
+		} else if oracle.function.is_some()
+			|| oracle.returns.is_some()
+			|| oracle.stdout
+			|| !oracle.files.is_empty()
+			|| oracle.raises.is_some()
+			|| oracle.version.is_some()
+		{
+			self.problem(
+				at,
+				"function, returns, stdout, files, raises and version require an oracle.reference",
 			);
 		}
 		if let Some(name) = &oracle.check {
@@ -741,10 +846,17 @@ impl<'a> Validator<'a> {
 				Ok(check) => self.both_can_hold(&check, case.expect.as_ref(), at),
 			}
 		}
-		if let Some(expr) = &oracle.rhai
-			&& let Err(e) = rhai_checker::compile(expr, &param.inputs().names())
-		{
-			self.problem(at, format!("rhai oracle does not compile: {e}"));
+		if let Some(expr) = &oracle.rhai {
+			let names: Vec<&str> = case.parametrize.as_ref().map_or_else(
+				|| vec!["args"],
+				|p| p.args.iter().map(|a| a.name.as_str()).collect(),
+			);
+			if let Err(e) = rhai_checker::compile(expr, &names) {
+				self.problem(at, format!("rhai oracle does not compile: {e}"));
+			}
+			if !refs(&case.args).is_empty() {
+				self.problem(at, "a Rhai oracle takes literal arguments, not $references");
+			}
 		}
 		if let Some(reference) = &oracle.reference
 			&& !Path::new(reference).is_file()
@@ -1054,6 +1166,7 @@ seed = 42
 
 [cases.parametrize.oracle]
 reference = "solutions/lab5.py"
+function = "clamp"
 
 [[cases]]
 name = "inline"

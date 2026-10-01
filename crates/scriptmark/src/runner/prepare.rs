@@ -18,13 +18,14 @@ use serde_json::{Value, json};
 use crate::checker::rhai_checker::RhaiChecker;
 use crate::checker::{CheckInput, Checker};
 use crate::models::{Check, SetupStep, TestCase, TestSpec};
+use crate::runner::answers::{Contract, FrozenAnswers};
 use crate::runner::executor::{
 	CallPlan, Executor, InProcessCheck, ScriptRun, Subject, TeacherRuntime, UnitPlan,
 };
 use crate::runner::frozen::{Generation, replay_entry};
 use crate::runner::generation::{DrawSeed, Generated, generate, seed_for};
 use crate::runner::judge::Scored;
-use crate::runner::oracle::resolve_oracle;
+use crate::runner::oracle::{resolve_oracle, validate_references};
 use crate::spec_loader::{MAX_TIMEOUT_SECS, RESERVED, refs, validate, validate_expanded};
 
 /// A prepared test bundle: one spec, ready to run against any student.
@@ -36,6 +37,8 @@ pub struct Bundle {
 	pub teacher: TeacherRuntime,
 	/// Each template's concrete inputs and how they were made, by template name.
 	pub generated: BTreeMap<String, Generated>,
+	/// Prepared expectations and their source/configuration fingerprints.
+	pub answers: Option<FrozenAnswers>,
 	/// The units to run per student, derived from `spec`.
 	#[serde(skip)]
 	pub units: Vec<Unit>,
@@ -75,7 +78,7 @@ pub struct PrepareErrors(pub Vec<PrepareError>);
 enum Source {
 	Fresh(DrawSeed),
 	/// The spec's frozen templates, by name.
-	Replay(BTreeMap<String, Generated>),
+	Replay(BTreeMap<String, Generated>, Option<FrozenAnswers>),
 }
 
 /// Prepare every spec, concurrently. Either all of them are ready or none is returned.
@@ -99,6 +102,11 @@ pub async fn prepare<E: Executor>(
 			"the default timeout must be between 1 and {MAX_TIMEOUT_SECS} seconds"
 		));
 	}
+	if let Generation::Replay(frozen) = generation
+		&& frozen.format != crate::runner::frozen::FORMAT
+	{
+		return refuse("unsupported frozen bundle format: prepare a fresh bundle with this build");
+	}
 
 	let names: Vec<String> = specs.iter().map(|s| s.meta.name.clone()).collect();
 	let mut seen = BTreeSet::new();
@@ -108,7 +116,11 @@ pub async fn prepare<E: Executor>(
 		));
 	}
 	if let Generation::Replay(frozen) = generation
-		&& let Some(extra) = frozen.specs.keys().find(|s| !seen.contains(s.as_str()))
+		&& let Some(extra) = frozen
+			.specs
+			.keys()
+			.chain(frozen.answers.keys())
+			.find(|s| !seen.contains(s.as_str()))
 	{
 		return refuse(&format!(
 			"the frozen inputs have spec '{extra}', which this batch does not: replay them with the specs they were made from"
@@ -126,6 +138,7 @@ pub async fn prepare<E: Executor>(
 					.get(&spec.meta.name)
 					.cloned()
 					.unwrap_or_default(),
+				frozen.answers.get(&spec.meta.name).cloned(),
 			),
 		};
 		let handle =
@@ -189,6 +202,7 @@ async fn prepare_one<E: Executor>(
 	let mut problems = Vec::new();
 	let mut cases = Vec::new();
 	let mut generated = BTreeMap::new();
+	let mut arg_names: BTreeMap<String, Vec<String>> = BTreeMap::new();
 	for case in &spec.cases {
 		let Some(param) = &case.parametrize else {
 			cases.push(case.clone());
@@ -199,7 +213,7 @@ async fn prepare_one<E: Executor>(
 			Source::Fresh(draw) => seed_for(&inputs, *draw)
 				.map_err(|e| vec![e])
 				.and_then(|seed| generate(&case.name, &inputs, seed)),
-			Source::Replay(frozen) => match frozen.get(&case.name) {
+			Source::Replay(frozen, _) => match frozen.get(&case.name) {
 				Some(entry) => replay_entry(&case.name, &inputs, entry),
 				None => Err(vec![
 					"the frozen inputs have no template by this name: draw new inputs instead of replaying".into(),
@@ -218,22 +232,19 @@ async fn prepare_one<E: Executor>(
 		// A concrete case keeps everything its template says but `parametrize`: its
 		// target, checks and timeout included.
 		for concrete in &made.cases {
-			let mut g = TestCase {
+			let g = TestCase {
 				name: concrete.name.clone(),
 				args: concrete.args.clone(),
 				parametrize: None,
+				oracle: case.answer_source().cloned(),
 				..case.clone()
 			};
-			if let Err(e) =
-				resolve_oracle(&mut g, &param.oracle, &spec, executor, &names, timeout_secs).await
-			{
-				problems.push(format!("case '{}': {e}", g.name));
-			}
+			arg_names.insert(g.name.clone(), names.clone());
 			cases.push(g);
 		}
 		generated.insert(case.name.clone(), made);
 	}
-	if let Source::Replay(frozen) = &source {
+	if let Source::Replay(frozen, _) = &source {
 		let templates: BTreeSet<&str> = spec
 			.cases
 			.iter()
@@ -247,6 +258,80 @@ async fn prepare_one<E: Executor>(
 		}
 	}
 	spec.cases = cases;
+	if !problems.is_empty() {
+		return Err(fail(problems));
+	}
+	let has_answers: bool = spec
+		.cases
+		.iter()
+		.any(|c| c.oracle.as_ref().is_some_and(|o| o.computes()));
+	let contract: Option<Contract> = has_answers
+		.then(|| Contract::of(&spec, executor, timeout_secs))
+		.transpose()
+		.map_err(|e| fail(vec![e]))?;
+	let answers: Option<FrozenAnswers> = match (&source, &contract) {
+		(Source::Replay(_, Some(frozen)), Some(contract)) => {
+			frozen
+				.restore(contract, &mut spec)
+				.map_err(|e| fail(vec![e]))?;
+			Some(frozen.clone())
+		}
+		(Source::Replay(_, frozen), wanted) if frozen.is_some() || wanted.is_some() => {
+			return Err(fail(vec!["frozen answers are missing or this spec no longer uses an oracle: prepare a fresh bundle without --replay".into()]));
+		}
+		(Source::Fresh(_), Some(contract)) => {
+			validate_references(&spec, &arg_names, executor, timeout_secs)
+				.await
+				.map_err(|e| fail(vec![e]))?;
+			let mut resolved: Vec<TestCase> = Vec::with_capacity(spec.cases.len());
+			let total: usize = spec
+				.cases
+				.iter()
+				.filter(|c| c.oracle.as_ref().is_some_and(|o| o.computes()))
+				.count();
+			let started: std::time::Instant = std::time::Instant::now();
+			let mut answered: usize = 0;
+			if total >= 20 {
+				eprintln!("Preparing {total} oracle answers for '{}'", spec.meta.name);
+			}
+			for case in &spec.cases {
+				let mut case: TestCase = case.clone();
+				if let Some(oracle) = case.oracle.clone().filter(|o| o.computes()) {
+					let names: &[String] = arg_names.get(&case.name).map_or(&[], Vec::as_slice);
+					resolve_oracle(&mut case, &oracle, &spec, executor, names, timeout_secs)
+						.await
+						.map_err(|e| fail(vec![format!("case '{}': {e}", case.name)]))?;
+					answered += 1;
+					if total >= 20 && (answered.is_multiple_of(25) || answered == total) {
+						let elapsed: f64 = started.elapsed().as_secs_f64();
+						let remaining: f64 = elapsed / answered as f64 * (total - answered) as f64;
+						eprintln!(
+							"Oracle '{}': {answered}/{total}, {elapsed:.1}s elapsed, about {remaining:.1}s remaining",
+							spec.meta.name
+						);
+					}
+				}
+				resolved.push(case);
+			}
+			// Never publish answers under a fingerprint taken before their sources changed.
+			if *contract
+				!= Contract::of(&spec, executor, timeout_secs).map_err(|e| fail(vec![e]))?
+			{
+				return Err(fail(vec![
+					"oracle sources changed during preparation; prepare again".into(),
+				]));
+			}
+			spec.cases = resolved;
+			Some(FrozenAnswers::new(contract.clone(), &spec))
+		}
+		_ => None,
+	};
+	for case in &mut spec.cases {
+		if let Some(name) = case.oracle.as_ref().and_then(|o| o.check.as_ref()) {
+			case.check = Some(crate::models::CheckMethod::Builtin(name.clone()));
+		}
+		case.oracle = None;
+	}
 	// The expanded cases meet the static rules too — an oracle answer that cannot fit its
 	// checker is refused now. Only once everything resolved: a case whose oracle failed has
 	// no expectation, and would only add "nothing to judge" beside the real error.
@@ -265,6 +350,7 @@ async fn prepare_one<E: Executor>(
 		spec,
 		teacher,
 		generated,
+		answers,
 		units,
 	})
 }

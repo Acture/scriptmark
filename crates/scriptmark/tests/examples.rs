@@ -24,6 +24,14 @@ async fn grade_example(name: &str) -> Vec<StudentReport> {
 	grade_bundle(&examples().join("bundles").join(name)).await
 }
 
+#[tokio::test]
+async fn test_reference_oracle_example() {
+	let reports: Vec<StudentReport> = grade_example("reference_oracle").await;
+	assert_all_passed(student(&reports, "alice"));
+	assert_eq!(student(&reports, "alice").total_passed(), 8);
+	assert_eq!(student(&reports, "bob").total_passed(), 0);
+}
+
 async fn grade_bundle(root: &Path) -> Vec<StudentReport> {
 	let specs = load_specs_from_dir(&root.join("tests")).unwrap_or_else(|e| panic!("{e}"));
 	let mut declared = scriptmark::assignment::load(None, &root.join("tests")).unwrap();

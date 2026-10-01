@@ -12,6 +12,7 @@ Runnable examples, each with a correct and a wrong student:
 | a shared object | [`examples/bundles/shared_object`](../examples/bundles/shared_object) |
 | reading and writing files | [`examples/bundles/file_io`](../examples/bundles/file_io) |
 | generated cases: samples, draws and an oracle | [`examples/bundles/generated_cases`](../examples/bundles/generated_cases) |
+| reference answers: returns, exceptions, output and files | [`examples/bundles/reference_oracle`](../examples/bundles/reference_oracle) |
 
 ```sh
 scriptmark grade examples/bundles/shared_object/submissions -t examples/bundles/shared_object/tests
@@ -216,8 +217,64 @@ grading. A `None` inside a reference's answer is kept. A Rhai oracle sees each a
 as the student does: `"$$x"` in a sample or a `choice` is the literal text `$x` to both. A
 `$name` reference is refused there, because a generated value is frozen as written.
 
-A reference implementation gets the arguments in the same order as the student, so it
-cannot show you that the order is wrong. A Rhai oracle names them, and can.
+A reference entry must accept the positional argument count. For a template its
+parameter names must also match `parametrize.args` in order; swapped names are refused.
+Defaulted trailing parameters are allowed. A variadic entry cannot establish names for
+extra template arguments, so those templates are refused.
+
+### Reference implementations
+
+Fixed inputs and generated inputs share `[cases.oracle]`. A template may instead put
+its source under `[cases.parametrize.oracle]`; declaring both is an error.
+
+```toml
+[[cases]]
+name = "double"
+args = [4]
+[cases.oracle]
+reference = "solutions/double.py"  # relative to this spec
+function = "answer"               # exact public entry, independent of meta.function
+```
+
+The reference is called once per concrete case, before any student runs. It receives
+the same arguments, stdin, vars, teacher imports and data files in a fresh process and
+working directory. Its file and function are looked up exactly. A reference entry must
+be public and inspectable. Its call uses the case timeout. For output or file tasks:
+
+```toml
+[cases.oracle]
+reference = "solutions/words.py"
+function = "write_words"
+returns = false
+stdout = true
+files = ["counts.txt"]
+```
+
+By default a reference supplies the return expectation. `returns = false` opts out;
+`returns = true` explicitly allows Python `None` as an answer as well. An implicit
+`None` is refused to catch a missing return. `stdout = true` captures the complete call
+output. `files` captures complete UTF-8 text files (at most 1 Mi characters each).
+Missing, oversized or invalid UTF-8 files, truncated stdout and unserialisable return
+values stop preparation. Stdout is limited to 64 KiB, as in every teacher observation.
+
+`raises = "ValueError"` requires that exception (or a subclass), and defaults `returns`
+to false. A successful return, another exception, a timeout, a failed import or a missing
+reference/entry stops preparation. No student is graded and no results are published.
+Use `raises` only for the intended input error; it never treats an arbitrary reference
+failure as a student expectation. Exception messages are not compared.
+
+There is no silent precedence between answer sources. A return-producing oracle
+conflicts with `expect`; `stdout = true` conflicts with `expected_stdout`; each oracle
+file conflicts with the same `expect_files` path. Expectations for other observations
+may coexist. `raises` cannot coexist with a return expectation or a value checker.
+An oracle may declare exactly one of `reference`, `rhai`, `check`; `oracle.check` cannot
+replace a case's `check`. A value checker can judge a reference return for domain-specific
+equivalence. A fixed case's Rhai oracle sees its literal arguments as `args`; a template's
+Rhai oracle sees them by parameter name. Rhai cannot resolve `$references`.
+
+Reference/Rhai oracles currently answer independent function cases. Scenarios, method
+or attribute targets, script cases and top-level setup with an oracle are refused.
+Use explicit expectations or teacher checkers for those protocols.
 
 ### Seeds
 
@@ -227,32 +284,44 @@ seed below 2⁵³; `grade` prints it (`drew seed 81234`), and writing `seed = 81
 reproduces those inputs. More draws never change the earlier ones. Two templates with
 the same seed and rules draw the same inputs.
 
-### Frozen inputs
+### Frozen inputs and answers
 
 `grade` and `run` write the inputs they graded on beside `--output`:
 `output/results.json` gets `output/results.cases.json`, and `--archive` adds
 `cases_<tests>.json`. For each template the file records every concrete case's arguments,
 the seed and how it was chosen, the settings, and the version of the generator that drew
-them. It is written after the results, so an interrupted run replaces neither.
+them. Format 2 additionally records every computed answer, the resolved configuration,
+SHA-256 fingerprints of reference files, declared teacher imports, Python checkers and staged data
+(directories recursively), the Python executable, and the oracle/harness protocol.
+A bundle containing only fixed-input oracles is also frozen. Answers are fully prepared
+in memory before students run; the file is written after the results.
 
-`--replay output/results.cases.json` grades on those inputs as they are, without
-regenerating them: for a regrade after fixing a checker, or for late submissions. Replay
-refuses if the spec's `args`, `samples`, `count` or declared seed changed, or if the file
-does not agree with itself. Oracles, checks and timeouts may change, and are re-run on
-the frozen inputs. The file holds inputs only, so a changed reference implementation
-gives new answers.
+`--replay output/results.cases.json` reuses the inputs **and answers**, without executing
+reference entries or Rhai oracles again. Replay refuses if inputs, the prepared spec's
+configuration (including checks/timeouts), recorded source contents, runtime or protocol
+changed, or if answers are missing or fail their checksum. Restore the original bundle
+or prepare without `--replay`; use `--fresh` when replacing an existing freeze. For the
+same randomly drawn inputs after a correction, first write the recorded seed into the
+spec. Format 1 input-only files are refused with a request to prepare afresh.
 
-A fresh run that would draw other inputs than the ones frozen beside `--output` refuses
+Source paths are recorded as absolute paths; moving a bundle requires fresh preparation.
+All local reference dependencies must be declared in `meta.imports` or `meta.data_files`
+to enter the fingerprint. Ambient state and installed package contents are not captured;
+keep references deterministic and use `oracle.version = "..."` to invalidate answers
+when an external dependency changes. The checksum detects accidental edits, not hostile
+rewrites of a teacher-owned artifact.
+
+A fresh run that would replace different inputs, answers or answer sources beside `--output` refuses
 before any student runs: pass `--replay` to use them again, or `--fresh` to replace them.
 With a fixed or default seed and an unchanged spec the inputs are the same, and the run
-goes ahead; so does writing a drawn seed back as `seed = N`. A batch with no templates
-takes away the inputs an earlier batch left beside `--output`, after the same check.
+goes ahead; so does writing a drawn seed back as `seed = N`. A batch with neither
+templates nor computed answers removes an earlier freeze after the same check.
 
 From Python, `scriptmark.grade(subs, tests, freeze="cases.json")` writes the file, and
 `replay="cases.json"` uses one. A `seed = "random"` template needs `freeze=`, so that the
 seed is never lost, and a `freeze=` path that cannot be written is refused before any
-student runs. The file goes where you say, whatever it held before; with no templates it
-holds none.
+student runs. The file goes where you say, whatever it held before; without templates
+or computed answers it holds empty maps.
 
 ### Weight
 

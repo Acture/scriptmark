@@ -16,6 +16,11 @@ pub trait Executor: Send + Sync + 'static {
 	/// Language identifier (e.g. "python").
 	fn language(&self) -> &str;
 
+	/// Configuration that can change reference answers; part of the frozen contract.
+	fn identity(&self) -> Result<String, String> {
+		Ok(self.language().to_string())
+	}
+
 	/// Pick the student's file for a spec. P-673 owns the rule.
 	fn locate<'a>(&self, files: &'a [StudentFile], spec: &TestSpec) -> Option<&'a StudentFile>;
 

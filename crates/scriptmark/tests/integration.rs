@@ -404,6 +404,7 @@ count = 5
 seed = 7
 [cases.parametrize.oracle]
 reference = "reference/lab.py"
+function = "larger"
 "#,
 	);
 	let students = [
@@ -1110,9 +1111,9 @@ async fn test_a_bundle_that_cannot_be_honoured_is_refused_before_grading() {
 		),
 		(
 			spec(
-				"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\n",
+				"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/bad.py\"\nfunction = \"f\"\n",
 			),
-			"reference implementation 'f' did not return a value",
+			"reference implementation 'f' produced an unexpected outcome",
 		),
 	];
 	for (spec, needle) in refusals {
@@ -1184,7 +1185,7 @@ async fn test_every_name_must_mean_exactly_one_thing() {
 		),
 		(
 			spec(
-				"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\n",
+				"[[cases]]\nname = \"x\"\n[cases.parametrize.args]\nx = \"int(0, 1)\"\n[cases.parametrize.random]\ncount = 1\n[cases.parametrize.oracle]\nreference = \"reference/none.py\"\nfunction = \"f\"\n",
 				&[],
 			),
 			"returned None",
