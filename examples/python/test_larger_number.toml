@@ -68,13 +68,16 @@ expect_error = "TypeError"
 [[cases]]
 name = "random int pairs"
 
-[cases.parametrize]
-count = 30
-seed = 42
-
 [cases.parametrize.args]
 a = "int(-1000, 1000)"
 b = "int(-1000, 1000)"
+
+[cases.parametrize]
+samples = [[0, 0], [-1000, 1000]]   # boundaries, always run
+
+[cases.parametrize.random]
+count = 30
+seed = 42
 
 [cases.parametrize.oracle]
 rhai = "if a >= b { a } else { b }"
@@ -82,13 +85,13 @@ rhai = "if a >= b { a } else { b }"
 [[cases]]
 name = "random float pairs"
 
-[cases.parametrize]
-count = 10
-seed = 99
-
 [cases.parametrize.args]
 a = "float(-100.0, 100.0)"
 b = "float(-100.0, 100.0)"
+
+[cases.parametrize.random]
+count = 10
+seed = 99
 
 [cases.parametrize.oracle]
 rhai = "if a >= b { a } else { b }"

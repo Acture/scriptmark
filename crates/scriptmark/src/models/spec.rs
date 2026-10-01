@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-use serde::de::{self, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
 
 /// Configuration for lint-based code style scoring.
@@ -182,21 +183,200 @@ pub struct Oracle {
 	pub check: Option<String>,
 }
 
-/// Parametrize configuration — auto-generate test cases.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A template: concrete cases from written samples and from random draws.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Parametrize {
-	/// Number of test cases to generate.
-	pub count: usize,
-	/// Random seed for reproducibility.
+	/// The parameters, `name = "rule"`, in call order: the order they are written.
+	#[serde(default, deserialize_with = "call_order")]
+	pub args: Vec<Param>,
+	/// Inputs written out, each a list of values in call order, like a fixed case's
+	/// `args`. A sample is an input, never an answer.
 	#[serde(default)]
-	pub seed: Option<u64>,
-	/// Generator expressions per argument. Key = arg name, Value = generator string.
+	pub samples: Vec<Vec<Value>>,
+	/// Random draws from the rules in `args`.
 	#[serde(default)]
-	pub args: BTreeMap<String, String>,
+	pub random: Option<Random>,
 	/// How to determine the expected output.
 	#[serde(default)]
 	pub oracle: Oracle,
+	/// Refused: moved to `[random]`.
+	#[serde(default, skip_serializing)]
+	pub count: Option<Value>,
+	/// Refused: moved to `[random]`.
+	#[serde(default, skip_serializing)]
+	pub seed: Option<Value>,
+}
+
+impl Parametrize {
+	/// Everything that decides the inputs.
+	pub fn inputs(&self) -> Inputs {
+		Inputs {
+			args: self.args.clone(),
+			samples: self.samples.clone(),
+			random: self.random.clone(),
+		}
+	}
+}
+
+/// Everything that decides a template's inputs, and nothing that judges them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inputs {
+	pub args: Vec<Param>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub samples: Vec<Vec<Value>>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub random: Option<Random>,
+}
+
+impl Inputs {
+	/// The parameter names, in call order.
+	pub fn names(&self) -> Vec<&str> {
+		self.args.iter().map(|p| p.name.as_str()).collect()
+	}
+
+	/// How many random draws.
+	pub fn draws(&self) -> usize {
+		self.random.as_ref().map_or(0, |r| r.count)
+	}
+
+	/// Whether the draws use a seed: there are draws, and parameters to draw.
+	pub fn seeded(&self) -> bool {
+		self.random.is_some() && !self.args.is_empty()
+	}
+}
+
+/// One generated parameter, written `{ name = "rule" }`. Its place in `args` is its place
+/// in the call; its name binds it in a Rhai oracle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Param {
+	pub name: String,
+	pub rule: String,
+}
+
+impl Serialize for Param {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		let mut map = serializer.serialize_map(Some(1))?;
+		map.serialize_entry(&self.name, &self.rule)?;
+		map.end()
+	}
+}
+
+impl<'de> Deserialize<'de> for Param {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		let mut entries = BTreeMap::<String, String>::deserialize(deserializer)?.into_iter();
+		match (entries.next(), entries.next()) {
+			(Some((name, rule)), None) => Ok(Param { name, rule }),
+			_ => Err(de::Error::custom(
+				"a parameter is one `name = \"rule\"` pair, e.g. { low = \"int(0, 9)\" }: give each parameter its own entry",
+			)),
+		}
+	}
+}
+
+/// `args` in call order: a table, read in the order its keys are written, or several
+/// `[[args]]` blocks, read one after another. Nothing is sorted.
+fn call_order<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Param>, D::Error> {
+	struct CallOrder;
+
+	impl<'de> Visitor<'de> for CallOrder {
+		type Value = Vec<Param>;
+
+		fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+			f.write_str("a table of parameters in call order, each `name = \"rule\"`")
+		}
+
+		fn visit_map<M: MapAccess<'de>>(self, mut map: M) -> Result<Vec<Param>, M::Error> {
+			let mut params = Vec::new();
+			while let Some((name, rule)) = map.next_entry()? {
+				params.push(Param { name, rule });
+			}
+			Ok(params)
+		}
+
+		fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<Param>, A::Error> {
+			struct Block(Vec<Param>);
+
+			impl<'de> Deserialize<'de> for Block {
+				fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+					deserializer.deserialize_map(CallOrder).map(Block)
+				}
+			}
+
+			let mut params = Vec::new();
+			while let Some(Block(block)) = seq.next_element()? {
+				params.extend(block);
+			}
+			Ok(params)
+		}
+	}
+
+	deserializer.deserialize_any(CallOrder)
+}
+
+/// Random draws from a template's rules.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Random {
+	/// How many draws.
+	pub count: usize,
+	/// Omitted means 0.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub seed: Option<Seed>,
+}
+
+/// A declared seed: a number, or `"random"` to draw one and record it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seed {
+	Fixed(u64),
+	Random,
+}
+
+impl Serialize for Seed {
+	fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+		match self {
+			Seed::Fixed(n) => serializer.serialize_u64(*n),
+			Seed::Random => serializer.serialize_str("random"),
+		}
+	}
+}
+
+impl<'de> Deserialize<'de> for Seed {
+	fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+		struct SeedVisitor;
+
+		impl Visitor<'_> for SeedVisitor {
+			type Value = Seed;
+
+			fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+				f.write_str("a seed: a whole number, 0 or more, or \"random\"")
+			}
+
+			fn visit_u64<E: de::Error>(self, v: u64) -> Result<Seed, E> {
+				Ok(Seed::Fixed(v))
+			}
+
+			fn visit_i64<E: de::Error>(self, v: i64) -> Result<Seed, E> {
+				u64::try_from(v).map(Seed::Fixed).map_err(|_| {
+					E::custom(format!(
+						"seed {v} is negative: a seed is a whole number, 0 or more, or \"random\""
+					))
+				})
+			}
+
+			fn visit_str<E: de::Error>(self, v: &str) -> Result<Seed, E> {
+				match v {
+					"random" => Ok(Seed::Random),
+					_ => Err(E::custom(format!(
+						"seed \"{v}\" is not a seed: write a whole number, 0 or more, or \"random\""
+					))),
+				}
+			}
+		}
+
+		deserializer.deserialize_any(SeedVisitor)
+	}
 }
 
 /// What a call runs.

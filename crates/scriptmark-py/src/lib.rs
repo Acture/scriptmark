@@ -9,6 +9,8 @@ use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::export::word;
 use scriptmark::grading::grade_all;
 use scriptmark::models::{AssignmentInput, GradeOutcome, StudentReport, TestSpec};
+use scriptmark::runner::frozen::{self, Frozen, FrozenError, Generation};
+use scriptmark::runner::generation::draws_a_seed;
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
 use scriptmark::runner::prepare::prepare;
 use scriptmark::runner::python::PythonExecutor;
@@ -250,18 +252,59 @@ fn load_spec(path: String) -> PyResult<PyTestSpec> {
 	Ok(PyTestSpec { inner: spec })
 }
 
+/// Frozen inputs that cannot be read: missing is the OS error, anything else a ValueError.
+fn frozen_error(e: FrozenError) -> PyErr {
+	match &e {
+		FrozenError::Io(_, io) if io.kind() == std::io::ErrorKind::NotFound => {
+			pyo3::exceptions::PyFileNotFoundError::new_err(e.to_string())
+		}
+		FrozenError::Io(..) => pyo3::exceptions::PyOSError::new_err(e.to_string()),
+		FrozenError::Invalid(..) => pyo3::exceptions::PyValueError::new_err(e.to_string()),
+	}
+}
+
+/// Where generated inputs come from, and where they go.
+struct Freezing<'a> {
+	/// Write the inputs graded on here.
+	freeze: Option<&'a str>,
+	/// Grade on the inputs frozen here instead of generating them.
+	replay: Option<&'a str>,
+}
+
+impl Freezing<'_> {
+	/// Write the inputs graded on, once everything else has succeeded.
+	fn save(&self, inputs: &Frozen) -> PyResult<()> {
+		match self.freeze {
+			Some(path) => inputs
+				.write(Path::new(path))
+				.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}"))),
+			None => Ok(()),
+		}
+	}
+}
+
 /// Run tests for all students, returning a list of raw result dicts.
+///
+/// `freeze` writes the generated inputs to a file; `replay` grades on the inputs frozen in
+/// one instead of generating them.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3"))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", freeze=None, replay=None))]
 fn run(
 	py: Python<'_>,
 	submissions: Vec<String>,
 	tests: String,
 	timeout: u64,
 	python: &str,
+	freeze: Option<String>,
+	replay: Option<String>,
 ) -> PyResult<PyObject> {
 	let specs = load_specs_from_dir(Path::new(&tests)).map_err(spec_error)?;
-	let results = run_grading(&submissions, specs, timeout, python)?;
+	let freezing = Freezing {
+		freeze: freeze.as_deref(),
+		replay: replay.as_deref(),
+	};
+	let (results, inputs) = run_grading(&submissions, specs, timeout, python, &freezing)?;
+	freezing.save(&inputs)?;
 	let json_val = serde_json::to_value(&results)
 		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 	json_to_py(py, &json_val)
@@ -271,15 +314,19 @@ fn run(
 /// policy — `assignment.toml`, given or found beside the tests directory, exactly as the
 /// CLI reads it.
 ///
+/// `freeze` and `replay` are as for `run`.
+///
 /// Returns a list of StudentResult objects.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None))]
 fn grade(
 	submissions: Vec<String>,
 	tests: String,
 	timeout: u64,
 	python: &str,
 	assignment: Option<String>,
+	freeze: Option<String>,
+	replay: Option<String>,
 ) -> PyResult<Vec<PyStudentResult>> {
 	let value_error = |e: anyhow::Error| pyo3::exceptions::PyValueError::new_err(format!("{e:#}"));
 	let mut declared =
@@ -290,8 +337,13 @@ fn grade(
 		scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
 			.map_err(value_error)?;
 
-	let mut reports = run_grading(&submissions, specs, timeout, python)?;
+	let freezing = Freezing {
+		freeze: freeze.as_deref(),
+		replay: replay.as_deref(),
+	};
+	let (mut reports, inputs) = run_grading(&submissions, specs, timeout, python, &freezing)?;
 	grade_all(&mut reports, &declared.assignment.items, &policy).map_err(value_error)?;
+	freezing.save(&inputs)?;
 
 	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
 	Ok(reports
@@ -300,13 +352,35 @@ fn grade(
 		.collect())
 }
 
-/// Shared logic: discover submissions, run the specs through the orchestrator.
+/// Shared logic: discover submissions, run the specs through the orchestrator. Returns the
+/// reports and the inputs they were graded on, for `Freezing::save`.
+///
+/// A seed drawn with nowhere to keep it could never be replayed, and a `freeze` path that
+/// cannot be written would lose the inputs after the whole class ran: both are refused
+/// before any student runs.
 fn run_grading(
 	submissions: &[String],
 	specs: Vec<TestSpec>,
 	timeout: u64,
 	python: &str,
-) -> PyResult<Vec<StudentReport>> {
+	freezing: &Freezing,
+) -> PyResult<(Vec<StudentReport>, Frozen)> {
+	let generation = match freezing.replay {
+		Some(path) => Generation::Replay(Frozen::load(Path::new(path)).map_err(frozen_error)?),
+		None => Generation::fresh(),
+	};
+	if freezing.replay.is_none()
+		&& freezing.freeze.is_none()
+		&& let Some((spec, case)) = draws_a_seed(&specs)
+	{
+		return Err(pyo3::exceptions::PyValueError::new_err(format!(
+			"case '{case}' in '{spec}' draws a random seed: pass freeze='cases.json' to keep it, or declare seed = N"
+		)));
+	}
+	if let Some(path) = freezing.freeze {
+		frozen::writable(Path::new(path))
+			.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}")))?;
+	}
 	let input = local_input(submissions)?;
 
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
@@ -320,10 +394,12 @@ fn run_grading(
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
 	rt.block_on(async {
-		let bundles = prepare(specs, executor.clone(), timeout)
+		let bundles = prepare(specs, &generation, executor.clone(), timeout)
 			.await
 			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-		Ok(run_all(&input.students, bundles.into(), executor, &options).await)
+		let inputs = Frozen::of(&bundles);
+		let reports = run_all(&input.students, bundles.into(), executor, &options).await;
+		Ok((reports, inputs))
 	})
 }
 

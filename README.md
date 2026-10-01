@@ -47,6 +47,10 @@ scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 # Run tests only (raw JSON output)
 scriptmark run submissions/ -t tests/ -o results.json
 
+# Generated inputs are frozen beside the results (output/results.cases.json);
+# grade late submissions on exactly the same inputs, into results of their own
+scriptmark grade late/ -t tests/ --replay output/results.cases.json -o output/late.json
+
 # Detect plagiarism
 scriptmark similarity submissions/ --threshold 0.8
 
@@ -73,8 +77,9 @@ scriptmark tui grades.db
 ```python
 import scriptmark
 
-# One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...)
-results = scriptmark.grade(["submissions/"], "tests/")
+# One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...).
+# freeze= keeps the generated inputs; replay= grades on ones kept earlier.
+results = scriptmark.grade(["submissions/"], "tests/", freeze="output/cases.json")
 for r in results:
     if r.grade is None:
         print(f"{r.student_id}: withheld ({r.reason})")
@@ -119,11 +124,13 @@ expect = -1
 
 [[cases]]
 name = "random inputs"
-[cases.parametrize]
-count = 20
-seed = 42
-[cases.parametrize.args]
+[cases.parametrize.args]             # one line per parameter, in call order
 nums = "list(int(-100, 100), 5, 20)"
+[cases.parametrize]
+samples = [[[7]], [[0, 0, 0]]]        # inputs always run, like fixed args
+[cases.parametrize.random]
+count = 20
+seed = 42                             # omit for 0; "random" draws one and records it
 [cases.parametrize.oracle]
 rhai = "nums.sort(); nums[nums.len() - 1]"
 ```

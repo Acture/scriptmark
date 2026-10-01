@@ -11,6 +11,7 @@ Runnable examples, each with a correct and a wrong student:
 | a pure function | [`examples/bundles/pure_function`](../examples/bundles/pure_function) |
 | a shared object | [`examples/bundles/shared_object`](../examples/bundles/shared_object) |
 | reading and writing files | [`examples/bundles/file_io`](../examples/bundles/file_io) |
+| generated cases: samples, draws and an oracle | [`examples/bundles/generated_cases`](../examples/bundles/generated_cases) |
 
 ```sh
 scriptmark grade examples/bundles/shared_object/submissions -t examples/bundles/shared_object/tests
@@ -146,6 +147,119 @@ check = { rhai = "type_of(result) == \"array\" && result.contains(5)" }
 
 A Rhai expression may run at most a million operations; one that loops past that on an
 answer has rejected it, like any other checker failure.
+
+## Generated cases
+
+A **template** turns one `[[cases]]` entry into many concrete cases: inputs you write out
+(`samples`), and inputs drawn at random from rules (`[cases.parametrize.random]`). The
+concrete cases are made once, before any student runs, and every student is graded on
+the same ones.
+
+```toml
+[[cases]]
+name = "clamp"
+
+[cases.parametrize.args]        # in call order: clamp(value, low, high)
+value = "choice([-100, -75, -25, 0, 25, 75, 100])"
+low = "int(-49, -26)"
+high = "int(26, 49)"
+
+[cases.parametrize]
+samples = [[-30, -30, 30], [30, -30, 30]]   # always run, written like fixed args
+
+[cases.parametrize.random]      # optional: random draws from the rules above
+count = 12
+seed = 7                        # omit for 0; "random" draws one and records it
+
+[cases.parametrize.oracle]
+rhai = "if value < low { low } else if value > high { high } else { value }"
+```
+
+- **`args`** declares every parameter: its name, its place in the call and its rule. The
+  order you write them in is the order of the arguments; nothing is sorted. Inline,
+  `args = { value = "...", low = "..." }` is the same thing. A function that takes no
+  arguments has no `args`.
+- **`samples`** are inputs, each a list of values in call order, exactly like a fixed
+  case's `args`. A sample is never an answer.
+- **`[random]`** draws `count` cases, from 1 to 10000, from the rules. Without it only the
+  samples run.
+- Samples and draws mix in one template, and templates mix with fixed cases in one spec.
+
+The concrete cases are named `clamp [sample 0]`, `clamp [sample 1]`, …, then `clamp [0]`,
+`clamp [1]`, …: samples first, then draws, in order.
+
+| Rule | Draws |
+| -- | -- |
+| `int(min, max)` | an integer in `[min, max]`, over any 64-bit range |
+| `float(min, max)` | a float in `[min, max]` |
+| `bool()` | `true` or `false` |
+| `str(min_len, max_len)` | lowercase letters and digits |
+| `choice([v1, v2, ...])` | one of the listed JSON values |
+| `list(rule, min_len, max_len)` | a list drawn from `rule`, nesting up to 8 deep |
+
+Every rule must parse, even one that only samples use: `int(5, 1)`, `float(0, inf)`,
+`choice([])`, `choice([1, null])` or `bool(1)` is refused before grading. A template's draws
+may add up to at most 1,000,000 values or characters at worst.
+
+### Answers
+
+A generated input carries no answer. Each concrete case gets its answer from:
+
+- `oracle.rhai`, computed from the arguments by name;
+- `oracle.reference`, your implementation, called with the same arguments;
+- `oracle.check = "sorted"`, a property of the value alone;
+- or a fixed `expect`, `expect_error` or `check` on the template, the same for every
+  concrete case.
+
+An answer that cannot fit its checker, such as a list under `approx`, is refused before
+grading. A `None` inside a reference's answer is kept. A Rhai oracle sees each argument
+as the student does: `"$$x"` in a sample or a `choice` is the literal text `$x` to both. A
+`$name` reference is refused there, because a generated value is frozen as written.
+
+A reference implementation gets the arguments in the same order as the student, so it
+cannot show you that the order is wrong. A Rhai oracle names them, and can.
+
+### Seeds
+
+The same seed and the same rules give the same inputs, on every machine, for as long as
+the generator version stays the same. An omitted seed is 0. `seed = "random"` draws a
+seed below 2⁵³; `grade` prints it (`drew seed 81234`), and writing `seed = 81234` back
+reproduces those inputs. More draws never change the earlier ones. Two templates with
+the same seed and rules draw the same inputs.
+
+### Frozen inputs
+
+`grade` and `run` write the inputs they graded on beside `--output`:
+`output/results.json` gets `output/results.cases.json`, and `--archive` adds
+`cases_<tests>.json`. For each template the file records every concrete case's arguments,
+the seed and how it was chosen, the settings, and the version of the generator that drew
+them. It is written after the results, so an interrupted run replaces neither.
+
+`--replay output/results.cases.json` grades on those inputs as they are, without
+regenerating them: for a regrade after fixing a checker, or for late submissions. Replay
+refuses if the spec's `args`, `samples`, `count` or declared seed changed, or if the file
+does not agree with itself. Oracles, checks and timeouts may change, and are re-run on
+the frozen inputs. The file holds inputs only, so a changed reference implementation
+gives new answers.
+
+A fresh run that would draw other inputs than the ones frozen beside `--output` refuses
+before any student runs: pass `--replay` to use them again, or `--fresh` to replace them.
+With a fixed or default seed and an unchanged spec the inputs are the same, and the run
+goes ahead; so does writing a drawn seed back as `seed = N`. A batch with no templates
+takes away the inputs an earlier batch left beside `--output`, after the same check.
+
+From Python, `scriptmark.grade(subs, tests, freeze="cases.json")` writes the file, and
+`replay="cases.json"` uses one. A `seed = "random"` template needs `freeze=`, so that the
+seed is never lost, and a `freeze=` path that cannot be written is refused before any
+student runs. The file goes where you say, whatever it held before; with no templates it
+holds none.
+
+### Weight
+
+Under proportional scoring every concrete case weighs the same, so a boundary sample is
+`1 / cases` of its item, and weighs less as `count` grows. The item's points never change
+with `count`. To make samples count for more, give them an item of their own, or use
+`aggregation = "all_or_nothing"`.
 
 ## Files
 
@@ -325,7 +439,15 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 - a name two teacher modules export differently;
 - a tests directory with no specs;
 - a reference implementation that does not return;
-- missing data files.
+- missing data files;
+- `count` or `seed` outside `[cases.parametrize.random]`;
+- a parameter name that is not an identifier, or a name declared twice;
+- a rule that does not parse; a template with nothing to run; `count` outside 1–10000; a
+  seed on a template without `args`; draws past the size cap;
+- a sample of the wrong length, or holding `null` or a `$name`;
+- a generated answer that cannot fit its checker;
+- two specs with one `[meta] name`;
+- a replay whose settings or file do not match, and a fresh run over other frozen inputs.
 
 ## Migrating an older spec
 
@@ -333,7 +455,8 @@ These are errors when the bundle is loaded or prepared, before any student runs:
 | -- | -- |
 | `@checker("f")` in a teacher module | `check = { function = "check_f" }` on each case meant to use it — decorating no longer binds, and importing a module that still uses it fails with that instruction |
 | `copy_refs` | delete it: every case already gets fresh values |
-| `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module |
+| `setup.file = "gen.py"` | put fixed data in `[vars]`, `data_files` or a teacher module; generate inputs with a template |
+| `count` and `seed` in `[cases.parametrize]` | move them to `[cases.parametrize.random]`. The `[cases.parametrize.args]` table stays, but binds in the order written, not alphabetically: check it is the order the function takes them |
 | stdin → stdout cases with no function | add `script = true` |
 | a Rhai check like `result.len() > 0` | `result != () && result.len() > 0` |
 | `[lint] weight = 0.1` | delete it, and give lint points with `[grading] lint_points` |
@@ -343,7 +466,11 @@ Results can change on regrading. Students who printed inside a graded function, 
 imported an allowed module such as `random` or `csv`, used to fail every case and now
 pass. Cases that a name-bound `@checker` used to judge silently are now judged by what
 they declare. A case that paired `sorted` with `expect` used to pass any sorted list; the
-value must now equal `expect` too.
+value must now equal `expect` too. Generated inputs change once: the generator is new, so
+even a declared seed draws other values, and arguments that used to bind in alphabetical
+order now bind in the order written: an `args` table whose keys are not in the function's
+order now calls it with the arguments swapped. A rule that could not draw used to pass `null`, and
+now stops the bundle.
 
 Grades change too. They were a curve — `sqrt` by default — over the pass rate of every
 case pooled, so an item with more cases weighed more. They are now the raw
