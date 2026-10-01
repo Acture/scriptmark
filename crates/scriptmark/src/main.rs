@@ -64,11 +64,11 @@ enum Commands {
 /// `<stem>.cases.json`, once the run is done.
 #[derive(clap::Args)]
 struct FrozenArgs {
-	/// Grade on the inputs frozen in FILE instead of generating them
+	/// Reuse the inputs and oracle answers frozen in FILE, verifying their sources
 	#[arg(long, value_name = "FILE")]
 	replay: Option<PathBuf>,
 
-	/// Generate new inputs, even though the ones frozen beside --output differ
+	/// Prepare fresh inputs and answers, replacing a different freeze beside --output
 	#[arg(long, conflicts_with = "replay")]
 	fresh: bool,
 }

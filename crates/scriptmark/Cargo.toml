@@ -44,6 +44,7 @@ rars = "0.9.4"
 bzip2-rs = "0.1.2"
 lzma-rs = "0.3.0"
 tempfile = "3"
+sha2 = "0.10"
 
 [dev-dependencies]
 wiremock = "0.6.5"

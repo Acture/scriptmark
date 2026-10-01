@@ -47,8 +47,8 @@ scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 # Run tests only (raw JSON output)
 scriptmark run submissions/ -t tests/ -o results.json
 
-# Generated inputs are frozen beside the results (output/results.cases.json);
-# grade late submissions on exactly the same inputs, into results of their own
+# Inputs and oracle answers are frozen beside the results (output/results.cases.json);
+# grade late submissions on the same tests and answers, into results of their own
 scriptmark grade late/ -t tests/ --replay output/results.cases.json -o output/late.json
 
 # Detect plagiarism
@@ -134,6 +134,23 @@ seed = 42                             # omit for 0; "random" draws one and recor
 [cases.parametrize.oracle]
 rhai = "nums.sort(); nums[nums.len() - 1]"
 ```
+
+A fixed or generated case can instead use an independent teacher implementation:
+
+```toml
+[[cases]]
+name = "reference answer"
+args = [[3, 1, 5, 2]]
+[cases.oracle]
+reference = "solutions.py"
+function = "expected_max"
+```
+
+Reference answers are computed before grading and frozen for reuse. `--replay` verifies
+their sources and configuration, then reuses the answers without recomputing them.
+References can also supply declared exceptions, stdout and text files; see the
+[reference bundle](examples/bundles/reference_oracle) and
+[answer contract](docs/test-bundles.md#reference-implementations).
 
 Every case runs in its own process and working directory. When state should carry over —
 an object built once and driven step by step — say so with a scenario:

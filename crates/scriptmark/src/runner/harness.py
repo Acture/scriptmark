@@ -541,13 +541,17 @@ def run_check(check, value, stdout, timeout):
 	return {"error": raised}
 
 
-def observe_files(paths):
-	seen = {}
+def observe_files(paths: list[str]) -> dict[str, str | None]:
+	seen: dict[str, str | None] = {}
 	for path in paths:
 		try:
-			with open(path, encoding="utf-8", errors="replace") as fh:
-				seen[path] = fh.read(FILE_LIMIT)
-		except (OSError, ValueError):  # absent, a directory, unreadable: not the file asked for
+			with open(path, encoding="utf-8") as fh:
+				content: str = fh.read(FILE_LIMIT + 1)
+				seen[path] = content if len(content) <= FILE_LIMIT else None
+		except (
+			OSError,
+			ValueError,
+		):  # absent, oversized or invalid UTF-8 is no text expectation
 			seen[path] = None
 	return seen
 

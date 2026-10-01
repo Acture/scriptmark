@@ -270,6 +270,7 @@ args = { a = "int(0, 9)", b = "int(0, 9)" }
 samples = [[5, 5], [0, 9]]
 [cases.parametrize.oracle]
 reference = "reference/lab.py"
+function = "f"
 
 [[cases]]
 name = "draws with rhai and no seed"
@@ -331,7 +332,7 @@ async fn test_an_oracle_answer_that_cannot_fit_its_checker_is_refused() {
 	let bench = Bench::new();
 	bench.write("reference/lab.py", "def f(a):\n    return [a]\n");
 	let message = refusal(bench.spec(
-		"[[cases]]\nname = \"x\"\ncheck = \"approx\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
+		"[[cases]]\nname = \"x\"\ncheck = \"approx\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\nfunction = \"f\"\n",
 	))
 	.await;
 	assert!(
@@ -345,7 +346,7 @@ async fn test_a_reference_answer_holding_none_is_an_answer() {
 	let bench = Bench::new();
 	bench.write("reference/lab.py", "def f(a):\n    return [a, None]\n");
 	let b = bundle(bench.spec(
-		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
+		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\nfunction = \"f\"\n",
 	))
 	.await;
 	assert_eq!(b.spec.cases[0].expect, Some(json!([1, null])));
@@ -362,7 +363,7 @@ async fn test_a_failed_oracle_is_reported_once() {
 	let bench = Bench::new();
 	bench.write("reference/lab.py", "def f(a):\n    print(a)\n");
 	let message = refusal(bench.spec(
-		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1], [2]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\n",
+		"[[cases]]\nname = \"x\"\n[cases.parametrize]\nargs = { a = \"int(0, 9)\" }\nsamples = [[1], [2]]\n[cases.parametrize.oracle]\nreference = \"reference/lab.py\"\nfunction = \"f\"\n",
 	))
 	.await;
 	assert!(message.contains("returned None"), "{message}");
@@ -393,13 +394,12 @@ fn echo(bench: &Bench) -> TestSpec {
 const ECHO: &str = "def f(value, low, high):\n    return [value, low, high]\n";
 
 #[tokio::test]
-async fn test_replay_grades_the_frozen_rows_as_they_are() {
+async fn test_replay_accepts_generator_metadata_but_refuses_changed_answer_inputs() {
 	let bench = Bench::new();
 	let fresh = Frozen::of(&prepared(vec![echo(&bench)]).await.unwrap());
 	// Rows no rule could draw, from a generator this build is not: taken as they are.
 	let mut value: Value = serde_json::from_str(&fresh.to_json()).unwrap();
 	value["specs"]["t"]["clamp"]["generator"] = json!(999);
-	value["specs"]["t"]["clamp"]["cases"][3]["args"] = json!([5000, 5000, 5000]);
 	let edited = Frozen::from_json(&value.to_string()).unwrap();
 
 	let bundles = prepared_with(vec![echo(&bench)], &Generation::Replay(edited.clone()))
@@ -408,28 +408,35 @@ async fn test_replay_grades_the_frozen_rows_as_they_are() {
 	assert_eq!(Frozen::of(&bundles).specs, edited.specs);
 	let reports = run(bundles, &[bench.student("alice", ECHO)]).await;
 	let rows = evidence(&reports[0]);
-	let draw0 = rows.iter().find(|(name, ..)| name == "clamp [0]").unwrap();
-	assert_eq!(draw0.1, [json!(5000), json!(5000), json!(5000)]);
+	assert_eq!(rows.len(), 15);
 	assert_eq!(failed(&reports[0]), Vec::<String>::new());
+	value["specs"]["t"]["clamp"]["cases"][3]["args"] = json!([5000, 5000, 5000]);
+	let edited = Frozen::from_json(&value.to_string()).unwrap();
+	let message = prepared_with(vec![echo(&bench)], &Generation::Replay(edited))
+		.await
+		.unwrap_err();
+	assert!(
+		message.contains("frozen answers no longer match"),
+		"{message}"
+	);
 }
 
 #[tokio::test]
-async fn test_replay_reruns_a_corrected_oracle_on_the_same_inputs() {
+async fn test_replay_refuses_a_corrected_oracle_until_fresh_preparation() {
 	let bench = Bench::new();
 	let wrong = bench.spec(&CLAMP.replace(
 		"if value < low { low } else if value > high { high } else { value }",
 		"[high, low, value]",
 	));
 	let frozen = Frozen::of(&prepared(vec![wrong]).await.unwrap());
-	let bundles = prepared_with(vec![echo(&bench)], &Generation::Replay(frozen.clone()))
+	let message = prepared_with(vec![echo(&bench)], &Generation::Replay(frozen))
 		.await
-		.unwrap_or_else(|e| panic!("{e}"));
-	let recorded = &frozen.specs["t"]["clamp"].cases;
-	assert_eq!(bundles[0].spec.cases.len(), recorded.len());
-	for (case, row) in bundles[0].spec.cases.iter().zip(recorded) {
-		assert_eq!(case.args, row.args);
-		assert_eq!(case.expect, Some(Value::from(row.args.clone())));
-	}
+		.unwrap_err();
+	assert!(
+		message.contains("frozen answers no longer match"),
+		"{message}"
+	);
+	assert!(prepared(vec![echo(&bench)]).await.is_ok());
 }
 
 #[tokio::test]

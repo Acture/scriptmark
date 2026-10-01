@@ -168,19 +168,48 @@ impl CheckMethod {
 	}
 }
 
-/// Oracle — how to determine the expected output for generated inputs.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// An answer source, independent of how the inputs were supplied.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct Oracle {
-	/// Teacher's reference implementation file. Same function name, compare outputs.
+	/// Teacher's reference implementation file, resolved exactly.
 	#[serde(default)]
 	pub reference: Option<String>,
+	/// Exact public entry point in the reference file, independent of the student target.
+	#[serde(default)]
+	pub function: Option<String>,
+	/// Compare the returned value (defaults to true, or false when `raises` is set).
+	#[serde(default)]
+	pub returns: Option<bool>,
+	/// Capture the reference call's stdout as an expectation.
+	#[serde(default)]
+	pub stdout: bool,
+	/// Relative text files to capture after the reference call.
+	#[serde(default)]
+	pub files: Vec<String>,
+	/// Require this exception type. Any other exception is a preparation failure.
+	#[serde(default)]
+	pub raises: Option<String>,
+	/// Teacher-supplied version for dependencies not represented by bundle files.
+	#[serde(default)]
+	pub version: Option<String>,
 	/// Rhai expression computing expected value from generated args.
 	#[serde(default)]
 	pub rhai: Option<String>,
 	/// Built-in checker name (just verifies a property, no expected value).
 	#[serde(default)]
 	pub check: Option<String>,
+}
+
+impl Oracle {
+	pub fn computes(&self) -> bool {
+		self.reference.is_some() || self.rhai.is_some()
+	}
+
+	pub fn returns_value(&self) -> bool {
+		self.rhai.is_some()
+			|| (self.reference.is_some() && self.returns.unwrap_or(self.raises.is_none()))
+	}
 }
 
 /// A template: concrete cases from written samples and from random draws.
@@ -469,9 +498,20 @@ pub struct TestCase {
 	/// Generate concrete cases from this one.
 	#[serde(default)]
 	pub parametrize: Option<Parametrize>,
+
+	/// Answer source for either fixed or generated inputs. Cannot be combined with a
+	/// source under `parametrize.oracle`.
+	#[serde(default)]
+	pub oracle: Option<Oracle>,
 }
 
 impl TestCase {
+	pub fn answer_source(&self) -> Option<&Oracle> {
+		self.oracle
+			.as_ref()
+			.or_else(|| self.parametrize.as_ref().map(|p| &p.oracle))
+	}
+
 	/// The call this case makes, or `None` for a script run. Assumes a validated spec.
 	pub fn target(&self, default_function: Option<&str>) -> Option<Target> {
 		if self.script {

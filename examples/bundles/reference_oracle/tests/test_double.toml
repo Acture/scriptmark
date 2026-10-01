@@ -1,0 +1,44 @@
+[meta]
+name = "double"
+file = "double.py"
+function = "double"
+language = "python"
+
+[[cases]]
+name = "given input"
+args = [4]
+[cases.oracle]
+reference = "solutions.py"
+function = "answer"
+
+[[cases]]
+name = "samples and draws"
+[cases.parametrize.args]
+value = "int(0, 100)"
+[cases.parametrize]
+samples = [[0], [1]]
+[cases.parametrize.random]
+count = 3
+seed = 42
+[cases.oracle]
+reference = "solutions.py"
+function = "answer"
+
+[[cases]]
+name = "negative input"
+args = [-1]
+[cases.oracle]
+reference = "solutions.py"
+function = "answer"
+raises = "ValueError"
+
+[[cases]]
+name = "output and file"
+function = "write_double"
+args = [3]
+[cases.oracle]
+reference = "solutions.py"
+function = "write_answer"
+returns = false
+stdout = true
+files = ["answer.txt"]

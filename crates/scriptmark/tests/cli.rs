@@ -63,6 +63,90 @@ fn frozen(dir: &Path) -> Frozen {
 const GRADE: [&str; 5] = ["grade", "submissions", "-t", "tests", "-o"];
 
 #[test]
+fn test_reference_preparation_failure_publishes_nothing_and_preserves_prior_results() {
+	let temp: tempfile::TempDir = bench();
+	let dir: &Path = temp.path();
+	let spec: String = SPEC
+		.replace(
+			"rhai = \"if value < low { low } else if value > high { high } else { value }\"",
+			"reference = \"reference.py\"\nfunction = \"answer\"",
+		)
+		.replace("seed = \"random\"", "seed = 42");
+	std::fs::write(dir.join("tests/test_clamp.toml"), spec).unwrap();
+	let reference: std::path::PathBuf = dir.join("tests/reference.py");
+	std::fs::write(
+		&reference,
+		"def answer(value, low, high):\n    return max(low, min(value, high))\n",
+	)
+	.unwrap();
+	let first: Output = scriptmark(
+		dir,
+		&[
+			"grade",
+			"submissions",
+			"-t",
+			"tests",
+			"-o",
+			"out/results.json",
+		],
+	);
+	assert!(first.status.success(), "{}", stderr(&first));
+	let results: Vec<u8> = std::fs::read(dir.join("out/results.json")).unwrap();
+	let frozen_before: Frozen = frozen(dir);
+	std::fs::write(
+		&reference,
+		"def answer(value, low, high):\n    raise RuntimeError('broken reference')\n",
+	)
+	.unwrap();
+	for output in ["out/results.json", "out/new.json"] {
+		let failed: Output = scriptmark(
+			dir,
+			&[
+				"grade",
+				"submissions",
+				"-t",
+				"tests",
+				"-o",
+				output,
+				"--fresh",
+			],
+		);
+		assert!(!failed.status.success());
+		assert!(
+			stderr(&failed).contains("unexpected outcome"),
+			"{}",
+			stderr(&failed)
+		);
+	}
+	assert!(!dir.join("out/new.json").exists());
+	assert!(!dir.join("out/new.cases.json").exists());
+	assert_eq!(
+		std::fs::read(dir.join("out/results.json")).unwrap(),
+		results
+	);
+	assert_eq!(frozen(dir), frozen_before);
+	let replay: Output = scriptmark(
+		dir,
+		&[
+			"grade",
+			"submissions",
+			"-t",
+			"tests",
+			"-o",
+			"out/new.json",
+			"--replay",
+			"out/results.cases.json",
+		],
+	);
+	assert!(!replay.status.success());
+	assert!(
+		stderr(&replay).contains("frozen answers no longer match"),
+		"{}",
+		stderr(&replay)
+	);
+}
+
+#[test]
 fn test_grade_freezes_its_inputs_and_will_not_silently_replace_them() {
 	let dir = bench();
 	let dir = dir.path();

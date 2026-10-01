@@ -1,7 +1,7 @@
 //! Frozen inputs: every template's concrete cases for one batch, written beside its results
 //! so that a later run — a regrade, late submissions — can use exactly the same inputs.
 //!
-//! The file holds inputs only. What the right answer is stays with the oracles (P-676).
+//! Format 2 also freezes oracle answers and the sources/configuration that produced them.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::models::{Inputs, Seed};
+use crate::runner::answers::FrozenAnswers;
 use crate::runner::generation::{
 	DrawSeed, Generated, MAX_COUNT, Origin, concrete_name, origins, os_seed,
 };
@@ -18,7 +19,7 @@ use crate::runner::prepare::Bundle;
 use crate::spec_loader::{contains_null, plural, refs};
 
 /// The layout of the file. A newer one is refused by name, never half-read.
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// Every template's inputs, by spec name, then template name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,6 +29,7 @@ pub struct Frozen {
 	/// The build that wrote the file.
 	pub scriptmark: String,
 	pub specs: BTreeMap<String, BTreeMap<String, Generated>>,
+	pub answers: BTreeMap<String, FrozenAnswers>,
 }
 
 /// Where a batch's inputs come from.
@@ -64,12 +66,16 @@ impl Frozen {
 				.filter(|b| !b.generated.is_empty())
 				.map(|b| (b.spec.meta.name.clone(), b.generated.clone()))
 				.collect(),
+			answers: bundles
+				.iter()
+				.filter_map(|b| b.answers.clone().map(|a| (b.spec.meta.name.clone(), a)))
+				.collect(),
 		}
 	}
 
-	/// Whether no template made any inputs.
+	/// Whether there are neither generated inputs nor computed answers to preserve.
 	pub fn is_empty(&self) -> bool {
-		self.specs.values().all(BTreeMap::is_empty)
+		self.specs.values().all(BTreeMap::is_empty) && self.answers.is_empty()
 	}
 
 	pub fn to_json(&self) -> String {
@@ -88,7 +94,7 @@ impl Frozen {
 			None => Err("it has no format".into()),
 			Some(FORMAT) => serde_json::from_str(text).map_err(|e| e.to_string()),
 			Some(other) => Err(format!(
-				"it is format {other}, and this build reads format {FORMAT}"
+				"it is format {other}, and this build reads format {FORMAT}; prepare a fresh bundle to freeze both inputs and answers"
 			)),
 		}
 	}
@@ -108,9 +114,10 @@ impl Frozen {
 		Ok(())
 	}
 
-	/// The first template whose inputs differ between two freezes, or `None`. The inputs
+	/// The first changed template or answer contract, or `None`. The inputs
 	/// are the rows a student is given: how the seed was spelled or chosen, which generator
 	/// drew the rows and which build wrote the file do not make the same rows other inputs.
+	/// Computed answers additionally require an unchanged source/configuration contract.
 	pub fn first_difference(&self, other: &Frozen) -> Option<String> {
 		let specs: BTreeSet<&String> = self.specs.keys().chain(other.specs.keys()).collect();
 		for spec in specs {
@@ -121,6 +128,12 @@ impl Frozen {
 			let differs = |c: &&String| a.get(*c).map(|g| &g.cases) != b.get(*c).map(|g| &g.cases);
 			if let Some(case) = cases.into_iter().find(differs) {
 				return Some(format!("case '{case}' in '{spec}' differs"));
+			}
+		}
+		let answers: BTreeSet<&String> = self.answers.keys().chain(other.answers.keys()).collect();
+		for spec in answers {
+			if self.answers.get(spec) != other.answers.get(spec) {
+				return Some(format!("answers or their sources in '{spec}' differ"));
 			}
 		}
 		None
@@ -331,6 +344,7 @@ mod tests {
 		Frozen {
 			format: FORMAT,
 			scriptmark: "test".into(),
+			answers: BTreeMap::new(),
 			specs: BTreeMap::from([(
 				"spec".to_string(),
 				BTreeMap::from([("clamp".to_string(), entry)]),
@@ -399,11 +413,11 @@ mod tests {
 			&frozen(made(&inputs(1, None), (0, SeedSource::Default))).to_json(),
 		)
 		.unwrap();
-		value["format"] = json!(2);
+		value["format"] = json!(3);
 		value["specs"]["spec"]["clamp"]["cases"][0]["answer"] = json!(5);
 		let e = Frozen::from_json(&value.to_string()).unwrap_err();
 		assert!(
-			e.contains("format 2") && e.contains("reads format 1"),
+			e.contains("format 3") && e.contains("reads format 2"),
 			"{e}"
 		);
 		let e = Frozen::from_json("{\"specs\": {}}").unwrap_err();
@@ -509,13 +523,13 @@ mod tests {
 		);
 	}
 
-	/// Format 1 as it is written to disk: a rename or a new variant spelling breaks every
-	/// file already written, so the layout is pinned here literally.
+	/// Format 2 keeps the inputs' shape and adds a mandatory answer map.
 	#[test]
-	fn test_format_1_reads_as_written() {
+	fn test_format_2_reads_as_written_and_refuses_old_input_only_files() {
 		let text = r#"{
-			"format": 1,
+			"format": 2,
 			"scriptmark": "0.3.0",
+			"answers": {},
 			"specs": { "clamp": { "clamp": {
 				"generator": 1,
 				"inputs": {
@@ -554,6 +568,12 @@ mod tests {
 		assert_eq!(entry.cases[1].args, [json!(75), json!(-31)]);
 		let written: Value = serde_json::from_str(&f.to_json()).unwrap();
 		assert_eq!(written, serde_json::from_str::<Value>(text).unwrap());
+		let old = text.replace("\"format\": 2", "\"format\": 1");
+		assert!(
+			Frozen::from_json(&old)
+				.unwrap_err()
+				.contains("prepare a fresh bundle")
+		);
 	}
 
 	#[cfg(unix)]
