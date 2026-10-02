@@ -177,7 +177,8 @@ print(spec.name, spec.function, spec.num_cases)
 
 Teachers can configure student ownership, item file patterns, function aliases and
 per-student overrides in `assignment.toml`. Preview decisions and candidates with
-`scriptmark match`; unresolved conflicts withhold grades. See [matching rules](docs/matching.md).
+`scriptmark match`; unresolved conflicts withhold grades. See
+[matching rules](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/matching.md).
 
 ```toml
 [meta]
