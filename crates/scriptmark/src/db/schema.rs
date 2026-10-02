@@ -2,9 +2,9 @@ use rusqlite::Connection;
 
 use super::DbError;
 
-/// The schema this build writes. A database at any other version — including one made
-/// before grades were scored per item, which has none — is refused, not upgraded.
-pub const VERSION: i64 = 1;
+/// The schema this build writes. A database at any other version — one made before grading
+/// records, or before grades were scored per item — is refused, not upgraded.
+pub const VERSION: i64 = 2;
 
 pub fn migrate(conn: &Connection) -> Result<(), DbError> {
 	let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
@@ -29,24 +29,33 @@ pub fn migrate(conn: &Connection) -> Result<(), DbError> {
 			created_at TEXT DEFAULT (datetime('now'))
 		);
 
+		-- One score revision of one grading record's evidence.
 		CREATE TABLE IF NOT EXISTS sessions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			assignment TEXT NOT NULL,
-			spec_title TEXT,
-			grading_policy TEXT,
+			-- The record's evidence digest, and which of its revisions this is.
+			evidence TEXT NOT NULL,
+			revision INTEGER NOT NULL,
+			-- The test bundle's version: spec and source digests, seeds, answers (JSON).
+			bundle TEXT NOT NULL,
+			-- The revision's items and grading policy (JSON).
+			grading_policy TEXT NOT NULL,
 			student_count INTEGER NOT NULL DEFAULT 0,
 			-- NULL when nobody was graded.
 			avg_grade REAL,
-			created_at TEXT DEFAULT (datetime('now'))
+			created_at TEXT DEFAULT (datetime('now')),
+			UNIQUE(evidence, revision)
 		);
 
 		CREATE TABLE IF NOT EXISTS results (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			session_id INTEGER NOT NULL REFERENCES sessions(id),
 			student_id TEXT NOT NULL,
+			-- As the record holds them; the roster table only fills a missing name.
+			student_name TEXT,
+			canvas_user_id INTEGER,
 			pass_rate REAL NOT NULL,
-			-- 'graded' or 'withheld'; NULL when the results were never scored.
-			grade TEXT CHECK (grade IN ('graded', 'withheld')),
+			grade TEXT NOT NULL CHECK (grade IN ('graded', 'withheld')),
 			-- Why withheld, or why a graded 0 is a policy 0.
 			reason TEXT,
 			score REAL,

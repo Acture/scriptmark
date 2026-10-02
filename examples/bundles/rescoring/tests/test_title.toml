@@ -1,0 +1,17 @@
+# Title case: every word capitalised.
+
+[meta]
+name = "title"
+file = "text.py"
+function = "title_case"
+language = "python"
+
+[[cases]]
+name = "two words"
+args = ["hello world"]
+expect = "Hello World"
+
+[[cases]]
+name = "already titled"
+args = ["Hello"]
+expect = "Hello"

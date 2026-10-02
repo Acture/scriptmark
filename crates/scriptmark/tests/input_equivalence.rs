@@ -343,4 +343,7 @@ fn test_results_written_before_per_item_grading_are_refused() {
 	// they are not read as if they were today's results.
 	let raw = std::fs::read_to_string(fixture_root().join("legacy_results.json")).unwrap();
 	assert!(serde_json::from_str::<Vec<StudentReport>>(&raw).is_err());
+	// Nor is it a grading record: a list of reports is refused by what it is.
+	let err = scriptmark::record::Record::from_json(&raw).unwrap_err();
+	assert!(err.contains("before grading records"), "{err}");
 }

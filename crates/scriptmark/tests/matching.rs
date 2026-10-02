@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::matching::{Config, OwnerOverride, State};
 use scriptmark::models::{Cause, StudentReport};
+use scriptmark::record::Record;
 
 const SPEC: &str = r#"
 [meta]
@@ -75,8 +76,11 @@ impl Bench {
 
 	fn grades(&self) -> Vec<StudentReport> {
 		self.successful("grade");
-		serde_json::from_slice(&std::fs::read(self.path().join("out/result.json")).unwrap())
+		Record::load(&self.path().join("out/result.json"))
 			.unwrap()
+			.view(None)
+			.unwrap()
+			.reports
 	}
 }
 

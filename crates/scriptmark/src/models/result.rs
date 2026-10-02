@@ -210,6 +210,10 @@ pub struct StudentReport {
 	/// failed test case and scored.
 	#[serde(default)]
 	pub error: Option<String>,
+	/// What was graded: the attempt and the content of its files, so that evidence is never
+	/// reused for a submission that has since changed.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub submission: Option<SubmissionVersion>,
 	/// The grade and how it was reached. `None` until scored: `run` writes evidence only.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub grade: Option<Grade>,
@@ -229,6 +233,7 @@ impl StudentReport {
 			excused: false,
 			lint: None,
 			error: None,
+			submission: None,
 			grade: None,
 		}
 	}
@@ -282,6 +287,30 @@ impl StudentReport {
 			TestStatus::Failed
 		}
 	}
+}
+
+/// The selected attempt of a submission, as its bytes stood when it was graded. Identity,
+/// delivery state and excusal are the report's own fields; this holds only what they lack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubmissionVersion {
+	/// `None` when nothing was received.
+	pub attempt: Option<u32>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub submitted_at: Option<String>,
+	/// Every runnable file of the attempt, by path.
+	pub files: Vec<FileVersion>,
+	/// The archives those files were extracted from: a replaced archive is a changed
+	/// submission even while an earlier extraction still sits on disk.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub archives: Vec<FileVersion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileVersion {
+	pub path: std::path::PathBuf,
+	pub sha256: String,
 }
 
 /// What the style check found.

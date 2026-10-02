@@ -142,7 +142,7 @@ impl Frozen {
 
 /// A temporary file beside `path`, its directory made first. Its mode is left to the umask,
 /// as `std::fs::write` leaves it, rather than tempfile's owner-only default.
-fn scratch(path: &Path) -> std::io::Result<tempfile::NamedTempFile> {
+pub(crate) fn scratch(path: &Path) -> std::io::Result<tempfile::NamedTempFile> {
 	let dir = path
 		.parent()
 		.filter(|p| !p.as_os_str().is_empty())

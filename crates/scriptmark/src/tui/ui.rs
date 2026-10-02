@@ -32,8 +32,10 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 		.and_then(|i| app.sessions.get(i))
 		.map(|s| {
 			format!(
-				"  |  {}  |  {} students  |  avg {}",
+				"  |  {}  |  revision {} of evidence {}  |  {} students  |  avg {}",
 				s.assignment,
+				s.revision,
+				evidence_short(&s.evidence),
 				s.student_count,
 				s.avg_grade
 					.map(|a| format!("{a:.1}"))
@@ -257,13 +259,21 @@ fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_sessions(f: &mut Frame, area: Rect, app: &App) {
-	let header = Row::new(vec!["ID", "Assignment", "Students", "Avg Grade", "Date"])
-		.style(
-			Style::default()
-				.fg(Color::DarkGray)
-				.add_modifier(Modifier::BOLD),
-		)
-		.bottom_margin(1);
+	let header = Row::new(vec![
+		"ID",
+		"Assignment",
+		"Revision",
+		"Evidence",
+		"Students",
+		"Avg Grade",
+		"Date",
+	])
+	.style(
+		Style::default()
+			.fg(Color::DarkGray)
+			.add_modifier(Modifier::BOLD),
+	)
+	.bottom_margin(1);
 
 	let rows: Vec<Row> = app
 		.sessions
@@ -278,6 +288,8 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &App) {
 			Row::new(vec![
 				Cell::from(s.id.to_string()).style(Style::default().fg(Color::Cyan)),
 				Cell::from(s.assignment.as_str()),
+				Cell::from(s.revision.to_string()),
+				Cell::from(evidence_short(&s.evidence)).style(Style::default().fg(Color::DarkGray)),
 				Cell::from(s.student_count.to_string()),
 				Cell::from(
 					s.avg_grade
@@ -295,6 +307,8 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &App) {
 		[
 			Constraint::Min(4),
 			Constraint::Min(20),
+			Constraint::Min(8),
+			Constraint::Min(12),
 			Constraint::Min(10),
 			Constraint::Min(10),
 			Constraint::Min(20),
@@ -309,6 +323,11 @@ fn draw_sessions(f: &mut Frame, area: Rect, app: &App) {
 	);
 
 	f.render_widget(table, area);
+}
+
+/// Enough of an evidence digest to tell two apart at a glance.
+fn evidence_short(evidence: &str) -> &str {
+	&evidence[..evidence.len().min(12)]
 }
 
 fn draw_similarity(f: &mut Frame, area: Rect, app: &App) {

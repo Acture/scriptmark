@@ -3,7 +3,7 @@
 //! reference for the three fixture kinds P-674 names — a pure function, a shared object,
 //! and files read and written — for generated cases (P-675), and for scoring them:
 //! declared points, all or nothing under a curve, and items derived when nothing is
-//! declared.
+//! declared — and for rescoring the evidence under another policy (P-678).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -243,6 +243,74 @@ async fn test_the_number_of_draws_never_changes_an_items_points() {
 			4.0 * (cases - 2) as f64 / cases as f64,
 			"count = {count}"
 		);
+	}
+}
+
+/// The rescoring example, run as its comments say: graded, then rescored under
+/// `regrade.toml` with no interpreter on PATH, so nothing can have run.
+#[test]
+fn test_rescoring_example() {
+	let source = examples().join("bundles/rescoring");
+	let dir = tempfile::tempdir().unwrap();
+	for name in ["assignment.toml", "regrade.toml", "tests", "submissions"] {
+		copy(&source.join(name), &dir.path().join(name));
+	}
+	let scriptmark = |args: &[&str], path: Option<&str>| {
+		let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_scriptmark"));
+		command.current_dir(dir.path()).args(args);
+		if let Some(path) = path {
+			command.env("PATH", path);
+		}
+		let output = command.output().unwrap();
+		assert!(
+			output.status.success(),
+			"{}",
+			String::from_utf8_lossy(&output.stderr)
+		);
+	};
+	scriptmark(
+		&[
+			"grade",
+			"submissions",
+			"-t",
+			"tests",
+			"-o",
+			"out/results.json",
+		],
+		None,
+	);
+	scriptmark(
+		&[
+			"rescore",
+			"out/results.json",
+			"--assignment",
+			"regrade.toml",
+		],
+		Some(""),
+	);
+
+	let record = scriptmark::record::Record::load(&dir.path().join("out/results.json")).unwrap();
+	let grades = |revision: u32| {
+		let reports = record.view(Some(revision)).unwrap().reports;
+		(
+			graded(student(&reports, "alice")).2,
+			graded(student(&reports, "bob")).2,
+		)
+	};
+	// bob counts one of four word cases right: 1.5 of 6 points, then 0 of 4 all or nothing.
+	assert_eq!(grades(1), (100.0, 55.0));
+	assert_eq!(grades(2), (100.0, 60.0));
+}
+
+fn copy(from: &Path, to: &Path) {
+	if from.is_dir() {
+		std::fs::create_dir_all(to).unwrap();
+		for entry in std::fs::read_dir(from).unwrap() {
+			let entry = entry.unwrap();
+			copy(&entry.path(), &to.join(entry.file_name()));
+		}
+	} else {
+		std::fs::copy(from, to).unwrap();
 	}
 }
 

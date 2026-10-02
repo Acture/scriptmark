@@ -66,9 +66,7 @@ and git push
 Push the notes successfully **before** updating the code repository's gitlink. If a
 fast-forward fails, resolve the divergence while preserving both versions. Do not
 force-push or discard notes. Runtime code, examples and artifacts stay in this repository;
-documentation edits belong on the notes branch. Original documentation history and
-the P-673 worktree handoff are recorded in
-[the migration record](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/MIGRATION.md).
+documentation edits belong on the notes branch.
 
 Only when explicitly reproducing an older code revision, restore its recorded notes
 with `git submodule update --init --checkout -- notes` from a clean notes checkout.
@@ -112,8 +110,17 @@ never pushed — instead of scoring it as 0.
 # Grade with roster and database storage; points and any curve come from assignment.toml
 scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 
-# Run tests only (raw JSON output)
-scriptmark run submissions/ -t tests/ -o results.json
+# Run tests only: the grading record's evidence, with no score revision yet
+scriptmark run submissions/ -t tests/ -o output/results.json
+
+# Score the saved evidence again after editing points or the curve in assignment.toml.
+# Nothing runs; revision 2 is added beside revision 1, and whose grade changed is shown.
+# Changed specs, teacher files, submissions or [matching] rules are refused: grade again.
+scriptmark rescore output/results.json
+
+# Read any revision: summarize, export grades as CSV, report
+scriptmark summarize output/results.json --revision 1
+scriptmark export output/results.json --revision 2 -o grades.csv
 
 # Preview student/file/function matching; edit assignment.toml to resolve candidates
 scriptmark match submissions/ -t tests/ -o output/matches.json
@@ -126,7 +133,7 @@ scriptmark grade late/ -t tests/ --replay output/results.cases.json -o output/la
 scriptmark similarity submissions/ --threshold 0.8
 
 # Generate HTML report
-scriptmark report results.json -o report.html
+scriptmark report output/results.json -o report.html
 
 # Canvas LMS: find a course, fetch an assignment, grade it offline, push grades back
 export CANVAS_TOKEN=... CANVAS_URL=https://canvas.university.edu
@@ -134,7 +141,7 @@ scriptmark canvas courses
 scriptmark canvas assignments --course-id 12345
 scriptmark canvas fetch --course-id 12345 --assignment-id 67890 -o canvas/hw1
 scriptmark grade --canvas canvas/hw1 -t tests/
-scriptmark grades-push --course-id 12345 --assignment-id 67890 output/results.json
+scriptmark grades-push --course-id 12345 --assignment-id 67890 output/results.json --revision 2
 
 # Or just pull the roster
 scriptmark roster-pull --course-id 12345
@@ -149,13 +156,20 @@ scriptmark tui grades.db
 import scriptmark
 
 # One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...).
-# freeze= keeps the generated inputs; replay= grades on ones kept earlier.
-results = scriptmark.grade(["submissions/"], "tests/", freeze="output/cases.json")
+# freeze= keeps the generated inputs; replay= grades on ones kept earlier; output= writes
+# the grading record.
+results = scriptmark.grade(
+    ["submissions/"], "tests/", freeze="output/cases.json", output="output/results.json"
+)
 for r in results:
     if r.grade is None:
         print(f"{r.student_id}: withheld ({r.reason})")
     else:
         print(f"{r.student_id}: {r.grade} ({r.score}/{r.max} points)")
+
+# Score the record again under the policy as it is now, without running anything
+change = scriptmark.rescore("output/results.json")  # {"revision": 2, "changes": [...]}
+first = scriptmark.load_record("output/results.json", revision=1)
 
 # Discover student files (convenience view — drops non-submitters and orphan files)
 # Keys are rendered student keys: a bare 学号 once a roster confirms it, otherwise

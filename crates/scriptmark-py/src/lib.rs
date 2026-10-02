@@ -1,14 +1,16 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
+use scriptmark::assignment::Declared;
 use scriptmark::discovery::{LocalInputOptions, load_local_input};
 use scriptmark::export::word;
-use scriptmark::grading::grade_all;
+use scriptmark::grading::Policy;
 use scriptmark::models::{AssignmentInput, GradeOutcome, StudentReport, TestSpec};
+use scriptmark::record::{self, Evidence, Record, RecordError};
 use scriptmark::runner::frozen::{self, Frozen, FrozenError, Generation};
 use scriptmark::runner::generation::draws_a_seed;
 use scriptmark::runner::orchestrator::{RunOptions, run_all};
@@ -281,14 +283,79 @@ impl Freezing<'_> {
 			None => Ok(()),
 		}
 	}
+
+	/// The file holding the inputs a batch used: the one written, else the one replayed.
+	fn holder(&self) -> PyResult<Option<PathBuf>> {
+		self.freeze
+			.or(self.replay)
+			.map(|p| absolute(Path::new(p)))
+			.transpose()
+	}
+}
+
+fn value_error(e: impl std::fmt::Display) -> PyErr {
+	pyo3::exceptions::PyValueError::new_err(e.to_string())
+}
+
+/// A grading record that cannot be read: missing is the OS error, anything else a ValueError.
+fn record_error(e: RecordError) -> PyErr {
+	match &e {
+		RecordError::Io(_, io) if io.kind() == std::io::ErrorKind::NotFound => {
+			pyo3::exceptions::PyFileNotFoundError::new_err(e.to_string())
+		}
+		RecordError::Io(..) => pyo3::exceptions::PyOSError::new_err(e.to_string()),
+		RecordError::Invalid(..) => value_error(e),
+	}
+}
+
+/// A path as an absolute one, as the CLI records it, so that a record written here can be
+/// rescored from anywhere.
+fn absolute(path: &Path) -> PyResult<PathBuf> {
+	std::path::absolute(path)
+		.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{}: {e}", path.display())))
+}
+
+/// Refuse to write a record over one holding rescored revisions, before anything runs.
+fn check_output(output: Option<&str>) -> PyResult<()> {
+	match output {
+		Some(path) => record::check_replaceable(Path::new(path)).map_err(value_error),
+		None => Ok(()),
+	}
+}
+
+fn write_record(record: &Record, output: Option<&str>) -> PyResult<()> {
+	match output {
+		Some(path) => record
+			.write(Path::new(path))
+			.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}"))),
+		None => Ok(()),
+	}
+}
+
+/// Load the assignment and specs from a tests directory given as an absolute path.
+fn declared_for(
+	tests: &Path,
+	assignment: Option<&Path>,
+) -> PyResult<(Declared, Vec<TestSpec>, Policy)> {
+	let mut declared = scriptmark::assignment::load(assignment, tests)
+		.map_err(|e| value_error(format!("{e:#}")))?;
+	let specs = load_specs_from_dir(tests).map_err(spec_error)?;
+	let policy =
+		scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
+			.map_err(|e| value_error(format!("{e:#}")))?;
+	declared.matching.validate(&specs).map_err(value_error)?;
+	Ok((declared, specs, policy))
 }
 
 /// Run tests for all students, returning a list of raw result dicts.
 ///
 /// `freeze` writes generated inputs and oracle answers; `replay` verifies and reuses
-/// a frozen bundle without recomputing its answers.
+/// a frozen bundle without recomputing its answers. `output` writes the grading record,
+/// unscored, for `rescore` to score.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None, output=None))]
+// Each is a keyword argument of the Python API; a struct would not be one.
+#[allow(clippy::too_many_arguments)]
 fn run(
 	submissions: Vec<String>,
 	tests: String,
@@ -297,22 +364,28 @@ fn run(
 	assignment: Option<String>,
 	freeze: Option<String>,
 	replay: Option<String>,
+	output: Option<String>,
 ) -> PyResult<PyObject> {
-	let specs = load_specs_from_dir(Path::new(&tests)).map_err(spec_error)?;
-	let mut declared =
-		scriptmark::assignment::load(assignment.as_deref().map(Path::new), Path::new(&tests))
-			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-	scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
-		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+	check_output(output.as_deref())?;
+	let tests = absolute(Path::new(&tests))?;
+	let assignment = assignment.map(|p| absolute(Path::new(&p))).transpose()?;
+	let (declared, specs, _) = declared_for(&tests, assignment.as_deref())?;
 	let freezing = Freezing {
 		freeze: freeze.as_deref(),
 		replay: replay.as_deref(),
 	};
-	let (results, inputs) =
-		run_grading(&submissions, specs, timeout, python, &freezing, &declared)?;
+	let (record, inputs) = run_grading(
+		&submissions,
+		&tests,
+		specs,
+		timeout,
+		python,
+		&freezing,
+		&declared,
+	)?;
 	freezing.save(&inputs)?;
-	let json_val = serde_json::to_value(&results)
-		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+	write_record(&record, output.as_deref())?;
+	let json_val = serde_json::to_value(&record.evidence.students).map_err(value_error)?;
 	Python::with_gil(|py| json_to_py(py, &json_val))
 }
 
@@ -320,11 +393,14 @@ fn run(
 /// policy — `assignment.toml`, given or found beside the tests directory, exactly as the
 /// CLI reads it.
 ///
-/// `freeze` and `replay` are as for `run`.
+/// `freeze` and `replay` are as for `run`. `output` writes the grading record, with this
+/// grade as its first revision.
 ///
 /// Returns a list of StudentResult objects.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None, output=None))]
+// Each is a keyword argument of the Python API; a struct would not be one.
+#[allow(clippy::too_many_arguments)]
 fn grade(
 	submissions: Vec<String>,
 	tests: String,
@@ -333,50 +409,147 @@ fn grade(
 	assignment: Option<String>,
 	freeze: Option<String>,
 	replay: Option<String>,
+	output: Option<String>,
 ) -> PyResult<Vec<PyStudentResult>> {
-	let value_error = |e: anyhow::Error| pyo3::exceptions::PyValueError::new_err(format!("{e:#}"));
-	let mut declared =
-		scriptmark::assignment::load(assignment.as_deref().map(Path::new), Path::new(&tests))
-			.map_err(value_error)?;
-	let specs = load_specs_from_dir(Path::new(&tests)).map_err(spec_error)?;
-	let policy =
-		scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
-			.map_err(value_error)?;
+	check_output(output.as_deref())?;
+	let tests = absolute(Path::new(&tests))?;
+	let assignment = assignment.map(|p| absolute(Path::new(&p))).transpose()?;
+	let (declared, specs, policy) = declared_for(&tests, assignment.as_deref())?;
 
 	let freezing = Freezing {
 		freeze: freeze.as_deref(),
 		replay: replay.as_deref(),
 	};
-	let (mut reports, inputs) =
-		run_grading(&submissions, specs, timeout, python, &freezing, &declared)?;
-	grade_all(&mut reports, &declared.assignment.items, &policy).map_err(value_error)?;
+	let (mut record, inputs) = run_grading(
+		&submissions,
+		&tests,
+		specs,
+		timeout,
+		python,
+		&freezing,
+		&declared,
+	)?;
+	let revision = record
+		.score(&declared.assignment.items, &policy)
+		.map_err(|e| value_error(format!("{e:#}")))?;
 	freezing.save(&inputs)?;
+	write_record(&record, output.as_deref())?;
 
-	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
-	Ok(reports
+	let view = record.view(Some(revision)).map_err(value_error)?;
+	Ok(view
+		.reports
 		.into_iter()
 		.map(|r| PyStudentResult { inner: r })
 		.collect())
 }
 
-/// Shared logic: discover submissions, run the specs through the orchestrator. Returns the
-/// reports and the inputs they were graded on, for `Freezing::save`.
+/// Read a grading record as one of its revisions scored it: the latest unless `revision`
+/// names one, and unscored evidence when nothing has scored it yet.
+#[pyfunction]
+#[pyo3(signature = (record, *, revision=None))]
+fn load_record(record: String, revision: Option<u32>) -> PyResult<Vec<PyStudentResult>> {
+	let record = Record::load(Path::new(&record)).map_err(record_error)?;
+	let view = record.view(revision).map_err(value_error)?;
+	Ok(view
+		.reports
+		.into_iter()
+		.map(|r| PyStudentResult { inner: r })
+		.collect())
+}
+
+/// Score a grading record again under the policy as it is now, and add that as a new
+/// revision. Nothing runs. The record is refused unless its assignment, submissions,
+/// matching and tests are still what they were.
+///
+/// `assignment` names the assignment.toml holding the policy; by default the one the
+/// record was graded with, or one beside its tests directory. Returns
+/// `{"revision": n, "changes": [...]}`, every student whose grade changed.
+#[pyfunction]
+#[pyo3(signature = (record, *, assignment=None))]
+fn rescore(py: Python<'_>, record: String, assignment: Option<String>) -> PyResult<PyObject> {
+	let path = Path::new(&record);
+	let mut saved = Record::load(path).map_err(record_error)?;
+	let inputs = saved.evidence.inputs.clone();
+	let scriptmark::record::Source::Local { dirs, roster } = &inputs.source else {
+		return Err(value_error(format!(
+			"{record} was graded from a Canvas bundle: rescore it with `scriptmark rescore {record}`"
+		)));
+	};
+	let assignment = match assignment {
+		Some(p) => Some(absolute(Path::new(&p))?),
+		None => inputs.assignment.clone(),
+	};
+	let (declared, specs, policy) = declared_for(&inputs.tests, assignment.as_deref())?;
+	let roster = roster
+		.as_deref()
+		.map(scriptmark::roster::load_roster)
+		.transpose()
+		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+	let input = discover_input(dirs, &declared, roster.as_ref())?;
+	saved
+		.check(&record::Current {
+			assignment: &input.assignment,
+			attempt_policy: input.attempt_policy,
+			matching: &declared.matching,
+			specs: &specs,
+			students: &input.students,
+		})
+		.map_err(|e| value_error(format!("{e:#}")))?;
+	let previous = saved.latest().cloned();
+	let revision = saved
+		.score(&input.assignment.items, &policy)
+		.map_err(|e| value_error(format!("{e:#}")))?;
+	let changes = record::diff(
+		previous.as_ref(),
+		saved.revision(revision).map_err(value_error)?,
+	);
+	saved
+		.write(path)
+		.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{record}: {e}")))?;
+	let json_val = serde_json::json!({ "revision": revision, "changes": changes });
+	json_to_py(py, &json_val)
+}
+
+/// The local input, as grading finds it, refusing one with errors.
+fn discover_input(
+	dirs: &[PathBuf],
+	declared: &Declared,
+	roster: Option<&scriptmark::roster::Roster>,
+) -> PyResult<AssignmentInput> {
+	let paths: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+	let input = load_local_input(
+		&paths,
+		LocalInputOptions {
+			assignment: declared.assignment.clone(),
+			roster,
+			attempt_policy: declared.attempt_policy,
+			matching: Some(&declared.matching),
+		},
+	)
+	.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+	let errors: Vec<String> = input.errors().map(ToString::to_string).collect();
+	if !errors.is_empty() {
+		return Err(value_error(errors.join("; ")));
+	}
+	Ok(input)
+}
+
+/// Shared logic: discover submissions, run the specs through the orchestrator, and record
+/// what they found, unscored. Returns the record and the inputs it was graded on, for
+/// `Freezing::save`.
 ///
 /// A seed drawn with nowhere to keep it could never be replayed, and a `freeze` path that
 /// cannot be written would lose the inputs after the whole class ran: both are refused
 /// before any student runs.
 fn run_grading(
 	submissions: &[String],
+	tests: &Path,
 	specs: Vec<TestSpec>,
 	timeout: u64,
 	python: &str,
 	freezing: &Freezing,
-	declared: &scriptmark::assignment::Declared,
-) -> PyResult<(Vec<StudentReport>, Frozen)> {
-	declared
-		.matching
-		.validate(&specs)
-		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+	declared: &Declared,
+) -> PyResult<(Record, Frozen)> {
 	let generation = match freezing.replay {
 		Some(path) => Generation::Replay(Frozen::load(Path::new(path)).map_err(frozen_error)?),
 		None => Generation::fresh(),
@@ -385,7 +558,7 @@ fn run_grading(
 		&& freezing.freeze.is_none()
 		&& let Some((spec, case)) = draws_a_seed(&specs)
 	{
-		return Err(pyo3::exceptions::PyValueError::new_err(format!(
+		return Err(value_error(format!(
 			"case '{case}' in '{spec}' draws a random seed: pass freeze='cases.json' to keep it, or declare seed = N"
 		)));
 	}
@@ -393,21 +566,14 @@ fn run_grading(
 		frozen::writable(Path::new(path))
 			.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}")))?;
 	}
-	let paths: Vec<&Path> = submissions.iter().map(|p| Path::new(p.as_str())).collect();
-	let input = load_local_input(
-		&paths,
-		LocalInputOptions {
-			assignment: declared.assignment.clone(),
-			attempt_policy: declared.attempt_policy,
-			matching: Some(&declared.matching),
-			..Default::default()
-		},
-	)
-	.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-	let errors: Vec<String> = input.errors().map(ToString::to_string).collect();
-	if !errors.is_empty() {
-		return Err(pyo3::exceptions::PyValueError::new_err(errors.join("; ")));
-	}
+	let dirs = submissions
+		.iter()
+		.map(|p| absolute(Path::new(p)))
+		.collect::<PyResult<Vec<_>>>()?;
+	let input = discover_input(&dirs, declared, None)?;
+	let spec_versions = record::spec_versions(&specs).map_err(|e| value_error(format!("{e:#}")))?;
+	let versions = record::submission_versions(&input.students)
+		.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{e:#}")))?;
 
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
 	let options = RunOptions {
@@ -420,14 +586,38 @@ fn run_grading(
 	let rt = tokio::runtime::Runtime::new()
 		.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-	rt.block_on(async {
+	let (mut reports, inputs) = rt.block_on(async {
 		let bundles = prepare(specs, &generation, executor.clone(), timeout)
 			.await
-			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+			.map_err(value_error)?;
 		let inputs = Frozen::of(&bundles);
 		let reports = run_all(&input.students, bundles.into(), executor, &options).await;
-		Ok((reports, inputs))
+		Ok::<_, PyErr>((reports, inputs))
+	})?;
+	record::seal(&mut reports, &input.students, versions)
+		.map_err(|e| value_error(format!("{e:#}")))?;
+	let bundle = record::bundle_version(
+		spec_versions,
+		timeout,
+		options.python.clone(),
+		&inputs,
+		freezing.holder()?,
+	);
+	let record = Record::new(Evidence {
+		scriptmark: env!("CARGO_PKG_VERSION").to_string(),
+		assignment: (&input.assignment).into(),
+		inputs: record::Inputs {
+			tests: tests.to_path_buf(),
+			assignment: declared.path.as_deref().map(absolute).transpose()?,
+			source: record::Source::Local { dirs, roster: None },
+		},
+		attempt_policy: input.attempt_policy,
+		matching: declared.matching.clone(),
+		bundle,
+		students: reports,
 	})
+	.map_err(|e| value_error(format!("{e:#}")))?;
+	Ok((record, inputs))
 }
 
 /// Convert serde_json::Value to a Python object.
@@ -471,5 +661,7 @@ fn _scriptmark(m: &Bound<'_, PyModule>) -> PyResult<()> {
 	m.add_function(wrap_pyfunction!(load_spec, m)?)?;
 	m.add_function(wrap_pyfunction!(run, m)?)?;
 	m.add_function(wrap_pyfunction!(grade, m)?)?;
+	m.add_function(wrap_pyfunction!(load_record, m)?)?;
+	m.add_function(wrap_pyfunction!(rescore, m)?)?;
 	Ok(())
 }

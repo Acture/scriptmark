@@ -1,0 +1,20 @@
+# Grade once, then change the policy and score the same evidence again:
+#
+#   scriptmark grade submissions -t tests -o out/results.json
+#   scriptmark rescore out/results.json --assignment regrade.toml
+#
+# The rescore runs nothing. It adds revision 2 to out/results.json, keeps revision 1, and
+# prints whose grade changed. Editing a spec, a teacher file or a submission first makes it
+# refuse: that evidence no longer describes the batch.
+[assignment]
+name = "text"
+
+[[items]]
+id = "words"
+points = 6
+aggregation = "proportional"
+
+[[items]]
+id = "title"
+points = 4
+aggregation = "proportional"

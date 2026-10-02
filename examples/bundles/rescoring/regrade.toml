@@ -1,0 +1,15 @@
+# The same assignment under another policy: counting words is now all or nothing, and the
+# title case is worth more. Only [[items]] and [grading] may differ from assignment.toml;
+# a changed name, attempt policy or [matching] rule is a different batch, graded afresh.
+[assignment]
+name = "text"
+
+[[items]]
+id = "words"
+points = 4
+aggregation = "all_or_nothing"
+
+[[items]]
+id = "title"
+points = 6
+aggregation = "proportional"

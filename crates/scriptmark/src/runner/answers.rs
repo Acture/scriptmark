@@ -109,7 +109,7 @@ impl Contract {
 	}
 }
 
-fn fingerprint(
+pub(crate) fn fingerprint(
 	path: &Path,
 	files: &mut BTreeMap<String, String>,
 	parents: &mut BTreeSet<std::path::PathBuf>,
