@@ -411,6 +411,16 @@ enum DbAction {
 		#[arg(default_value = "scriptmark.db")]
 		path: PathBuf,
 	},
+	/// Save a revision of a grading record as a session
+	Save {
+		/// The grading record
+		record: PathBuf,
+		#[command(flatten)]
+		revision: RevisionArg,
+		/// Database file path
+		#[arg(long, default_value = "scriptmark.db")]
+		db: PathBuf,
+	},
 	/// Import a roster CSV into the database
 	ImportRoster {
 		/// Roster CSV file
@@ -1575,6 +1585,22 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 				scriptmark::db::Database::open(&path).context("Failed to initialize database")?;
 			println!("Database initialized: {}", path.display());
 			Ok(())
+		}
+		DbAction::Save {
+			record,
+			revision,
+			db,
+		} => {
+			let (saved, view) = load_view(&record, revision.revision)?;
+			let revision = scored(&view, &record)?;
+			// The roster the record was graded with, when it had one, names its students.
+			let roster = match &saved.evidence.inputs.source {
+				record::Source::Local {
+					roster: Some(path), ..
+				} => Some(load_roster(path).context("Failed to load roster")?),
+				_ => None,
+			};
+			save_to_db(&db, &saved, revision, roster.as_ref())
 		}
 		DbAction::ImportRoster { roster, db } => {
 			let database =

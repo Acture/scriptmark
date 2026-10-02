@@ -122,6 +122,7 @@ scriptmark rescore output/results.json
 # Read the latest revision, or any other with --revision N
 scriptmark summarize output/results.json --revision 1
 scriptmark export output/results.json -o grades.csv
+scriptmark db save output/results.json --revision 1 --db grades.db
 
 # Preview student/file/function matching; edit assignment.toml to resolve candidates
 scriptmark match submissions/ -t tests/ -o output/matches.json

@@ -545,6 +545,55 @@ fn database_sessions_are_revisions_of_one_evidence() {
 }
 
 #[test]
+fn any_revision_can_be_saved_to_the_database_later_and_only_once() {
+	let temp = bench();
+	let dir = temp.path();
+	let save = |extra: &[&str]| {
+		let mut args = vec!["db", "save", "out/results.json", "--db", "grades.db"];
+		args.extend_from_slice(extra);
+		scriptmark(dir, &args)
+	};
+	succeeded(scriptmark(
+		dir,
+		&[
+			"run",
+			"submissions",
+			"-t",
+			"tests",
+			"-o",
+			"out/results.json",
+		],
+	));
+	refused(save(&[]), "has no score revision yet");
+	succeeded(rescore(dir, &[]));
+	all_or_nothing(dir);
+	succeeded(rescore(dir, &[]));
+
+	let first = succeeded(save(&["--revision", "1"]));
+	assert!(
+		text(&first).contains("session #1, revision 1"),
+		"{}",
+		text(&first)
+	);
+	let again = succeeded(save(&["--revision", "1"]));
+	assert!(
+		text(&again).contains("Revision 1 is already in grades.db as session #1"),
+		"{}",
+		text(&again)
+	);
+	succeeded(save(&[]));
+	let db = scriptmark::db::Database::open(&dir.join("grades.db")).unwrap();
+	assert_eq!(
+		db.list_sessions()
+			.unwrap()
+			.iter()
+			.map(|s| s.revision)
+			.collect::<Vec<_>>(),
+		[2, 1]
+	);
+}
+
+#[test]
 fn results_from_before_grading_records_are_refused_by_every_reader() {
 	let temp = bench();
 	let dir = temp.path();
