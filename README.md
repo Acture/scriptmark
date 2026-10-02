@@ -115,6 +115,9 @@ scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 # Run tests only (raw JSON output)
 scriptmark run submissions/ -t tests/ -o results.json
 
+# Preview student/file/function matching; edit assignment.toml to resolve candidates
+scriptmark match submissions/ -t tests/ -o output/matches.json
+
 # Inputs and oracle answers are frozen beside the results (output/results.cases.json);
 # grade late submissions on the same tests and answers, into results of their own
 scriptmark grade late/ -t tests/ --replay output/results.cases.json -o output/late.json
@@ -171,6 +174,11 @@ print(spec.name, spec.function, spec.num_cases)
 ```
 
 ## TOML Test Specs
+
+Teachers can configure student ownership, item file patterns, function aliases and
+per-student overrides in `assignment.toml`. Preview decisions and candidates with
+`scriptmark match`; unresolved conflicts withhold grades. See
+[matching rules](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/matching.md).
 
 ```toml
 [meta]

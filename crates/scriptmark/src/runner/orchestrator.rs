@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -15,6 +15,7 @@ use crate::runner::prepare::{Bundle, Unit};
 /// How a batch runs.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
+	pub matching: crate::matching::Config,
 	/// Units running at once. Defaults to the number of CPUs; 0 runs one at a time, and a
 	/// value past what a semaphore can count is capped there.
 	pub concurrency: Option<usize>,
@@ -25,6 +26,7 @@ pub struct RunOptions {
 impl Default for RunOptions {
 	fn default() -> Self {
 		Self {
+			matching: crate::matching::Config::default(),
 			concurrency: None,
 			python: "python3".into(),
 		}
@@ -58,6 +60,7 @@ pub async fn run_all<E: Executor>(
 		.clamp(1, Semaphore::MAX_PERMITS);
 	let semaphore = Arc::new(Semaphore::new(concurrency));
 	let python: Arc<str> = options.python.as_str().into();
+	let matching = Arc::new(options.matching.clone());
 
 	let mut handles = Vec::new();
 	for student in students {
@@ -69,6 +72,11 @@ pub async fn run_all<E: Executor>(
 		// very output a teacher needs to resolve the mismatch.
 		let runnable = student.state == SubmissionState::Executable;
 		let files = student.files().to_vec();
+		let matches: Vec<crate::matching::ItemMatch> = bundles
+			.iter()
+			.map(|bundle| crate::matching::item_match(&matching, student, &bundle.spec))
+			.collect();
+		let matching = matching.clone();
 		let (bundles, executor, semaphore, python) = (
 			bundles.clone(),
 			executor.clone(),
@@ -79,8 +87,18 @@ pub async fn run_all<E: Executor>(
 		let handle = tokio::spawn(async move {
 			let sid = identity.key.to_string();
 			let mut report = StudentReport::new(sid, outcome);
+			report.matches = matches;
 			if runnable {
-				run_student(&mut report, files, bundles, executor, semaphore, python).await;
+				run_student(
+					&mut report,
+					files,
+					bundles,
+					executor,
+					semaphore,
+					python,
+					matching,
+				)
+				.await;
 			}
 			// Nothing to run, but the student still gets a row.
 			report.student_name = identity.name.clone();
@@ -118,25 +136,51 @@ async fn run_student<E: Executor>(
 	executor: Arc<E>,
 	semaphore: Arc<Semaphore>,
 	python: Arc<str>,
+	matching: Arc<crate::matching::Config>,
 ) {
 	let mut slots: Vec<Vec<Option<Vec<CaseResult>>>> =
 		bundles.iter().map(|b| vec![None; b.units.len()]).collect();
 	let mut tasks = JoinSet::new();
 	let mut where_is = HashMap::new();
 	let mut graded_files: Vec<Option<String>> = vec![None; bundles.len()];
+	let mut lookups: Vec<Vec<BTreeMap<String, crate::matching::Decision>>> = bundles
+		.iter()
+		.map(|bundle| vec![BTreeMap::new(); bundle.units.len()])
+		.collect();
 
 	for (b, bundle) in bundles.iter().enumerate() {
 		// One file per (student, bundle): every unit of a spec runs against the same file.
-		let Some(file) = executor.locate(&files, &bundle.spec) else {
+		let decision = &report.matches[b].file;
+		let Some(file) = files.iter().find(|file| {
+			Some(file.path.to_string_lossy().as_ref()) == decision.selected.as_deref()
+		}) else {
+			let pending = decision.state != crate::matching::State::Missing
+				|| matching.overrides.iter().any(|entry| {
+					entry.student == report.student_id
+						&& entry.item == bundle.spec.meta.name
+						&& entry.file.is_some()
+				});
 			for (u, unit) in bundle.units.iter().enumerate() {
 				slots[b][u] = Some(blanket(
 					unit,
-					TestStatus::Missing,
-					Fault::Student,
-					Cause::NoFile,
+					if pending {
+						TestStatus::Error
+					} else {
+						TestStatus::Missing
+					},
+					if pending {
+						Fault::Teacher
+					} else {
+						Fault::Student
+					},
+					if pending {
+						Cause::Matching
+					} else {
+						Cause::NoFile
+					},
 					&format!(
-						"No file matching '{}' found in submission",
-						bundle.spec.meta.file
+						"File matching '{}' requires {:?}: {:?}",
+						bundle.spec.meta.file, decision.state, decision.candidates
 					),
 				));
 			}
@@ -144,7 +188,9 @@ async fn run_student<E: Executor>(
 		};
 		graded_files[b] = Some(file.path.to_string_lossy().into_owned());
 		let path = std::path::absolute(&file.path).unwrap_or_else(|_| file.path.clone());
+		let functions = matching.functions(&report.student_id, &bundle.spec.meta.name);
 		for u in 0..bundle.units.len() {
+			let functions = functions.clone();
 			let (bundles, executor, semaphore, python, path) = (
 				bundles.clone(),
 				executor.clone(),
@@ -156,11 +202,30 @@ async fn run_student<E: Executor>(
 				let _permit = semaphore.acquire_owned().await.expect("semaphore closed");
 				let mut plan = bundles[b].units[u].plan.clone();
 				plan.file = path;
+				plan.functions = functions;
 				let observation = executor.run(&plan).await;
 				// Judging may run a teacher's checker script: keep it off the async workers.
 				tokio::task::spawn_blocking(move || {
 					let unit = &bundles[b].units[u];
-					judge(&plan, &unit.scored(), &observation, &python)
+					let mut functions: BTreeMap<String, crate::matching::Decision> =
+						BTreeMap::new();
+					for target in observation
+						.setup
+						.iter()
+						.chain(&observation.steps)
+						.filter_map(|record| record.target.as_ref())
+					{
+						if let Some(decision) = &target.matching {
+							functions
+								.entry(target.requested.clone())
+								.and_modify(|current| current.merge(decision.clone()))
+								.or_insert_with(|| decision.clone());
+						}
+					}
+					(
+						judge(&plan, &unit.scored(), &observation, &python),
+						functions,
+					)
 				})
 				.await
 				.expect("judging panicked")
@@ -171,9 +236,10 @@ async fn run_student<E: Executor>(
 
 	while let Some(joined) = tasks.join_next_with_id().await {
 		match joined {
-			Ok((id, results)) => {
+			Ok((id, (results, functions))) => {
 				let (b, u) = where_is[&id];
 				slots[b][u] = Some(results);
+				lookups[b][u] = functions;
 			}
 			// A panicking unit costs that unit, not the student's other results.
 			Err(e) => {
@@ -189,6 +255,36 @@ async fn run_student<E: Executor>(
 		}
 	}
 
+	for (b, units) in lookups.into_iter().enumerate() {
+		for (name, decision) in units.into_iter().flat_map(BTreeMap::into_iter) {
+			report.matches[b]
+				.functions
+				.entry(name)
+				.and_modify(|current| current.merge(decision.clone()))
+				.or_insert(decision);
+		}
+		if report.matches[b].functions.values().any(|decision| {
+			matches!(
+				decision.state,
+				crate::matching::State::Review | crate::matching::State::Ambiguous
+			)
+		}) {
+			for cases in slots[b].iter_mut().flatten() {
+				for case in cases {
+					case.status = TestStatus::Error;
+					case.fault = Some(Fault::Teacher);
+					case.cause = Some(Cause::Matching);
+					case.failure = Some(FailureDetail {
+						message: format!(
+							"function matching requires review: {:?}",
+							report.matches[b].functions
+						),
+						details: String::new(),
+					});
+				}
+			}
+		}
+	}
 	report.lint = lint(&bundles, &graded_files, &semaphore).await;
 	report.test_results = bundles
 		.iter()

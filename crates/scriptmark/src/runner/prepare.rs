@@ -544,6 +544,7 @@ fn dry_run_rhai(spec: &TestSpec) -> Vec<String> {
 fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 	let base = UnitPlan {
 		subject: Subject::Student,
+		functions: crate::matching::Functions::default(),
 		file: PathBuf::new(),
 		script: None,
 		imports: spec.meta.imports.clone(),

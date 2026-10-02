@@ -28,6 +28,10 @@ import os  # noqa: E402
 import runpy  # noqa: E402
 import signal  # noqa: E402
 import time  # noqa: E402
+from typing import TYPE_CHECKING  # noqa: E402
+
+if TYPE_CHECKING:
+	from matching import FunctionRules, MatchDecision, function_decision
 
 with open(sys.argv[1], encoding="utf-8") as _fh:
 	PAYLOAD = json.load(_fh)
@@ -270,6 +274,12 @@ class Missing(Exception):
 	"""The call's target does not exist."""
 
 
+class MatchingRequired(Exception):
+	def __init__(self, decision: MatchDecision) -> None:
+		self.decision: MatchDecision = decision
+		super().__init__(f"function matching needs review: {decision}")
+
+
 class Unresolved(Exception):
 	"""A `$ref` or `object` whose value was never produced in this unit."""
 
@@ -302,6 +312,8 @@ def call(fn, timeout, stdin=None, guarded=True, serialise=True):
 		outcome = {"timeout": {}}
 	except Missing as exc:
 		outcome = {"missing": {"message": str(exc)}}
+	except MatchingRequired as exc:
+		outcome = {"matching": {"message": str(exc), "decision": exc.decision}}
 	except Unresolved as exc:
 		outcome = {"unresolved": {"name": str(exc)}}
 	except Unserialisable as exc:
@@ -428,26 +440,35 @@ def resolve(value):
 	return value
 
 
-def fuzzy_lookup(module, name, argc):
-	"""Find a function by exact name or best fuzzy match. P-673 owns this rule."""
-	if hasattr(module, name):
-		return getattr(module, name), name
-	from difflib import SequenceMatcher
-
-	scored = []
-	for candidate in dir(module):
-		obj = getattr(module, candidate)
-		if candidate.startswith("_") or not callable(obj):
-			continue
-		score = SequenceMatcher(None, name.lower(), candidate.lower()).ratio()
-		params = params_of(obj)
-		positional = [p for p in params or [] if p["name"] != "self" and "var" not in p["kind"]]
-		if params is not None and len(positional) == argc:
-			score += 0.2
-		scored.append((score, candidate, obj))
-	scored.sort(key=lambda s: -s[0])
-	if scored and scored[0][0] >= 0.5:
-		return scored[0][2], scored[0][1]
+def matched_function(
+	module: object, name: str, evidence: list[MatchDecision | None]
+) -> tuple[object, str]:
+	policy: FunctionRules = PAYLOAD.get("functions", {"aliases": {}, "overrides": {}})
+	# Read attributes only once: dynamic exports/properties belong to the guarded call.
+	exports: dict[str, object] = dict(vars(module))
+	absent: object = object()
+	for candidate in {
+		name,
+		*policy.get("aliases", {}).get(name, []),
+		*([policy["overrides"][name]] if name in policy.get("overrides", {}) else []),
+	}:
+		if candidate not in exports:
+			value: object = getattr(module, candidate, absent)
+			if value is not absent:
+				exports[candidate] = value
+	decision: MatchDecision = function_decision(
+		[candidate for candidate, obj in exports.items() if callable(obj)], name, policy
+	)
+	evidence[0] = decision
+	selected: str | None = decision["selected"]
+	if selected is not None:
+		return exports[selected], selected
+	if (
+		decision["state"] != "missing"
+		or name in policy.get("overrides", {})
+		or name in policy.get("aliases", {})
+	):
+		raise MatchingRequired(decision)
 	raise Missing(f"function '{name}' not found")
 
 
@@ -471,7 +492,12 @@ def member(obj, object_id, name, what):
 		raise
 
 
-def invoke(plan, student, resolved):
+def invoke(
+	plan: dict[str, object],
+	student: object,
+	resolved: list[str],
+	evidence: list[MatchDecision | None],
+) -> object:
 	"""The call a plan names. Runs inside `call()`: the lookup is student code too."""
 	kind, spec = next(iter(plan["target"].items()))
 	args = resolve(plan.get("args", []))
@@ -481,7 +507,7 @@ def invoke(plan, student, resolved):
 				raise Missing(f"function '{spec['name']}' not found")
 			fn, resolved[0] = getattr(student, spec["name"]), spec["name"]
 		else:
-			fn, resolved[0] = fuzzy_lookup(student, spec["name"], len(args))
+			fn, resolved[0] = matched_function(student, spec["name"], evidence)
 		return fn(*args)
 	if kind == "method":
 		fn = member(live(spec["object"]), spec["object"], spec["name"], "method")
@@ -563,8 +589,9 @@ def run_calls(phase, calls, student):
 	for index, plan in enumerate(calls):
 		requested = next(iter(plan["target"].values()))["name"]
 		resolved = [requested]
+		evidence: list[MatchDecision | None] = [None]
 		outcome, stdout, truncated, elapsed, value = call(
-			lambda: invoke(plan, student, resolved),
+			lambda: invoke(plan, student, resolved, evidence),
 			plan["timeout"],
 			plan.get("stdin"),
 			guarded=STUDENT and "teacher" not in plan["target"],
@@ -574,7 +601,7 @@ def run_calls(phase, calls, student):
 			"kind": "call",
 			"phase": phase,
 			"index": index,
-			"target": {"requested": requested, "resolved": resolved[0]},
+			"target": {"requested": requested, "resolved": resolved[0], "matching": evidence[0]},
 			"outcome": outcome,
 			"stdout": stdout,
 			"stdout_truncated": truncated,

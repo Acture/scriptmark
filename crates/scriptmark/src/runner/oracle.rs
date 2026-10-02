@@ -25,6 +25,7 @@ pub async fn resolve_oracle<E: Executor>(
 		let timeout_secs = case.timeout.unwrap_or(timeout_secs);
 		let plan = UnitPlan {
 			subject: Subject::Reference,
+			functions: crate::matching::Functions::default(),
 			file: reference.into(),
 			script: None,
 			imports: spec.meta.imports.clone(),

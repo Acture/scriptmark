@@ -52,6 +52,7 @@ fn local_input(dir: &tempfile::TempDir) -> AssignmentInput {
 			assignment: Assignment::named("hw1"),
 			roster: Some(&roster),
 			attempt_policy: AttemptPolicy::Latest,
+			matching: None,
 		},
 	)
 	.unwrap()

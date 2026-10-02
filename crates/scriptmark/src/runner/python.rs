@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::process::Command;
 
-use crate::models::{StudentFile, TestSpec};
+use crate::models::TestSpec;
 use crate::runner::executor::{
 	Executor, Exit, ProtocolError, Subject, TeacherRuntime, UnitObservation, UnitPlan,
 };
@@ -46,95 +46,6 @@ impl PythonExecutor {
 
 	pub fn python_cmd(&self) -> &str {
 		&self.python_cmd
-	}
-
-	/// Find the student file matching the spec's file pattern.
-	///
-	/// Strategy (scored, best wins):
-	/// 1. Exact suffix match (100) → highest confidence
-	/// 2. Strip numeric prefixes, compare stems (80-100)
-	/// 3. Stem-contains (40-60)
-	/// 4. Function-definition scan (+200 bonus) → if spec has function hint,
-	///    files containing `def function_name` get a large boost
-	fn find_student_file_with_hint<'a>(
-		&self,
-		student_files: &'a [StudentFile],
-		pattern: &str,
-		function_hint: Option<&str>,
-	) -> Option<&'a StudentFile> {
-		let pattern_stem = Path::new(pattern)
-			.file_stem()
-			.and_then(|s| s.to_str())
-			.unwrap_or(pattern);
-
-		// 1. Exact suffix match — highest confidence
-		if let Some(f) = student_files.iter().find(|f| {
-			f.path
-				.file_name()
-				.and_then(|n| n.to_str())
-				.is_some_and(|n| n.ends_with(pattern))
-		}) {
-			return Some(f);
-		}
-
-		// Helper: strip numeric prefix segments (SID_uploadID_fileID_)
-		// "21300110043_171469_6012331_Lab3_2-2.py" → "Lab3_2-2.py"
-		fn extract_actual_name(filename: &str) -> &str {
-			let mut rest = filename;
-			loop {
-				if let Some(idx) = rest.find('_') {
-					let prefix = &rest[..idx];
-					if prefix.chars().all(|c| c.is_ascii_digit()) {
-						rest = &rest[idx + 1..];
-						continue;
-					}
-				}
-				break;
-			}
-			rest
-		}
-
-		// 2. Score all candidates by filename similarity + function content
-		let mut scored: Vec<(&'a StudentFile, u32)> = student_files
-			.iter()
-			.filter_map(|f| {
-				let filename = f.path.file_name()?.to_str()?;
-				let actual = extract_actual_name(filename);
-				let actual_stem = Path::new(actual)
-					.file_stem()
-					.and_then(|s| s.to_str())
-					.unwrap_or(actual);
-
-				let mut score: u32 = 0;
-
-				// --- Filename similarity ---
-				if actual_stem == pattern_stem {
-					score += 100;
-				} else if actual_stem.starts_with(pattern_stem) {
-					score += 80;
-				} else if actual.contains(pattern_stem) {
-					score += 60;
-				} else if filename.contains(pattern_stem) {
-					score += 40;
-				}
-
-				// --- Function definition scan (highest priority tiebreaker) ---
-				if let Some(func_name) = function_hint
-					&& let Ok(content) = std::fs::read_to_string(&f.path)
-				{
-					let needle = format!("def {func_name}");
-					if content.contains(&needle) {
-						score += 200; // trumps filename-only matches
-					}
-				}
-
-				if score > 0 { Some((f, score)) } else { None }
-			})
-			.collect();
-
-		scored.sort_by_key(|a| std::cmp::Reverse(a.1));
-
-		scored.first().map(|(f, _)| *f)
 	}
 }
 
@@ -280,7 +191,11 @@ impl PythonExecutor {
 			// off sys.path. What those variables used to set is spelled as flags.
 			.args(["-I", "-B", "-X", "utf8"])
 			.arg("-c")
-			.arg(HARNESS)
+			.arg(format!(
+				"import sys; sys.path[:] = [p for p in sys.path if p]\n{}\n{}",
+				include_str!("../matching.py"),
+				HARNESS
+			))
 			.arg(&staged.payload)
 			.current_dir(&staged.work)
 			.stdin(if stdin.is_some() {
@@ -571,18 +486,6 @@ impl Executor for PythonExecutor {
 		))
 	}
 
-	fn locate<'a>(&self, files: &'a [StudentFile], spec: &TestSpec) -> Option<&'a StudentFile> {
-		// The hint chain mode used: the first function a case names, else [meta] function.
-		// (Per-case specs named no case function, so this is their hint too.)
-		let hint = spec
-			.cases
-			.iter()
-			.chain(spec.scenarios.iter().flat_map(|s| s.steps.iter()))
-			.find_map(|c| c.function.as_deref())
-			.or(spec.meta.function.as_deref());
-		self.find_student_file_with_hint(files, &spec.meta.file, hint)
-	}
-
 	async fn inspect(&self, spec: &TestSpec, timeout_secs: u64) -> Result<TeacherRuntime, String> {
 		if spec.meta.imports.is_empty() {
 			return Ok(TeacherRuntime::default());
@@ -653,6 +556,7 @@ impl Executor for PythonExecutor {
 					"allowed_imports": plan.allowed_imports,
 					"load_timeout": plan.load_timeout,
 					"subject": plan.subject,
+					"functions": plan.functions,
 					"lookup": match plan.subject {
 						Subject::Student => "fuzzy",
 						Subject::Reference => "exact",
@@ -745,6 +649,7 @@ mod tests {
 		};
 		let plan = |steps: Vec<CallPlan>| UnitPlan {
 			subject: Subject::Student,
+			functions: crate::matching::Functions::default(),
 			file: PathBuf::from("lab.py"),
 			script: None,
 			imports: Vec::new(),
