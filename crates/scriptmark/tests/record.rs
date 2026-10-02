@@ -261,7 +261,7 @@ fn rescoring_runs_nothing_and_keeps_the_earlier_revision() {
 #[test]
 fn rescoring_refuses_evidence_whose_tests_submissions_or_matching_changed() {
 	type Change = fn(&Path);
-	let changes: [(&str, Change, &str); 7] = [
+	let changes: [(&str, Change, &str); 9] = [
 		(
 			"spec",
 			|dir| {
@@ -326,16 +326,45 @@ fn rescoring_refuses_evidence_whose_tests_submissions_or_matching_changed() {
 			"the [matching] rules changed",
 		),
 		(
-			"assignment",
+			"Canvas ids",
 			|dir| {
 				let assignment = std::fs::read_to_string(dir.join("assignment.toml")).unwrap();
 				write(
 					dir,
 					"assignment.toml",
-					&assignment.replace("name = \"sums\"", "name = \"sums, again\""),
+					&assignment.replace(
+						"name = \"sums\"",
+						"name = \"sums\"\ncanvas_course_id = 7\ncanvas_assignment_id = 8",
+					),
 				);
 			},
-			"the assignment is 'sums, again', not 'sums'",
+			"the assignment's Canvas ids are course 7 and assignment 8, not course none",
+		),
+		(
+			"attempt policy",
+			|dir| {
+				let assignment = std::fs::read_to_string(dir.join("assignment.toml")).unwrap();
+				write(
+					dir,
+					"assignment.toml",
+					&assignment.replace(
+						"name = \"sums\"",
+						"name = \"sums\"\nattempt_policy = \"earliest\"",
+					),
+				);
+			},
+			"the attempt policy is earliest, not latest",
+		),
+		(
+			"file match",
+			|dir| {
+				std::fs::rename(
+					dir.join("submissions/alice_sum.py"),
+					dir.join("submissions/alice_add.py"),
+				)
+				.unwrap()
+			},
+			"local:alice's file for 'sum' is matched differently",
 		),
 	];
 	for (what, change, why) in changes {
@@ -528,4 +557,190 @@ fn results_from_before_grading_records_are_refused_by_every_reader() {
 	] {
 		refused(scriptmark(dir, args), "before grading records");
 	}
+}
+
+#[test]
+fn the_assignment_name_is_a_label_so_declaring_items_later_rescores() {
+	let temp = bench();
+	let dir = temp.path();
+	// Graded with items derived from the specs, under the folder's name...
+	std::fs::remove_file(dir.join("assignment.toml")).unwrap();
+	succeeded(scriptmark(dir, &GRADE));
+	let derived = record(dir).evidence.assignment.name;
+	assert!(record(dir).revisions[0].policy.derived_items);
+	// ...then weighed, as the note `grade` printed suggests, under a name of its own.
+	write(
+		dir,
+		"assignment.toml",
+		&ASSIGNMENT
+			.replace("name = \"sums\"", "name = \"Homework 3\"")
+			.replace("proportional", "all_or_nothing"),
+	);
+	succeeded(rescore(dir, &[]));
+	let record = record(dir);
+	assert_eq!(record.evidence.assignment.name, derived);
+	assert!(!record.revisions[1].policy.derived_items);
+	assert_eq!(grades(dir, None), graded(100.0, 0.0));
+}
+
+#[test]
+fn a_replaced_archive_is_a_changed_submission_even_behind_a_stale_extraction() {
+	let temp = bench();
+	let dir = temp.path();
+	let zip_of = |content: &str| {
+		std::fs::remove_file(dir.join("submissions/bob_sum.py")).ok();
+		let file = std::fs::File::create(dir.join("submissions/bob_hw.zip")).unwrap();
+		let mut zip = zip::ZipWriter::new(file);
+		zip.start_file("sum.py", zip::write::SimpleFileOptions::default())
+			.unwrap();
+		std::io::Write::write_all(&mut zip, content.as_bytes()).unwrap();
+		zip.finish().unwrap();
+	};
+	zip_of("def add(a, b):\n    return abs(a) + abs(b)\n");
+	succeeded(scriptmark(dir, &GRADE));
+	let bob = record(dir)
+		.evidence
+		.students
+		.into_iter()
+		.find(|r| r.student_id == "local:bob")
+		.unwrap();
+	assert_eq!(bob.submission.unwrap().archives.len(), 1);
+
+	// The extraction from the first archive stays on disk; the archive itself changed.
+	zip_of("def add(a, b):\n    return a + b\n");
+	all_or_nothing(dir);
+	refused(rescore(dir, &[]), "local:bob's submitted files changed");
+}
+
+/// A Canvas bundle as `canvas fetch` leaves one, for course 7, assignment 8. Ada tried
+/// twice — wrong, then right — Ben once, wrongly, and Cy, who handed nothing in, is excused.
+fn canvas_bundle(dir: &Path) {
+	let bundle = dir.join("canvas/hw");
+	let mut manifest = serde_json::Map::new();
+	for (id, source) in [
+		(1001, "def add(a, b):\n    return 0\n"),
+		(1002, "def add(a, b):\n    return a + b\n"),
+		(1003, "def add(a, b):\n    return abs(a) + abs(b)\n"),
+	] {
+		let path = bundle.join(format!("attachments/{id}/sum.py"));
+		write(
+			dir,
+			path.strip_prefix(dir).unwrap().to_str().unwrap(),
+			source,
+		);
+		manifest.insert(
+			id.to_string(),
+			serde_json::json!({ "stored": { "path": path, "size": source.len() } }),
+		);
+	}
+	let attempt = |n: u32, attachment: u64| {
+		serde_json::json!({
+			"user_id": 11, "attempt": n, "workflow_state": "submitted",
+			"submitted_at": format!("2026-10-0{n}T08:00:00Z"), "submission_type": "online_upload",
+			"attachments": [{ "id": attachment, "filename": "sum.py" }],
+		})
+	};
+	let payload = serde_json::json!({
+		"course_id": 7, "assignment_id": 8, "assignment_name": "sums",
+		"users": [
+			{ "id": 11, "name": "Ada", "sis_user_id": "2024001" },
+			{ "id": 12, "name": "Ben", "sis_user_id": "2024002" },
+			{ "id": 13, "name": "Cy", "sis_user_id": "2024003" },
+		],
+		"submissions": [
+			{
+				"id": 1, "user_id": 11, "attempt": 2, "workflow_state": "submitted",
+				"submitted_at": "2026-10-02T08:00:00Z", "submission_type": "online_upload",
+				"attachments": [{ "id": 1002, "filename": "sum.py" }],
+				"submission_history": [attempt(1, 1001), attempt(2, 1002)],
+			},
+			{
+				"id": 2, "user_id": 12, "attempt": 1, "workflow_state": "submitted",
+				"submitted_at": "2026-10-01T09:00:00Z", "submission_type": "online_upload",
+				"attachments": [{ "id": 1003, "filename": "sum.py" }],
+			},
+			{ "id": 3, "user_id": 13, "workflow_state": "unsubmitted", "excused": true },
+		],
+	});
+	write(
+		dir,
+		"canvas/hw/canvas-payload.json",
+		&serde_json::to_string_pretty(&payload).unwrap(),
+	);
+	write(
+		dir,
+		"canvas/hw/attachments.json",
+		&serde_json::to_string_pretty(&manifest).unwrap(),
+	);
+}
+
+#[test]
+fn a_canvas_record_rescores_from_its_bundle_and_refuses_another_attempt_or_excusal() {
+	let temp = bench();
+	let dir = temp.path();
+	canvas_bundle(dir);
+	let grade = [
+		"grade",
+		"--canvas",
+		"canvas/hw",
+		"-t",
+		"tests",
+		"-o",
+		"out/results.json",
+	];
+	succeeded(scriptmark(dir, &grade));
+	let evidence = record(dir).evidence;
+	assert_eq!(
+		(
+			evidence.assignment.canvas_course_id,
+			evidence.assignment.canvas_assignment_id
+		),
+		(Some(7), Some(8))
+	);
+	let ada = evidence
+		.students
+		.iter()
+		.find(|r| r.canvas_user_id == Some(11))
+		.unwrap();
+	assert_eq!(ada.submission.as_ref().unwrap().attempt, Some(2));
+	assert_eq!(
+		grades(dir, None)
+			.into_iter()
+			.map(|(_, grade)| grade)
+			.collect::<Vec<_>>(),
+		[Some(100.0), Some(50.0), None],
+		"Ada on her second attempt; Cy excused"
+	);
+
+	// Rescoring reads the bundle and writes nothing into it.
+	std::fs::remove_file(dir.join("canvas/hw/input.json")).unwrap();
+	all_or_nothing(dir);
+	succeeded(rescore(dir, &[]));
+	assert!(!dir.join("canvas/hw/input.json").exists());
+	assert_eq!(
+		grades(dir, None)
+			.into_iter()
+			.map(|(_, grade)| grade)
+			.collect::<Vec<_>>(),
+		[Some(100.0), Some(0.0), None]
+	);
+
+	write(
+		dir,
+		"assignment.toml",
+		&ASSIGNMENT.replace(
+			"name = \"sums\"",
+			"name = \"sums\"\nattempt_policy = \"earliest\"",
+		),
+	);
+	let output = rescore(dir, &[]);
+	refused(output, "the attempt policy is earliest, not latest");
+	write(dir, "assignment.toml", ASSIGNMENT);
+
+	let payload_path = dir.join("canvas/hw/canvas-payload.json");
+	let mut payload: serde_json::Value =
+		serde_json::from_str(&std::fs::read_to_string(&payload_path).unwrap()).unwrap();
+	payload["submissions"][1]["excused"] = true.into();
+	std::fs::write(&payload_path, payload.to_string()).unwrap();
+	refused(rescore(dir, &[]), "2024002 is excused now");
 }

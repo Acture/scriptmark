@@ -113,14 +113,15 @@ scriptmark grade submissions/ -t tests/ -r roster.csv --db grades.db -a archive/
 # Run tests only: the grading record's evidence, with no score revision yet
 scriptmark run submissions/ -t tests/ -o output/results.json
 
-# Score the saved evidence again after editing points or the curve in assignment.toml.
-# Nothing runs; revision 2 is added beside revision 1, and whose grade changed is shown.
-# Changed specs, teacher files, submissions or [matching] rules are refused: grade again.
+# Score saved evidence under assignment.toml as it is now, without running anything:
+# a `run` record gets revision 1, a graded one its next. Edit points or the curve and
+# rescore again; earlier revisions are kept, and whose grade changed is shown. Changed
+# specs, teacher files, submissions or [matching] rules are refused: grade again.
 scriptmark rescore output/results.json
 
-# Read any revision: summarize, export grades as CSV, report
+# Read the latest revision, or any other with --revision N
 scriptmark summarize output/results.json --revision 1
-scriptmark export output/results.json --revision 2 -o grades.csv
+scriptmark export output/results.json -o grades.csv
 
 # Preview student/file/function matching; edit assignment.toml to resolve candidates
 scriptmark match submissions/ -t tests/ -o output/matches.json
@@ -141,7 +142,8 @@ scriptmark canvas courses
 scriptmark canvas assignments --course-id 12345
 scriptmark canvas fetch --course-id 12345 --assignment-id 67890 -o canvas/hw1
 scriptmark grade --canvas canvas/hw1 -t tests/
-scriptmark grades-push --course-id 12345 --assignment-id 67890 output/results.json --revision 2
+# pushes the record's only revision; name one with --revision N once it holds several
+scriptmark grades-push --course-id 12345 --assignment-id 67890 output/results.json
 
 # Or just pull the roster
 scriptmark roster-pull --course-id 12345
@@ -167,7 +169,8 @@ for r in results:
     else:
         print(f"{r.student_id}: {r.grade} ({r.score}/{r.max} points)")
 
-# Score the record again under the policy as it is now, without running anything
+# After editing the policy, score the record again without running anything
+# (records graded from a Canvas bundle are rescored with the CLI)
 change = scriptmark.rescore("output/results.json")  # {"revision": 2, "changes": [...]}
 first = scriptmark.load_record("output/results.json", revision=1)
 

@@ -33,9 +33,11 @@ pub fn migrate(conn: &Connection) -> Result<(), DbError> {
 		CREATE TABLE IF NOT EXISTS sessions (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			assignment TEXT NOT NULL,
-			-- The record's evidence digest, and which of its revisions this is.
+			-- The record's evidence digest, which of its revisions this is, and that
+			-- revision's checksum: two copies of a record can number different revisions alike.
 			evidence TEXT NOT NULL,
 			revision INTEGER NOT NULL,
+			checksum TEXT NOT NULL,
 			-- The test bundle's version: spec and source digests, seeds, answers (JSON).
 			bundle TEXT NOT NULL,
 			-- The revision's items and grading policy (JSON).

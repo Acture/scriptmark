@@ -29,6 +29,8 @@ pub struct SessionOf<'a> {
 	pub assignment: &'a str,
 	pub evidence: &'a str,
 	pub revision: u32,
+	/// The revision's checksum.
+	pub checksum: &'a str,
 	pub bundle: &'a str,
 	pub grading_policy: &'a str,
 }
@@ -173,22 +175,24 @@ impl Database {
 	/// not saved twice.
 	pub fn save_revision(&self, record: &Record, revision: u32) -> Result<Saved, DbError> {
 		let invalid = |e: anyhow::Error| DbError::Record(format!("{e:#}"));
-		let policy = &record.revision(revision).map_err(invalid)?.policy;
+		let entry = record.revision(revision).map_err(invalid)?;
 		let view = record.view(Some(revision)).map_err(invalid)?;
 		self.save_session(
 			&SessionOf {
 				assignment: &record.evidence.assignment.name,
 				evidence: &record.digest,
 				revision,
+				checksum: &entry.checksum,
 				bundle: &serde_json::to_string(&record.evidence.bundle)?,
-				grading_policy: &serde_json::to_string(policy)?,
+				grading_policy: &serde_json::to_string(&entry.policy)?,
 			},
 			&view.reports,
 		)
 	}
 
 	/// Save scored reports as a session, in one transaction. Returns the session it already
-	/// has when this revision of this evidence was saved before.
+	/// has when this revision of this evidence was saved before, and refuses one saved under
+	/// the same number with other grades.
 	pub fn save_session(
 		&self,
 		of: &SessionOf,
@@ -206,15 +210,21 @@ impl Database {
 		if let Some(report) = reports.iter().find(|r| r.grade.is_none()) {
 			return Err(DbError::Unscored(report.student_id.clone()));
 		}
-		if let Some(id) = self
+		if let Some((id, checksum)) = self
 			.conn
 			.query_row(
-				"SELECT id FROM sessions WHERE evidence = ?1 AND revision = ?2",
+				"SELECT id, checksum FROM sessions WHERE evidence = ?1 AND revision = ?2",
 				rusqlite::params![of.evidence, of.revision],
-				|row| row.get(0),
+				|row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
 			)
 			.optional()?
 		{
+			if checksum != of.checksum {
+				return Err(DbError::Conflict {
+					session: id,
+					revision: of.revision,
+				});
+			}
 			return Ok(Saved { id, created: false });
 		}
 
@@ -229,12 +239,14 @@ impl Database {
 		let tx = self.conn.unchecked_transaction()?;
 		tx.execute(
 			"INSERT INTO sessions
-			 (assignment, evidence, revision, bundle, grading_policy, student_count, avg_grade)
-			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+			 (assignment, evidence, revision, checksum, bundle, grading_policy, student_count,
+			  avg_grade)
+			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
 			rusqlite::params![
 				of.assignment,
 				of.evidence,
 				of.revision,
+				of.checksum,
 				of.bundle,
 				of.grading_policy,
 				reports.len() as i64,

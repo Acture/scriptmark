@@ -30,6 +30,11 @@ pub enum DbError {
 	Stored(String),
 	#[error("'{0}' has no grade: a session stores a score revision")]
 	Unscored(String),
+	#[error(
+		"session #{session} already holds another revision {revision} of this evidence, \
+		 scored from a different copy of the record; refusing to mix them"
+	)]
+	Conflict { session: i64, revision: u32 },
 	#[error("{0}")]
 	Record(String),
 }
@@ -78,6 +83,7 @@ mod tests {
 			assignment,
 			evidence: assignment,
 			revision: 1,
+			checksum: "c1",
 			bundle: "{}",
 			grading_policy: "{}",
 		}
@@ -528,5 +534,37 @@ mod tests {
 			),
 			"{err}"
 		);
+	}
+
+	#[test]
+	fn test_another_revision_under_a_saved_number_is_refused() {
+		let db = Database::open_memory().unwrap();
+		let reports = [graded("alice", 90.0)];
+		let id = db.save_session(&of("hw5"), &reports).unwrap().id;
+		let other = SessionOf {
+			checksum: "c2",
+			..of("hw5")
+		};
+		let err = db.save_session(&other, &reports).unwrap_err();
+		assert!(
+			matches!(err, DbError::Conflict { session, revision: 1 } if session == id),
+			"{err}"
+		);
+	}
+
+	#[test]
+	fn test_a_session_that_fails_part_way_leaves_nothing() {
+		let db = Database::open_memory().unwrap();
+		db.conn
+			.execute_batch(
+				"CREATE TRIGGER fail BEFORE INSERT ON results WHEN NEW.student_id = 'bob'
+				 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+			)
+			.unwrap();
+		let reports = [graded("alice", 90.0), graded("bob", 80.0)];
+		assert!(db.save_session(&of("hw5"), &reports).is_err());
+		assert!(db.list_sessions().unwrap().is_empty(), "no half session");
+		db.conn.execute_batch("DROP TRIGGER fail").unwrap();
+		assert!(db.save_session(&of("hw5"), &reports).unwrap().created);
 	}
 }

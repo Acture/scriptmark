@@ -126,8 +126,8 @@ struct GradeArgs {
 	archive: Option<PathBuf>,
 
 	/// Archive format
-	#[arg(short, long, default_value = "csv")]
-	format: String,
+	#[arg(short, long, value_enum, default_value_t = ArchiveFormat::Csv)]
+	format: ArchiveFormat,
 
 	/// Save results to SQLite database
 	#[arg(long)]
@@ -135,6 +135,15 @@ struct GradeArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+}
+
+/// How `--archive` writes the evidence: refused when spelled wrong, before anything runs.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ArchiveFormat {
+	/// The grading record itself
+	Json,
+	/// One row per case
+	Csv,
 }
 
 #[derive(Parser)]
@@ -888,7 +897,11 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 			.file_name()
 			.and_then(|n| n.to_str())
 			.unwrap_or("results");
-		let archive_path = archive_dir.join(format!("archive_{stem}.{}", args.format));
+		let extension = match args.format {
+			ArchiveFormat::Json => "json",
+			ArchiveFormat::Csv => "csv",
+		};
+		let archive_path = archive_dir.join(format!("archive_{stem}.{extension}"));
 		let grades_path = archive_dir.join(format!("grades_{stem}.csv"));
 		if !frozen.is_empty() {
 			let cases_path = archive_dir.join(format!("cases_{stem}.json"));
@@ -898,11 +911,11 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 		scriptmark::export::write_grades_csv(reports, items, std::fs::File::create(&grades_path)?)?;
 		println!("Grades written to {}", grades_path.display());
 
-		match args.format.as_str() {
-			"json" => {
+		match args.format {
+			ArchiveFormat::Json => {
 				std::fs::write(&archive_path, record.to_json())?;
 			}
-			"csv" => {
+			ArchiveFormat::Csv => {
 				let mut wtr = csv::Writer::from_path(&archive_path)?;
 				wtr.write_record([
 					"student_name",
@@ -973,7 +986,6 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 				}
 				wtr.flush()?;
 			}
-			other => anyhow::bail!("unknown archive format '{other}': use json or csv"),
 		}
 		println!("Archived to {}", archive_path.display());
 	}

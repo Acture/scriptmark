@@ -80,17 +80,6 @@ impl From<&Assignment> for AssignmentId {
 	}
 }
 
-impl std::fmt::Display for AssignmentId {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		write!(f, "'{}'", self.name)?;
-		if let (Some(course), Some(assignment)) = (self.canvas_course_id, self.canvas_assignment_id)
-		{
-			write!(f, " (Canvas course {course}, assignment {assignment})")?;
-		}
-		Ok(())
-	}
-}
-
 /// Where a batch's inputs are, as absolute paths.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -231,7 +220,7 @@ impl Record {
 				report.student_id
 			);
 		}
-		let digest = evidence_digest(&evidence);
+		let digest = evidence_digest(&evidence).context("the evidence cannot be recorded")?;
 		Ok(Record {
 			format: FORMAT,
 			evidence,
@@ -271,6 +260,7 @@ impl Record {
 	}
 
 	pub fn to_json(&self) -> String {
+		// `new` already serialised the evidence, and a revision is numbers and words.
 		serde_json::to_string_pretty(self).expect("a grading record is plain JSON") + "\n"
 	}
 
@@ -285,7 +275,7 @@ impl Record {
 
 	/// What the stored digests and numbering claim must hold.
 	fn verify(&self) -> Result<(), String> {
-		if evidence_digest(&self.evidence) != self.digest {
+		if evidence_digest(&self.evidence).map_err(|e| e.to_string())? != self.digest {
 			return Err(
 				"its evidence does not match its digest: it was edited or is incomplete".into(),
 			);
@@ -414,11 +404,16 @@ impl Record {
 	pub fn check(&self, current: &Current) -> Result<()> {
 		let evidence = &self.evidence;
 		let mut changed = Vec::new();
-		let assignment = AssignmentId::from(current.assignment);
-		if assignment != evidence.assignment {
+		// The name is a label — the record keeps the one it was graded under — but the
+		// Canvas ids say whose grades these are.
+		let (was, now) = (&evidence.assignment, AssignmentId::from(current.assignment));
+		if (now.canvas_course_id, now.canvas_assignment_id)
+			!= (was.canvas_course_id, was.canvas_assignment_id)
+		{
 			changed.push(format!(
-				"the assignment is {assignment}, not {}",
-				evidence.assignment
+				"the assignment's Canvas ids are {}, not {}",
+				canvas_ids(&now),
+				canvas_ids(was)
 			));
 		}
 		if current.attempt_policy != evidence.attempt_policy {
@@ -579,7 +574,7 @@ pub fn spec_versions(specs: &[TestSpec]) -> Result<Vec<SpecVersion>> {
 /// Every teacher file a spec reads, hashed: imports, data files, Python checkers and
 /// reference implementations, and every other `.py` file beside a module, checker or
 /// reference — the harness puts their directory on `sys.path`, so a helper there is
-/// imported without being declared.
+/// imported without being declared. A Finder `.DS_Store` in a data directory is not.
 fn sources(spec: &TestSpec) -> Result<BTreeMap<String, String>, String> {
 	let mut files: BTreeSet<PathBuf> = spec
 		.meta
@@ -629,6 +624,8 @@ fn sources(spec: &TestSpec) -> Result<BTreeMap<String, String>, String> {
 	for path in files {
 		fingerprint(&path, &mut hashes, &mut BTreeSet::new())?;
 	}
+	// Finder leaves these in any folder it opens; no test reads one.
+	hashes.retain(|path, _| !path.ends_with("/.DS_Store"));
 	Ok(hashes)
 }
 
@@ -670,6 +667,10 @@ pub fn bundle_version(
 /// of the archives they came out of.
 pub fn submission_version(student: &StudentSubmission) -> Result<SubmissionVersion> {
 	let hash = |path: &Path| -> Result<FileVersion> {
+		// Taken before anything runs: a path the record cannot hold must not cost a run.
+		if path.to_str().is_none() {
+			bail!("cannot record {}: its path is not UTF-8", path.display());
+		}
 		let bytes =
 			std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
 		Ok(FileVersion {
@@ -827,8 +828,8 @@ pub fn diff(before: Option<&Revision>, after: &Revision) -> Vec<Change> {
 		.collect()
 }
 
-fn evidence_digest(evidence: &Evidence) -> String {
-	digest(&serde_json::to_vec(evidence).expect("evidence is plain JSON"))
+fn evidence_digest(evidence: &Evidence) -> serde_json::Result<String> {
+	Ok(digest(&serde_json::to_vec(evidence)?))
 }
 
 fn revision_checksum(revision: &Revision) -> String {
@@ -841,6 +842,15 @@ fn revision_checksum(revision: &Revision) -> String {
 			&revision.grades,
 		))
 		.expect("a revision is plain JSON"),
+	)
+}
+
+fn canvas_ids(assignment: &AssignmentId) -> String {
+	let id = |id: Option<u64>| id.map_or_else(|| "none".to_string(), |id| id.to_string());
+	format!(
+		"course {} and assignment {}",
+		id(assignment.canvas_course_id),
+		id(assignment.canvas_assignment_id)
 	)
 }
 
@@ -1126,6 +1136,7 @@ mod tests {
 		at("solutions/ref.py", "def answer(x):\n    return x\n");
 		at("check.py", "print('{}')\n");
 		at("data/poem.txt", "words\n");
+		at("data/.DS_Store", "finder");
 		let spec = crate::spec_loader::load_spec_str(
 			"[meta]\nname = 'q'\nfile = 'q.py'\nfunction = 'f'\nlanguage = 'python'\n\
 			 imports = ['teacher/support.py']\ndata_files = ['data/']\n\
