@@ -119,6 +119,9 @@ scriptmark run submissions/ -t tests/ -o output/results.json
 # specs, teacher files, submissions or [matching] rules are refused: grade again.
 scriptmark rescore output/results.json
 
+# Grade afresh over a record that holds rescored revisions, discarding them
+scriptmark grade submissions/ -t tests/ --force
+
 # Read the latest revision, or any other with --revision N
 scriptmark summarize output/results.json --revision 1
 scriptmark export output/results.json -o grades.csv

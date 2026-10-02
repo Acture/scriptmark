@@ -422,7 +422,7 @@ fn a_run_is_scored_by_its_first_rescore() {
 }
 
 #[test]
-fn a_record_with_rescored_revisions_is_never_replaced() {
+fn a_record_with_rescored_revisions_is_replaced_only_by_force() {
 	let temp = bench();
 	let dir = temp.path();
 	succeeded(scriptmark(dir, &GRADE));
@@ -459,6 +459,29 @@ fn a_record_with_rescored_revisions_is_never_replaced() {
 			"out/again.json",
 		],
 	));
+
+	// There is no short form to type by accident.
+	let mut short = GRADE.to_vec();
+	short.push("-f");
+	refused(scriptmark(dir, &short), "unexpected argument '-f'");
+	assert_eq!(std::fs::read(dir.join("out/results.json")).unwrap(), saved);
+
+	// --force grades afresh over it, says what it discards, and composes with --fresh.
+	let mut force = GRADE.to_vec();
+	force.extend(["--force", "--fresh"]);
+	let output = succeeded(scriptmark(dir, &force));
+	assert!(
+		text(&output).contains("holds 2 score revisions, which it alone records; --force"),
+		"{}",
+		text(&output)
+	);
+	let replaced = record(dir);
+	assert_eq!(replaced.revisions.len(), 1);
+	assert_eq!(
+		grades(dir, None),
+		graded(100.0, 0.0),
+		"under the current policy"
+	);
 }
 
 #[test]

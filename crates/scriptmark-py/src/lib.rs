@@ -315,11 +315,14 @@ fn absolute(path: &Path) -> PyResult<PathBuf> {
 		.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{}: {e}", path.display())))
 }
 
-/// Refuse to write a record over one holding rescored revisions, before anything runs.
-fn check_output(output: Option<&str>) -> PyResult<()> {
-	match output {
-		Some(path) => record::check_replaceable(Path::new(path)).map_err(value_error),
-		None => Ok(()),
+/// Refuse to write a record over one holding rescored revisions, before anything runs,
+/// unless `force` says to discard them.
+fn check_output(output: Option<&str>, force: bool) -> PyResult<()> {
+	match output.map(|path| record::check_replaceable(Path::new(path))) {
+		Some(Err(why)) if !force => Err(value_error(format!(
+			"{why}: move it aside, write elsewhere, or pass force=True to discard them"
+		))),
+		_ => Ok(()),
 	}
 }
 
@@ -351,9 +354,9 @@ fn declared_for(
 ///
 /// `freeze` writes generated inputs and oracle answers; `replay` verifies and reuses
 /// a frozen bundle without recomputing its answers. `output` writes the grading record,
-/// unscored, for `rescore` to score.
+/// unscored, for `rescore` to score; `force=True` replaces one holding rescored revisions.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None, output=None))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None, output=None, force=false))]
 // Each is a keyword argument of the Python API; a struct would not be one.
 #[allow(clippy::too_many_arguments)]
 fn run(
@@ -365,8 +368,9 @@ fn run(
 	freeze: Option<String>,
 	replay: Option<String>,
 	output: Option<String>,
+	force: bool,
 ) -> PyResult<PyObject> {
-	check_output(output.as_deref())?;
+	check_output(output.as_deref(), force)?;
 	let tests = absolute(Path::new(&tests))?;
 	let assignment = assignment.map(|p| absolute(Path::new(&p))).transpose()?;
 	let (declared, specs, _) = declared_for(&tests, assignment.as_deref())?;
@@ -393,12 +397,12 @@ fn run(
 /// policy — `assignment.toml`, given or found beside the tests directory, exactly as the
 /// CLI reads it.
 ///
-/// `freeze` and `replay` are as for `run`. `output` writes the grading record, with this
-/// grade as its first revision.
+/// `freeze`, `replay` and `force` are as for `run`. `output` writes the grading record, with
+/// this grade as its first revision.
 ///
 /// Returns a list of StudentResult objects.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None, output=None))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None, output=None, force=false))]
 // Each is a keyword argument of the Python API; a struct would not be one.
 #[allow(clippy::too_many_arguments)]
 fn grade(
@@ -410,8 +414,9 @@ fn grade(
 	freeze: Option<String>,
 	replay: Option<String>,
 	output: Option<String>,
+	force: bool,
 ) -> PyResult<Vec<PyStudentResult>> {
-	check_output(output.as_deref())?;
+	check_output(output.as_deref(), force)?;
 	let tests = absolute(Path::new(&tests))?;
 	let assignment = assignment.map(|p| absolute(Path::new(&p))).transpose()?;
 	let (declared, specs, policy) = declared_for(&tests, assignment.as_deref())?;

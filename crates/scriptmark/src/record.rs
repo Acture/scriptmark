@@ -743,16 +743,16 @@ pub fn seal(
 	Ok(())
 }
 
-/// Whether a run may write its record over `path`. A record holding rescored revisions —
-/// grades kept nowhere else — is never replaced; anything else is, as before.
+/// Whether a run may write its record over `path` without losing anything: not when it
+/// holds rescored revisions, grades kept nowhere else. Anything else is replaced, as before.
+/// The caller says what to do instead, and may be told to replace it anyway.
 pub fn check_replaceable(path: &Path) -> Result<(), String> {
 	let Ok(text) = std::fs::read_to_string(path) else {
 		return Ok(());
 	};
 	match Record::from_json(&text) {
 		Ok(record) if record.revisions.len() > 1 => Err(format!(
-			"{} holds {} score revisions, which it alone records; move it aside, or write this \
-			 run to another file",
+			"{} holds {} score revisions, which it alone records",
 			path.display(),
 			record.revisions.len()
 		)),

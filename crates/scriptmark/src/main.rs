@@ -126,7 +126,7 @@ struct GradeArgs {
 	archive: Option<PathBuf>,
 
 	/// Archive format
-	#[arg(short, long, value_enum, default_value_t = ArchiveFormat::Csv)]
+	#[arg(long, value_enum, default_value_t = ArchiveFormat::Csv)]
 	format: ArchiveFormat,
 
 	/// Save results to SQLite database
@@ -135,6 +135,11 @@ struct GradeArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+
+	/// Replace the grading record at --output even when it holds rescored revisions,
+	/// discarding them. Long form only: there is no -f.
+	#[arg(long)]
+	force: bool,
 }
 
 /// How `--archive` writes the evidence: refused when spelled wrong, before anything runs.
@@ -189,6 +194,11 @@ struct RunArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+
+	/// Replace the grading record at --output even when it holds rescored revisions,
+	/// discarding them. Long form only: there is no -f.
+	#[arg(long)]
+	force: bool,
 }
 
 #[derive(Parser)]
@@ -207,6 +217,11 @@ struct MatchArgs {
 	assignment: Option<PathBuf>,
 	#[arg(long, default_value = "python3")]
 	python: String,
+
+	/// Replace the grading record at --output even when it holds rescored revisions,
+	/// discarding them. Long form only: there is no -f.
+	#[arg(long)]
+	force: bool,
 }
 
 /// Which score revision of a grading record to read.
@@ -789,11 +804,21 @@ fn prepare_batch(
 }
 
 /// Refuse to write a run's record over one holding rescored revisions — before anything
-/// runs, so a refused run costs nothing.
-fn check_output(output: &Path) -> Result<()> {
-	record::check_replaceable(output)
-		.map_err(anyhow::Error::msg)
-		.context("refusing to replace the grading record")
+/// runs, so a refused run costs nothing — unless `--force` says to discard them. Even then
+/// the record is replaced only once the run has succeeded.
+fn check_output(output: &Path, force: bool) -> Result<()> {
+	match record::check_replaceable(output) {
+		Ok(()) => Ok(()),
+		Err(why) if force => {
+			eprintln!("  note: {why}; --force replaces it once this run succeeds");
+			Ok(())
+		}
+		Err(why) => Err(anyhow::anyhow!(
+			"{why}: move it aside, write this run elsewhere with --output, or pass --force to \
+			 discard them"
+		))
+		.context("refusing to replace the grading record"),
+	}
 }
 
 /// Run the batch and record what it found, unscored. The submissions are fingerprinted
@@ -847,7 +872,7 @@ fn write_record(record: &Record, output: &Path) -> Result<()> {
 }
 
 async fn cmd_grade(args: GradeArgs) -> Result<()> {
-	check_output(&args.output)?;
+	check_output(&args.output, args.force)?;
 	let Batch {
 		input,
 		specs,
@@ -1041,7 +1066,7 @@ fn save_to_db(
 }
 
 async fn cmd_run(args: RunArgs) -> Result<()> {
-	check_output(&args.output)?;
+	check_output(&args.output, args.force)?;
 	// The policy is settled even though nothing is scored: a run whose results cannot be
 	// graded should say so now, not after the class has run.
 	let Batch {
@@ -1089,7 +1114,7 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 }
 
 fn cmd_match(args: MatchArgs) -> Result<()> {
-	check_output(&args.output)?;
+	check_output(&args.output, args.force)?;
 	let Batch {
 		input,
 		specs,
