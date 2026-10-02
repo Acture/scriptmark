@@ -33,10 +33,12 @@ git submodule update --init --recursive -- notes
 
 The parent repository pins a commit. The `branch = project/scriptmark` setting in
 `.gitmodules` is used by `--remote`; it does not automatically advance that pin.
-To adopt already-pushed documentation updates, start with a clean submodule:
+To adopt already-pushed documentation updates, start with a clean submodule. Set its
+fetch branch explicitly: single-branch clones can otherwise track only the vault's master.
 
 ```fish
 git -C notes status --short
+git -C notes remote set-branches origin project/scriptmark
 git submodule update --remote -- notes
 git diff --submodule=log -- notes
 git add notes
@@ -47,7 +49,8 @@ git push
 To edit documentation, first leave the detached checkout created by initialization:
 
 ```fish
-git -C notes fetch origin project/scriptmark
+git -C notes remote set-branches origin project/scriptmark
+git -C notes fetch origin
 git -C notes switch project/scriptmark
 git -C notes pull --ff-only origin project/scriptmark
 # Edit notes/scriptmark/; inspect the changes before staging.

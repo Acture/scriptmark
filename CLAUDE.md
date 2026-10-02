@@ -17,11 +17,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   retrieve the parent's pinned commit. After changing submodule URLs, run
   `git submodule sync -- notes` first.
 - Read the pinned notes when working on the current code revision. To deliberately
-  adopt the configured branch's latest commit, use
-  `git submodule update --remote -- notes`, review `git diff --submodule=log -- notes`,
+  adopt the configured branch's latest commit, first run
+  `git -C notes remote set-branches origin project/scriptmark` (single-branch clones
+  can otherwise fetch only master), then `git submodule update --remote -- notes`.
+  Review `git diff --submodule=log -- notes`,
   then commit the new gitlink. Initialization and updates may leave a detached HEAD.
 - Before editing, check `git -C notes status --short`, then run
-  `git -C notes fetch origin project/scriptmark`,
+  `git -C notes remote set-branches origin project/scriptmark`,
+  `git -C notes fetch origin`,
   `git -C notes switch project/scriptmark`, and
   `git -C notes pull --ff-only origin project/scriptmark`. Edit only `notes/scriptmark/`.
 - Stage with `git -C notes add -- scriptmark/`, commit in `notes`, and push with
