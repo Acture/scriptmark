@@ -12,21 +12,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   Start at `notes/scriptmark/README.md`; the teacher contract is
   `notes/scriptmark/docs/test-bundles.md`, and plans are in
   `notes/scriptmark/docs/plans/`. Do not recreate a maintained root `docs/` tree.
-- Clone with `git clone --recurse-submodules https://github.com/Acture/scriptmark.git`.
-  In an existing clone run `git submodule update --init --recursive -- notes` to
-  retrieve the parent's pinned commit. After changing submodule URLs, run
-  `git submodule sync -- notes` first.
-- Read the pinned notes when working on the current code revision. To deliberately
-  adopt the configured branch's latest commit, first run
-  `git -C notes remote set-branches origin project/scriptmark` (single-branch clones
-  can otherwise fetch only master), then `git submodule update --remote -- notes`.
-  Review `git diff --submodule=log -- notes`,
-  then commit the new gitlink. Initialization and updates may leave a detached HEAD.
-- Before editing, check `git -C notes status --short`, then run
-  `git -C notes remote set-branches origin project/scriptmark`,
-  `git -C notes fetch origin`,
-  `git -C notes switch project/scriptmark`, and
-  `git -C notes pull --ff-only origin project/scriptmark`. Edit only `notes/scriptmark/`.
+- Default to the latest remote `project/scriptmark` notes. At the start of every
+  session, after pulling code, and before reading or editing notes, run
+  `fish scripts/update-notes.fish` from this repository. This initializes missing
+  notes, fetches the configured project branch, fast-forwards it and leaves that branch
+  checked out. It handles single-branch clones. Never assume the gitlink is the latest.
+- Clone with `git clone https://github.com/Acture/scriptmark.git`, enter the clone,
+  then run the same helper. It stops on local notes edits, unpushed commits or divergence;
+  preserve and reconcile them instead of resetting or force-pushing. If fetching fails,
+  report that the latest notes were not verified; do not silently describe stale notes as current.
+- Edit only `notes/scriptmark/`. A newer notes checkout can make the parent's gitlink
+  dirty; review `git diff --submodule=log -- notes` and include the updated reference in
+  the next code commit. Do not reset notes just to remove that expected difference.
+- The gitlink remains a concrete saved checkpoint because Git requires one. Use
+  `git submodule update --init --checkout -- notes` only for an explicitly requested
+  historical reproduction, with clean notes. Pinned checkout is not the daily workflow.
 - Stage with `git -C notes add -- scriptmark/`, commit in `notes`, and push with
   `git -C notes push origin HEAD:refs/heads/project/scriptmark`. Only after that push
   succeeds, stage `notes` in this repository and commit/push its new gitlink. A failed

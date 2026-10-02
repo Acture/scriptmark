@@ -17,42 +17,42 @@ or open `notes/scriptmark/README.md` locally. The teacher guide is
 `notes/scriptmark/docs/test-bundles.md`; design records are under
 `notes/scriptmark/docs/plans/`. Access to the notes repository is required to initialize it.
 
-Clone with the pinned documentation commit:
+Daily work uses the latest `project/scriptmark` notes. Clone, then initialize/update
+the notes and attach their project branch:
 
 ```fish
-git clone --recurse-submodules https://github.com/Acture/scriptmark.git
+git clone https://github.com/Acture/scriptmark.git
 cd scriptmark
+fish scripts/update-notes.fish
 ```
 
-For an existing clone, or after pulling code changes, restore the recorded commit:
+At the start of each work session, after pulling code changes, and before reading or
+editing notes, use the same command:
 
 ```fish
-git submodule sync -- notes
-git submodule update --init --recursive -- notes
+fish scripts/update-notes.fish
 ```
 
-The parent repository pins a commit. The `branch = project/scriptmark` setting in
-`.gitmodules` is used by `--remote`; it does not automatically advance that pin.
-To adopt already-pushed documentation updates, start with a clean submodule. Set its
-fetch branch explicitly: single-branch clones can otherwise track only the vault's master.
+The helper fetches the configured project branch, fast-forwards it and leaves it
+checked out for editing. It also works after a single-branch clone. Local edits,
+unpushed commits and divergence stop the update so they can be preserved and resolved.
+If fetching fails, the checkout has not been confirmed current.
+
+Git still records a concrete submodule commit in each code commit. That is a saved
+checkpoint, not the daily reading policy; newer notes normally make `git status` show
+`notes` as changed. Include that updated reference in the next code commit:
 
 ```fish
-git -C notes status --short
-git -C notes remote set-branches origin project/scriptmark
-git submodule update --remote -- notes
 git diff --submodule=log -- notes
 git add notes
 git commit -m "docs: update ScriptMark notes"
 git push
 ```
 
-To edit documentation, first leave the detached checkout created by initialization:
+To edit documentation, update first, then publish the notes before the parent reference:
 
 ```fish
-git -C notes remote set-branches origin project/scriptmark
-git -C notes fetch origin
-git -C notes switch project/scriptmark
-git -C notes pull --ff-only origin project/scriptmark
+fish scripts/update-notes.fish
 # Edit notes/scriptmark/; inspect the changes before staging.
 git -C notes diff -- scriptmark/
 git -C notes add -- scriptmark/
@@ -69,6 +69,11 @@ force-push or discard notes. Runtime code, examples and artifacts stay in this r
 documentation edits belong on the notes branch. Original documentation history and
 the P-673 worktree handoff are recorded in
 [the migration record](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/MIGRATION.md).
+
+Only when explicitly reproducing an older code revision, restore its recorded notes
+with `git submodule update --init --checkout -- notes` from a clean notes checkout.
+Ordinary `git clone --recurse-submodules` uses that recorded checkpoint too; run the
+helper afterwards for current notes. Git has no floating gitlink that advances by itself.
 
 ## Installation
 

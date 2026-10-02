@@ -175,6 +175,7 @@ templates
 /prepared
 /Lab9_out*
 *.fish
+!scripts/update-notes.fish
 .scriptmark_extracted/
 .remember/
 tests/geec/
