@@ -342,7 +342,8 @@ def _removed_checker(*args, **kwargs):
 	raise RuntimeError(
 		"@checker no longer binds a checker to a function: put "
 		'check = { function = "<checker name>" } on each case it should judge '
-		"(docs/test-bundles.md, 'Migrating an older spec')"
+		"(https://github.com/Acture/obsidian-vault/blob/project/scriptmark/"
+		"scriptmark/docs/test-bundles.md#migrating-an-older-spec)"
 	)
 
 

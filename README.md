@@ -3,9 +3,69 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/Acture/scriptmark/ci.yml?label=CI)](https://github.com/Acture/scriptmark/actions)
 [![Crates.io](https://img.shields.io/crates/v/scriptmark)](https://crates.io/crates/scriptmark)
 [![PyPI](https://img.shields.io/pypi/v/scriptmark)](https://pypi.org/project/scriptmark/)
-[![License](https://img.shields.io/crates/l/scriptmark)](./LICENSE)
+[![License](https://img.shields.io/crates/l/scriptmark)](https://spdx.org/licenses/GPL-3.0-or-later.html)
 
 Automated grading CLI for student programming assignments. Rust core, TOML test specifications, Python bindings via PyO3.
+
+## Documentation and checkout
+
+Project documentation lives in
+[Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark/scriptmark),
+mounted here as the `notes/` submodule. Start with
+[the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/README.md)
+or open `notes/scriptmark/README.md` locally. The teacher guide is
+`notes/scriptmark/docs/test-bundles.md`; design records are under
+`notes/scriptmark/docs/plans/`. Access to the notes repository is required to initialize it.
+
+Clone with the pinned documentation commit:
+
+```fish
+git clone --recurse-submodules https://github.com/Acture/scriptmark.git
+cd scriptmark
+```
+
+For an existing clone, or after pulling code changes, restore the recorded commit:
+
+```fish
+git submodule sync -- notes
+git submodule update --init --recursive -- notes
+```
+
+The parent repository pins a commit. The `branch = project/scriptmark` setting in
+`.gitmodules` is used by `--remote`; it does not automatically advance that pin.
+To adopt already-pushed documentation updates, start with a clean submodule:
+
+```fish
+git -C notes status --short
+git submodule update --remote -- notes
+git diff --submodule=log -- notes
+git add notes
+git commit -m "docs: update ScriptMark notes"
+git push
+```
+
+To edit documentation, first leave the detached checkout created by initialization:
+
+```fish
+git -C notes fetch origin project/scriptmark
+git -C notes switch project/scriptmark
+git -C notes pull --ff-only origin project/scriptmark
+# Edit notes/scriptmark/; inspect the changes before staging.
+git -C notes diff -- scriptmark/
+git -C notes add -- scriptmark/
+git -C notes commit -m "docs(scriptmark): describe the change"
+git -C notes push origin HEAD:refs/heads/project/scriptmark
+and git add notes
+and git commit -m "docs: update ScriptMark notes"
+and git push
+```
+
+Push the notes successfully **before** updating the code repository's gitlink. If a
+fast-forward fails, resolve the divergence while preserving both versions. Do not
+force-push or discard notes. Runtime code, examples and artifacts stay in this repository;
+documentation edits belong on the notes branch. Original documentation history and
+the P-673 worktree handoff are recorded in
+[the migration record](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/MIGRATION.md).
 
 ## Installation
 
@@ -150,7 +210,7 @@ Reference answers are computed before grading and frozen for reuse. `--replay` v
 their sources and configuration, then reuses the answers without recomputing them.
 References can also supply declared exceptions, stdout and text files; see the
 [reference bundle](examples/bundles/reference_oracle) and
-[answer contract](docs/test-bundles.md#reference-implementations).
+[answer contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#reference-implementations).
 
 Every case runs in its own process and working directory. When state should carry over —
 an object built once and driven step by step — say so with a scenario:
@@ -181,7 +241,7 @@ expect = 150
 Anything a bundle cannot honour — an unknown field, a checker that does not exist, a
 case with nothing to judge — is refused before a single student runs. Every failure says
 whose it is: the student's, the teacher's, or the machine's. See
-[docs/test-bundles.md](docs/test-bundles.md) for the full contract, and
+[the teacher guide](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md) for the full contract, and
 [examples/bundles](examples/bundles) for a pure function, a shared object and file I/O.
 
 ### Scoring
@@ -208,7 +268,7 @@ points = 3
 aggregation = "proportional"  # points × pass rate; or "all_or_nothing"
 ```
 
-See [docs/test-bundles.md](docs/test-bundles.md#scoring) for every rule.
+See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#scoring) for every rule.
 
 ### Checkers
 
@@ -226,7 +286,7 @@ See [docs/test-bundles.md](docs/test-bundles.md#scoring) for every rule.
 ## Features
 
 - **Custom test engine** -- subprocess execution, no pytest dependency
-- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](docs/test-bundles.md#what-grading-does-not-defend-against))
+- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
 - **Per-item scoring** -- declared points and aggregation; zero and withheld kept apart in every export
@@ -237,4 +297,4 @@ See [docs/test-bundles.md](docs/test-bundles.md#scoring) for every rule.
 
 ## License
 
-[GPL-3.0-or-later](./LICENSE)
+[GPL-3.0-or-later](https://spdx.org/licenses/GPL-3.0-or-later.html)
