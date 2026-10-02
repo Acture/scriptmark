@@ -1,0 +1,15 @@
+[meta]
+name = "double"
+file = "solve.py"
+function = "double"
+language = "python"
+
+[[cases]]
+name = "positive"
+args = [3]
+expect = 6
+
+[[cases]]
+name = "negative"
+args = [-4]
+expect = -8

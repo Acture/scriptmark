@@ -40,7 +40,7 @@ pub(crate) fn detect_language(ext: &str) -> Option<&'static str> {
 /// Extract a student key from a filename.
 ///
 /// Convention: `{key}_{rest}.ext` (e.g. `alice_Lab5_1.py` → `alice`). This split is a
-/// placeholder — teacher-configurable matching is P-673 — so the key it yields is only
+/// source default; the key it yields is only
 /// ever an unconfirmed [`crate::models::StudentKey::Extracted`] until a roster vouches
 /// for it.
 fn extract_sid(filename: &str) -> Option<String> {
@@ -112,6 +112,7 @@ pub struct LocalInputOptions<'a> {
 	/// The roster of record. Without one, membership is unknown rather than negative.
 	pub roster: Option<&'a Roster>,
 	pub attempt_policy: AttemptPolicy,
+	pub matching: Option<&'a crate::matching::Config>,
 }
 
 impl Default for LocalInputOptions<'_> {
@@ -120,6 +121,7 @@ impl Default for LocalInputOptions<'_> {
 			assignment: Assignment::default(),
 			roster: None,
 			attempt_policy: AttemptPolicy::Latest,
+			matching: None,
 		}
 	}
 }
@@ -139,6 +141,11 @@ pub fn load_local_input(
 	let mut by_key: BTreeMap<String, Vec<StudentFile>> = BTreeMap::new();
 	// A student who sent only unusable files still submitted something.
 	let mut seen_keys: std::collections::BTreeSet<String> = Default::default();
+	let default_matching = crate::matching::Config::default();
+	let matching = options.matching.unwrap_or(&default_matching);
+	matching
+		.validate_owners()
+		.map_err(|e| DiscoveryError::Matching(e.to_string()))?;
 
 	for path in paths {
 		let path = path.as_ref();
@@ -166,11 +173,54 @@ pub fn load_local_input(
 		}
 	}
 
-	let all_paths: Vec<PathBuf> = paths
+	let mut all_paths: Vec<PathBuf> = paths
 		.iter()
 		.map(|p| p.as_ref().to_path_buf())
 		.chain(extra_dirs)
 		.collect();
+	// Walk nested submissions; never revisit the extraction cache or directory symlinks.
+	let mut index = 0;
+	while index < all_paths.len() {
+		let dir = &all_paths[index];
+		let mut children = Vec::new();
+		for entry in std::fs::read_dir(dir).map_err(|e| DiscoveryError::IoError(dir.clone(), e))? {
+			let entry = entry.map_err(|e| DiscoveryError::IoError(dir.clone(), e))?;
+			if entry
+				.file_type()
+				.map_err(|e| DiscoveryError::IoError(dir.clone(), e))?
+				.is_dir() && !crate::archive::is_noise(&entry.file_name().to_string_lossy())
+				&& entry.file_name() != EXTRACT_DIR
+			{
+				children.push(entry.path());
+			}
+		}
+		children.sort();
+		for child in children {
+			if !all_paths.contains(&child) {
+				if !child
+					.components()
+					.any(|part| part.as_os_str() == EXTRACT_DIR)
+				{
+					for extracted in extract_archives(&child, &mut diagnostics) {
+						if let Some(parent) = extracted.out_path.parent()
+							&& !all_paths.contains(&parent.to_path_buf())
+						{
+							all_paths.push(parent.to_path_buf());
+						}
+						origins.insert(
+							extracted.out_path,
+							FileOrigin::Archive {
+								archive: extracted.archive,
+								entry: extracted.entry,
+							},
+						);
+					}
+				}
+				all_paths.push(child);
+			}
+		}
+		index += 1;
+	}
 
 	for dir_path in &all_paths {
 		let entries = std::fs::read_dir(dir_path)
@@ -219,11 +269,39 @@ pub fn load_local_input(
 				.and_then(|e| e.to_str())
 				.unwrap_or("")
 				.to_lowercase();
-			// Archives are inputs to extraction, not submissions in their own right — but
-			// the upload still happened. Registering the owner here is what stops a
-			// truncated or empty archive being reported as 缺交.
+			// Inside an extraction directory the archive stem carries the key; the files
+			// within it are named by the student.
+			let default_key = if let Some(FileOrigin::Archive { archive, .. }) = origins.get(&path)
+			{
+				archive
+					.file_name()
+					.and_then(|n| n.to_str())
+					.and_then(extract_sid)
+			} else {
+				extract_sid(filename)
+			};
+			let owner_path = match origins.get(&path) {
+				Some(FileOrigin::Archive { archive, .. }) => archive,
+				_ => &path,
+			};
+			let relative = paths
+				.iter()
+				.filter_map(|root| owner_path.strip_prefix(root.as_ref()).ok())
+				.min_by_key(|p| p.components().count())
+				.unwrap_or(owner_path);
+			let owner = matching
+				.owner(relative, owner_path, default_key)
+				.map_err(|e| DiscoveryError::Matching(e.to_string()))?;
+			if owner.state == crate::matching::State::Ambiguous {
+				diagnostics.push(InputDiagnostic::error(DiagnosticKind::AmbiguousOwner {
+					path: path.clone(),
+					decision: owner.clone(),
+				}));
+			}
+			let key = owner.selected.clone();
+			// Even an empty/unreadable archive records receipt under the teacher's owner rule.
 			if !is_extracted && crate::archive::format_of(&path).is_some() {
-				match extract_sid(filename) {
+				match key {
 					Some(key) => {
 						seen_keys.insert(key);
 					}
@@ -235,28 +313,15 @@ pub fn load_local_input(
 				continue;
 			}
 
-			// Inside an extraction directory the archive stem carries the key; the files
-			// within it are named by the student.
-			let key = if is_extracted {
-				dir_path
-					.file_name()
-					.and_then(|n| n.to_str())
-					.and_then(extract_sid)
-					.or_else(|| extract_sid(filename))
-			} else {
-				extract_sid(filename)
-			};
-
 			let language = detect_language(&ext);
 
 			match (key, language) {
 				(Some(key), Some(language)) => {
 					seen_keys.insert(key.clone());
 					let origin = origins.get(&path).cloned().unwrap_or(FileOrigin::Direct);
-					by_key
-						.entry(key)
-						.or_default()
-						.push(StudentFile::direct(path.clone(), language).with_origin(origin));
+					let mut file = StudentFile::direct(path.clone(), language).with_origin(origin);
+					file.owner = Some(owner);
+					by_key.entry(key).or_default().push(file);
 				}
 				(Some(key), None) => {
 					// Owner known, type unusable: the student submitted, just not code.
@@ -375,6 +440,8 @@ pub fn load_local_input(
 
 #[derive(Debug, thiserror::Error)]
 pub enum DiscoveryError {
+	#[error("invalid matching rules: {0}")]
+	Matching(String),
 	#[error("not a directory: {0}")]
 	NotADirectory(std::path::PathBuf),
 	#[error("IO error reading {0}: {1}")]

@@ -288,26 +288,32 @@ impl Freezing<'_> {
 /// `freeze` writes generated inputs and oracle answers; `replay` verifies and reuses
 /// a frozen bundle without recomputing its answers.
 #[pyfunction]
-#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", freeze=None, replay=None))]
+#[pyo3(signature = (submissions, tests, *, timeout=10, python="python3", assignment=None, freeze=None, replay=None))]
 fn run(
-	py: Python<'_>,
 	submissions: Vec<String>,
 	tests: String,
 	timeout: u64,
 	python: &str,
+	assignment: Option<String>,
 	freeze: Option<String>,
 	replay: Option<String>,
 ) -> PyResult<PyObject> {
 	let specs = load_specs_from_dir(Path::new(&tests)).map_err(spec_error)?;
+	let mut declared =
+		scriptmark::assignment::load(assignment.as_deref().map(Path::new), Path::new(&tests))
+			.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+	scriptmark::assignment::settle(&mut declared.assignment, &declared.grading, &specs)
+		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 	let freezing = Freezing {
 		freeze: freeze.as_deref(),
 		replay: replay.as_deref(),
 	};
-	let (results, inputs) = run_grading(&submissions, specs, timeout, python, &freezing)?;
+	let (results, inputs) =
+		run_grading(&submissions, specs, timeout, python, &freezing, &declared)?;
 	freezing.save(&inputs)?;
 	let json_val = serde_json::to_value(&results)
 		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
-	json_to_py(py, &json_val)
+	Python::with_gil(|py| json_to_py(py, &json_val))
 }
 
 /// Grade all students: run the tests, then score each item under the assignment's
@@ -341,7 +347,8 @@ fn grade(
 		freeze: freeze.as_deref(),
 		replay: replay.as_deref(),
 	};
-	let (mut reports, inputs) = run_grading(&submissions, specs, timeout, python, &freezing)?;
+	let (mut reports, inputs) =
+		run_grading(&submissions, specs, timeout, python, &freezing, &declared)?;
 	grade_all(&mut reports, &declared.assignment.items, &policy).map_err(value_error)?;
 	freezing.save(&inputs)?;
 
@@ -364,7 +371,12 @@ fn run_grading(
 	timeout: u64,
 	python: &str,
 	freezing: &Freezing,
+	declared: &scriptmark::assignment::Declared,
 ) -> PyResult<(Vec<StudentReport>, Frozen)> {
+	declared
+		.matching
+		.validate(&specs)
+		.map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
 	let generation = match freezing.replay {
 		Some(path) => Generation::Replay(Frozen::load(Path::new(path)).map_err(frozen_error)?),
 		None => Generation::fresh(),
@@ -381,10 +393,25 @@ fn run_grading(
 		frozen::writable(Path::new(path))
 			.map_err(|e| pyo3::exceptions::PyOSError::new_err(format!("{path}: {e}")))?;
 	}
-	let input = local_input(submissions)?;
+	let paths: Vec<&Path> = submissions.iter().map(|p| Path::new(p.as_str())).collect();
+	let input = load_local_input(
+		&paths,
+		LocalInputOptions {
+			assignment: declared.assignment.clone(),
+			attempt_policy: declared.attempt_policy,
+			matching: Some(&declared.matching),
+			..Default::default()
+		},
+	)
+	.map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+	let errors: Vec<String> = input.errors().map(ToString::to_string).collect();
+	if !errors.is_empty() {
+		return Err(pyo3::exceptions::PyValueError::new_err(errors.join("; ")));
+	}
 
 	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
 	let options = RunOptions {
+		matching: declared.matching.clone(),
 		concurrency: None,
 		python: executor.python_cmd().to_string(),
 	};

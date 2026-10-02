@@ -46,6 +46,7 @@ fn call(target: Target, args: Vec<Value>) -> CallPlan {
 fn unit(file: &Path) -> UnitPlan {
 	UnitPlan {
 		subject: Subject::Student,
+		functions: scriptmark::matching::Functions::default(),
 		file: file.to_path_buf(),
 		script: None,
 		imports: Vec::new(),

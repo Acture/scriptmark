@@ -216,6 +216,8 @@ pub enum FileOrigin {
 pub struct StudentFile {
 	pub path: PathBuf,
 	pub language: String,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub owner: Option<crate::matching::Decision>,
 	#[serde(default)]
 	pub origin: FileOrigin,
 }
@@ -226,6 +228,7 @@ impl StudentFile {
 		Self {
 			path: path.into(),
 			language: language.into(),
+			owner: None,
 			origin: FileOrigin::Direct,
 		}
 	}
@@ -533,6 +536,11 @@ pub enum DiagnosticSeverity {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticKind {
+	#[error("ambiguous owner of '{path}': {decision:?}; add a matching.owners override")]
+	AmbiguousOwner {
+		path: PathBuf,
+		decision: crate::matching::Decision,
+	},
 	#[error("roster lists '{key}' in {count} identical rows; merged into one")]
 	DuplicateRosterEntry { key: String, count: usize },
 	#[error("roster rows disagree about who '{key}' is: {detail}")]

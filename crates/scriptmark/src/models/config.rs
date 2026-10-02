@@ -135,6 +135,8 @@ pub enum AttemptPolicy {
 #[serde(deny_unknown_fields)]
 pub struct AssignmentConfig {
 	pub assignment: AssignmentInfo,
+	#[serde(default)]
+	pub matching: crate::matching::Config,
 	/// Expected student files.
 	#[serde(default)]
 	pub files: Vec<FilePattern>,

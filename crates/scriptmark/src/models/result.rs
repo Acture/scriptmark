@@ -31,6 +31,8 @@ pub enum Fault {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
+	/// A file/function decision needs teacher review; never a student zero.
+	Matching,
 	/// No file matched the spec.
 	NoFile,
 	/// The function, method or attribute does not exist.
@@ -75,6 +77,8 @@ pub enum Cause {
 /// What the call was given: the evidence behind "明确测试输入".
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CaseInput {
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub matching: Option<crate::matching::Decision>,
 	/// The name asked for, and — when a lookup may have substituted — the one it found.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub target: Option<String>,
@@ -178,6 +182,8 @@ impl TestResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StudentReport {
+	#[serde(default)]
+	pub matches: Vec<crate::matching::ItemMatch>,
 	/// `StudentKey`'s rendering — a bare 学号, or a `canvas:` / `local:` prefixed form that
 	/// can never be mistaken for one.
 	pub student_id: String,
@@ -214,6 +220,7 @@ impl StudentReport {
 	pub fn new(student_id: impl Into<String>, submission_state: SubmissionOutcome) -> Self {
 		Self {
 			student_id: student_id.into(),
+			matches: Vec::new(),
 			student_name: None,
 			test_results: Vec::new(),
 			backend_name: None,

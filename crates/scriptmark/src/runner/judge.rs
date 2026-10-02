@@ -244,6 +244,14 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 		match obs.setup.get(index) {
 			Some(record) => match &record.outcome {
 				Outcome::Returned { .. } => {}
+				Outcome::Matching { message, .. } => {
+					return blanket(
+						TestStatus::Error,
+						Fault::Teacher,
+						Cause::Matching,
+						message.clone(),
+					);
+				}
 				outcome => {
 					return blanket(
 						TestStatus::Error,
@@ -349,6 +357,7 @@ fn describe(outcome: &Outcome, timeout: u64) -> String {
 			format!("returned a value that cannot be represented: {}", e.message)
 		}
 		Outcome::Missing { message } => message.clone(),
+		Outcome::Matching { message, .. } => message.clone(),
 		Outcome::Unresolved { name } => format!("needs '{name}', which was never produced"),
 	}
 }
@@ -418,6 +427,7 @@ fn blanket_result(s: &Scored, blanket: &Blanket, target: Option<String>) -> Case
 fn input_of(case: &TestCase, record: Option<&CallObservation>) -> CaseInput {
 	let resolved = record.and_then(|r| r.target.as_ref());
 	CaseInput {
+		matching: resolved.and_then(|r| r.matching.clone()),
 		target: resolved.map(|r| r.requested.clone()),
 		resolved: resolved
 			.filter(|r| r.resolved != r.requested)
@@ -484,6 +494,14 @@ fn judge_call(
 		&& (case.expected_stdout.is_some() || case.check.is_some());
 	// 1. The outcome, against `expect_error`.
 	match &record.outcome {
+		Outcome::Matching { message, .. } => {
+			return verdict.fail(
+				TestStatus::Error,
+				Fault::Teacher,
+				Cause::Matching,
+				message.clone(),
+			);
+		}
 		Outcome::Missing { message } => {
 			return verdict.fail(
 				TestStatus::Missing,
@@ -771,6 +789,7 @@ mod tests {
 	fn plan(steps: usize) -> UnitPlan {
 		UnitPlan {
 			subject: Subject::Student,
+			functions: crate::matching::Functions::default(),
 			file: "lab.py".into(),
 			script: None,
 			imports: Vec::new(),
@@ -801,6 +820,7 @@ mod tests {
 		CallObservation {
 			index,
 			target: Some(Resolved {
+				matching: None,
 				requested: "f".into(),
 				resolved: "f".into(),
 			}),

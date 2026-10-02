@@ -1,0 +1,11 @@
+[assignment]
+name = "matching"
+
+[[matching.students]]
+kind = "directory"
+level = 0
+
+[[matching.items]]
+id = "double"
+files = ["solution.py"]
+functions = { double = ["times_two"] }

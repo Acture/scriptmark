@@ -37,6 +37,8 @@ enum Commands {
 	Grade(GradeArgs),
 	/// Run tests only, output raw results to JSON
 	Run(RunArgs),
+	/// Preview student, file and function matching without running student programs
+	Match(MatchArgs),
 	/// Summarize existing results (re-analyze without re-running)
 	Summarize(SummarizeArgs),
 	/// Canvas LMS: browse courses, and fetch an assignment for grading
@@ -173,6 +175,24 @@ struct RunArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+}
+
+#[derive(Parser)]
+struct MatchArgs {
+	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	submissions: Vec<PathBuf>,
+	#[arg(long)]
+	canvas: Option<PathBuf>,
+	#[arg(short = 't', long = "tests")]
+	tests_dir: PathBuf,
+	#[arg(short, long, default_value = "output/matches.json")]
+	output: PathBuf,
+	#[arg(short, long)]
+	roster: Option<PathBuf>,
+	#[arg(long)]
+	assignment: Option<PathBuf>,
+	#[arg(long, default_value = "python3")]
+	python: String,
 }
 
 #[derive(Parser)]
@@ -360,6 +380,7 @@ fn build_local_input(
 	submissions: &[PathBuf],
 	declared: &Declared,
 	roster_path: Option<&PathBuf>,
+	preview: bool,
 ) -> Result<AssignmentInput> {
 	let (assignment, attempt_policy) = (declared.assignment.clone(), declared.attempt_policy);
 
@@ -374,6 +395,7 @@ fn build_local_input(
 			assignment,
 			roster: roster.as_ref(),
 			attempt_policy,
+			matching: Some(&declared.matching),
 		},
 	)
 	.context("Failed to discover submissions")?;
@@ -384,7 +406,7 @@ fn build_local_input(
 	// itself about who a 学号 belongs to would attribute somebody's work to the wrong name.
 	// Stop before running anything rather than producing results nobody should act on.
 	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
-	if !errors.is_empty() {
+	if !preview && !errors.is_empty() {
 		anyhow::bail!(
 			"refusing to grade: {} problem(s) with the input\n  {}",
 			errors.len(),
@@ -478,6 +500,7 @@ async fn main() -> Result<()> {
 	match cli.command {
 		Commands::Grade(args) => cmd_grade(args).await,
 		Commands::Run(args) => cmd_run(args).await,
+		Commands::Match(args) => cmd_match(args),
 		Commands::Summarize(args) => cmd_summarize(args),
 		Commands::Canvas(cmd) => cmd_canvas(cmd).await,
 		Commands::RosterPull(args) => cmd_roster_pull(args).await,
@@ -515,9 +538,8 @@ fn label<T: serde::Serialize>(value: Option<T>) -> String {
 async fn run_bundles(
 	students: &[StudentSubmission],
 	specs: Vec<TestSpec>,
-	python: &str,
+	mut run_options: RunOptions,
 	timeout: u64,
-	concurrency: Option<u64>,
 	output: &Path,
 	options: &FrozenArgs,
 ) -> Result<(Vec<StudentReport>, Frozen)> {
@@ -525,7 +547,7 @@ async fn run_bundles(
 		Some(path) => Generation::Replay(Frozen::load(path)?),
 		None => Generation::fresh(),
 	};
-	let executor = Arc::new(PythonExecutor::with_python_cmd(python));
+	let executor = Arc::new(PythonExecutor::with_python_cmd(&run_options.python));
 	let bundles = prepare(specs, &generation, executor.clone(), timeout)
 		.await
 		.context("refusing to grade: the test bundle is not ready")?;
@@ -552,10 +574,7 @@ async fn run_bundles(
 			}
 		}
 	}
-	let run_options = RunOptions {
-		concurrency: concurrency.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
-		python: executor.python_cmd().to_string(),
-	};
+	run_options.python = executor.python_cmd().to_string();
 	// Units run in their own process groups, so the terminal's Ctrl-C reaches only the
 	// grader: take them down with it rather than leave them running to their timeouts.
 	tokio::select! {
@@ -591,6 +610,7 @@ struct Batch {
 	input: AssignmentInput,
 	specs: Vec<TestSpec>,
 	policy: Policy,
+	matching: scriptmark::matching::Config,
 }
 
 /// Load the assignment and the specs, settle the items and the policy against each other,
@@ -601,12 +621,14 @@ fn prepare_batch(
 	tests_dir: &std::path::Path,
 	assignment_path: Option<&PathBuf>,
 	roster: Option<&PathBuf>,
+	preview: bool,
 ) -> Result<Batch> {
 	let mut declared = assignment::load(assignment_path.map(PathBuf::as_path), tests_dir)?;
 	let specs = load_specs_from_dir(tests_dir).context("Failed to load test specifications")?;
 	println!("Loaded {} test specs", specs.len());
 
 	let policy = assignment::settle(&mut declared.assignment, &declared.grading, &specs)?;
+	declared.matching.validate(&specs)?;
 	if policy.derived_items() {
 		eprintln!(
 			"  note: no [[items]] declared; each spec is an item worth 1 point. To weight \
@@ -618,13 +640,14 @@ fn prepare_batch(
 	// Names, roster membership and submission state all come from the model, so there is
 	// no separate roster merge afterwards.
 	let input = match canvas {
-		Some(bundle) => build_canvas_input(bundle, &declared)?,
-		None => build_local_input(submissions, &declared, roster)?,
+		Some(bundle) => build_canvas_input(bundle, &declared, preview)?,
+		None => build_local_input(submissions, &declared, roster, preview)?,
 	};
 	Ok(Batch {
 		input,
 		specs,
 		policy,
+		matching: declared.matching,
 	})
 }
 
@@ -633,20 +656,27 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 		input,
 		specs,
 		policy,
+		matching,
 	} = prepare_batch(
 		&args.submissions,
 		args.canvas.as_ref(),
 		&args.tests_dir,
 		args.assignment.as_ref(),
 		args.roster.as_ref(),
+		false,
 	)?;
 
 	let (mut reports, inputs) = run_bundles(
 		&input.students,
 		specs,
-		&args.python,
+		RunOptions {
+			python: args.python,
+			matching,
+			concurrency: args
+				.concurrency
+				.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+		},
 		args.timeout,
-		args.concurrency,
 		&args.output,
 		&args.frozen,
 	)
@@ -811,21 +841,32 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 async fn cmd_run(args: RunArgs) -> Result<()> {
 	// The policy is settled even though nothing is scored: a run whose results cannot be
 	// graded should say so now, not after the class has run.
-	let Batch { input, specs, .. } = prepare_batch(
+	let Batch {
+		input,
+		specs,
+		matching,
+		..
+	} = prepare_batch(
 		&args.submissions,
 		args.canvas.as_ref(),
 		&args.tests_dir,
 		args.assignment.as_ref(),
 		args.roster.as_ref(),
+		false,
 	)?;
 
 	// A JSON array, the same shape `grade` writes; unscored until graded.
 	let (results, inputs) = run_bundles(
 		&input.students,
 		specs,
-		&args.python,
+		RunOptions {
+			python: args.python,
+			matching,
+			concurrency: args
+				.concurrency
+				.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+		},
 		args.timeout,
-		args.concurrency,
 		&args.output,
 		&args.frozen,
 	)
@@ -839,6 +880,34 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 	println!("Results saved to {}", args.output.display());
 	save_frozen(&inputs, &args.output)?;
 
+	Ok(())
+}
+
+fn cmd_match(args: MatchArgs) -> Result<()> {
+	let Batch {
+		input,
+		specs,
+		matching,
+		..
+	} = prepare_batch(
+		&args.submissions,
+		args.canvas.as_ref(),
+		&args.tests_dir,
+		args.assignment.as_ref(),
+		args.roster.as_ref(),
+		true,
+	)?;
+	let preview = scriptmark::matching::preview(input, &specs, &matching, &args.python)?;
+	if let Some(parent) = args.output.parent() {
+		std::fs::create_dir_all(parent)?;
+	}
+	std::fs::write(&args.output, serde_json::to_string_pretty(&preview)?)?;
+	println!(
+		"Matching preview saved to {}: {} item(s) pending review, {} unattributed file(s)",
+		args.output.display(),
+		preview.pending.len(),
+		preview.input.unmatched.len()
+	);
 	Ok(())
 }
 
@@ -880,7 +949,11 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 /// ids only where the toml left them unset, and a genuine disagreement is refused rather
 /// than resolved — grading one assignment's submissions against another's declaration is
 /// not something a warning covers.
-fn build_canvas_input(bundle: &std::path::Path, declared: &Declared) -> Result<AssignmentInput> {
+fn build_canvas_input(
+	bundle: &std::path::Path,
+	declared: &Declared,
+	preview: bool,
+) -> Result<AssignmentInput> {
 	use scriptmark::canvas::bundle;
 
 	let (assignment, attempt_policy) = (declared.assignment.clone(), declared.attempt_policy);
@@ -917,7 +990,7 @@ fn build_canvas_input(bundle: &std::path::Path, declared: &Declared) -> Result<A
 	report_input(&input);
 
 	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
-	if !errors.is_empty() {
+	if !preview && !errors.is_empty() {
 		anyhow::bail!(
 			"refusing to grade: {} problem(s) with the input\n  {}",
 			errors.len(),
@@ -927,8 +1000,10 @@ fn build_canvas_input(bundle: &std::path::Path, declared: &Declared) -> Result<A
 
 	// The record of which attempt was graded, and of every file's provenance, outlives the
 	// process that produced it.
-	bundle::save_input(bundle, &input)
-		.with_context(|| format!("failed to write {}", bundle::input_path(bundle).display()))?;
+	if !preview {
+		bundle::save_input(bundle, &input)
+			.with_context(|| format!("failed to write {}", bundle::input_path(bundle).display()))?;
+	}
 
 	Ok(input)
 }

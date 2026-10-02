@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{StudentFile, Target, TestSpec};
+use crate::models::{Target, TestSpec};
 
 /// A language backend.
 pub trait Executor: Send + Sync + 'static {
@@ -20,9 +20,6 @@ pub trait Executor: Send + Sync + 'static {
 	fn identity(&self) -> Result<String, String> {
 		Ok(self.language().to_string())
 	}
-
-	/// Pick the student's file for a spec. P-673 owns the rule.
-	fn locate<'a>(&self, files: &'a [StudentFile], spec: &TestSpec) -> Option<&'a StudentFile>;
 
 	/// Import the spec's teacher modules the way a unit would, and report their exports.
 	fn inspect(
@@ -48,6 +45,7 @@ pub enum Subject {
 #[derive(Debug, Clone)]
 pub struct UnitPlan {
 	pub subject: Subject,
+	pub functions: crate::matching::Functions,
 	/// Copied into the unit's working directory before running.
 	pub file: PathBuf,
 	/// Run the file as `__main__` with this stdin, instead of calling functions.
@@ -180,11 +178,18 @@ pub struct CallObservation {
 pub struct Resolved {
 	pub requested: String,
 	pub resolved: String,
+	#[serde(default)]
+	pub matching: Option<crate::matching::Decision>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Outcome {
+	/// A teacher must choose among candidates or repair an explicit override.
+	Matching {
+		message: String,
+		decision: crate::matching::Decision,
+	},
 	Returned {
 		value: Value,
 		#[serde(rename = "type")]
