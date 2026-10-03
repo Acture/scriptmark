@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
 zip = { workspace = true }
+rust_xlsxwriter = { workspace = true }
 libc = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
@@ -47,4 +48,5 @@ tempfile = "3"
 sha2 = "0.10"
 
 [dev-dependencies]
+calamine = { workspace = true }
 wiremock = "0.6.5"

@@ -192,3 +192,6 @@ src/crates/scriptmark/tests/fixtures/**/.DS_Store
 !examples/bundles/*/submissions/
 !examples/bundles/*/submissions/**
 examples/bundles/**/__pycache__/
+# OSS-148: a bundle's roster, and the grade sheets it is expected to export.
+!examples/bundles/*/*.csv
+!examples/bundles/*/expected/*.csv
