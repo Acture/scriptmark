@@ -682,20 +682,27 @@ fn the_assignment_name_is_a_label_so_declaring_items_later_rescores() {
 	assert_eq!(grades(dir, None), graded(100.0, 0.0));
 }
 
-#[test]
-fn a_replaced_archive_is_a_changed_submission_even_behind_a_stale_extraction() {
-	let temp = bench();
-	let dir = temp.path();
-	let zip_of = |content: &str| {
-		std::fs::remove_file(dir.join("submissions/bob_sum.py")).ok();
-		let file = std::fs::File::create(dir.join("submissions/bob_hw.zip")).unwrap();
-		let mut zip = zip::ZipWriter::new(file);
-		zip.start_file("sum.py", zip::write::SimpleFileOptions::default())
+/// bob hands in `bob_hw.zip` instead of `bob_sum.py`.
+fn bob_zips(dir: &Path, entries: &[(&str, &str)]) {
+	std::fs::remove_file(dir.join("submissions/bob_sum.py")).ok();
+	let file = std::fs::File::create(dir.join("submissions/bob_hw.zip")).unwrap();
+	let mut zip = zip::ZipWriter::new(file);
+	for (name, content) in entries {
+		zip.start_file(*name, zip::write::SimpleFileOptions::default())
 			.unwrap();
 		std::io::Write::write_all(&mut zip, content.as_bytes()).unwrap();
-		zip.finish().unwrap();
-	};
-	zip_of("def add(a, b):\n    return abs(a) + abs(b)\n");
+	}
+	zip.finish().unwrap();
+}
+
+const WRONG: &str = "def add(a, b):\n    return abs(a) + abs(b)\n";
+const RIGHT: &str = "def add(a, b):\n    return a + b\n";
+
+#[test]
+fn a_replaced_archive_is_a_changed_submission() {
+	let temp = bench();
+	let dir = temp.path();
+	bob_zips(dir, &[("sum.py", WRONG)]);
 	succeeded(scriptmark(dir, &GRADE));
 	let bob = record(dir)
 		.evidence
@@ -705,10 +712,34 @@ fn a_replaced_archive_is_a_changed_submission_even_behind_a_stale_extraction() {
 		.unwrap();
 	assert_eq!(bob.submission.unwrap().archives.len(), 1);
 
-	// The extraction from the first archive stays on disk; the archive itself changed.
-	zip_of("def add(a, b):\n    return a + b\n");
+	bob_zips(dir, &[("sum.py", RIGHT)]);
 	all_or_nothing(dir);
 	refused(rescore(dir, &[]), "local:bob's submitted files changed");
+}
+
+/// P-868, as reported: bob fixes `sum.py` and re-uploads `bob_hw.zip` under the same name,
+/// dropping a helper on the way. Grading again grades the new archive — and only it.
+#[test]
+fn a_replaced_archive_is_graded_from_its_new_contents() {
+	let temp = bench();
+	let dir = temp.path();
+	bob_zips(dir, &[("sum.py", WRONG), ("util.py", "")]);
+	succeeded(scriptmark(dir, &GRADE));
+	assert_eq!(grades(dir, None), graded(100.0, 50.0));
+
+	bob_zips(dir, &[("sum.py", RIGHT)]);
+	succeeded(scriptmark(dir, &GRADE));
+	// Exactly two students: the dropped util.py does not come back as a student "util".
+	assert_eq!(grades(dir, None), graded(100.0, 100.0));
+	let bob = record(dir)
+		.evidence
+		.students
+		.into_iter()
+		.find(|r| r.student_id == "local:bob")
+		.unwrap();
+	let files = bob.submission.unwrap().files;
+	assert_eq!(files.len(), 1);
+	assert_eq!(std::fs::read_to_string(&files[0].path).unwrap(), RIGHT);
 }
 
 /// A Canvas bundle as `canvas fetch` leaves one, for course 7, assignment 8. Ada tried
