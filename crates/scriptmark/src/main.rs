@@ -121,13 +121,10 @@ struct GradeArgs {
 	#[arg(long, default_value = "python3")]
 	python: String,
 
-	/// Archive results to this directory (JSON/CSV)
+	/// Also write CSV tables to this directory: one row per case, and one per student's
+	/// grade, beside the frozen inputs. The JSON is the record at --output.
 	#[arg(short, long)]
 	archive: Option<PathBuf>,
-
-	/// Archive format
-	#[arg(long, value_enum, default_value_t = ArchiveFormat::Csv)]
-	format: ArchiveFormat,
 
 	/// Save results to SQLite database
 	#[arg(long)]
@@ -140,15 +137,6 @@ struct GradeArgs {
 	/// discarding them. Long form only: there is no -f.
 	#[arg(long)]
 	force: bool,
-}
-
-/// How `--archive` writes the evidence: refused when spelled wrong, before anything runs.
-#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum ArchiveFormat {
-	/// The grading record itself
-	Json,
-	/// One row per case
-	Csv,
 }
 
 #[derive(Parser)]
@@ -932,11 +920,7 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 			.file_name()
 			.and_then(|n| n.to_str())
 			.unwrap_or("results");
-		let extension = match args.format {
-			ArchiveFormat::Json => "json",
-			ArchiveFormat::Csv => "csv",
-		};
-		let archive_path = archive_dir.join(format!("archive_{stem}.{extension}"));
+		let archive_path = archive_dir.join(format!("archive_{stem}.csv"));
 		let grades_path = archive_dir.join(format!("grades_{stem}.csv"));
 		if !frozen.is_empty() {
 			let cases_path = archive_dir.join(format!("cases_{stem}.json"));
@@ -946,82 +930,76 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 		scriptmark::export::write_grades_csv(reports, items, std::fs::File::create(&grades_path)?)?;
 		println!("Grades written to {}", grades_path.display());
 
-		match args.format {
-			ArchiveFormat::Json => {
-				std::fs::write(&archive_path, record.to_json())?;
-			}
-			ArchiveFormat::Csv => {
-				let mut wtr = csv::Writer::from_path(&archive_path)?;
-				wtr.write_record([
-					"student_name",
-					"student_id",
-					"submission_state",
-					"item_id",
-					"case_name",
-					"status",
-					"actual",
-					"expected",
-					"message",
-					"elapsed_ms",
-					"fault",
-					"cause",
-				])?;
-				for report in reports {
-					let state = label(Some(report.submission_state));
-					let mut rows = 0usize;
-					for test_result in &report.test_results {
-						for case in &test_result.cases {
-							rows += 1;
-							wtr.write_record([
-								report.student_name.as_deref().unwrap_or(""),
-								&report.student_id,
-								&state,
-								&test_result.item_id,
-								&case.case_name,
-								&format!("{:?}", case.status),
-								case.actual.as_deref().unwrap_or(""),
-								case.expected.as_deref().unwrap_or(""),
-								case.failure
-									.as_ref()
-									.map(|f| f.message.as_str())
-									.unwrap_or(""),
-								&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
-								&label(case.fault),
-								&label(case.cause),
-							])?;
-						}
-					}
-					// Every student gets at least one row, so the CSV covers the same cohort
-					// as the JSON archive rather than quietly dropping non-submitters. Its
-					// message says why there is no grade.
-					if rows == 0 {
-						let why = report.error.clone().unwrap_or_else(|| {
-							label(report.grade.as_ref().and_then(|g| g.reason()))
-						});
-						wtr.write_record([
-							report.student_name.as_deref().unwrap_or(""),
-							&report.student_id,
-							&state,
-							"",
-							"",
-							if report.error.is_some() {
-								"Error".to_string()
-							} else {
-								format!("{:?}", report.status())
-							}
-							.as_str(),
-							"",
-							"",
-							&why,
-							"",
-							"",
-							"",
-						])?;
-					}
+		let mut wtr = csv::Writer::from_path(&archive_path)?;
+		wtr.write_record([
+			"student_name",
+			"student_id",
+			"submission_state",
+			"item_id",
+			"case_name",
+			"status",
+			"actual",
+			"expected",
+			"message",
+			"elapsed_ms",
+			"fault",
+			"cause",
+		])?;
+		for report in reports {
+			let state = label(Some(report.submission_state));
+			let mut rows = 0usize;
+			for test_result in &report.test_results {
+				for case in &test_result.cases {
+					rows += 1;
+					wtr.write_record([
+						report.student_name.as_deref().unwrap_or(""),
+						&report.student_id,
+						&state,
+						&test_result.item_id,
+						&case.case_name,
+						&format!("{:?}", case.status),
+						case.actual.as_deref().unwrap_or(""),
+						case.expected.as_deref().unwrap_or(""),
+						case.failure
+							.as_ref()
+							.map(|f| f.message.as_str())
+							.unwrap_or(""),
+						&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
+						&label(case.fault),
+						&label(case.cause),
+					])?;
 				}
-				wtr.flush()?;
+			}
+			// Every student gets at least one row, so the CSV covers the same cohort
+			// as the JSON archive rather than quietly dropping non-submitters. Its
+			// message says why there is no grade.
+			if rows == 0 {
+				let why = report
+					.error
+					.clone()
+					.unwrap_or_else(|| label(report.grade.as_ref().and_then(|g| g.reason())));
+				wtr.write_record([
+					report.student_name.as_deref().unwrap_or(""),
+					&report.student_id,
+					&state,
+					"",
+					"",
+					if report.error.is_some() {
+						"Error".to_string()
+					} else {
+						format!("{:?}", report.status())
+					}
+					.as_str(),
+					"",
+					"",
+					&why,
+					"",
+					"",
+					"",
+				])?;
 			}
 		}
+		wtr.flush()?;
 		println!("Archived to {}", archive_path.display());
 	}
 

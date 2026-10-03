@@ -201,6 +201,33 @@ fn grade_writes_a_record_whose_first_revision_every_consumer_reads() {
 }
 
 #[test]
+fn the_archive_is_tables_and_the_json_is_the_record() {
+	let temp = bench();
+	let dir = temp.path();
+	let mut args = GRADE.to_vec();
+	args.extend(["--archive", "out/archive"]);
+	succeeded(scriptmark(dir, &args));
+	let cases = std::fs::read_to_string(dir.join("out/archive/archive_tests.csv")).unwrap();
+	assert!(cases.starts_with("student_name,student_id,"), "{cases}");
+	let grades = std::fs::read_to_string(dir.join("out/archive/grades_tests.csv")).unwrap();
+	assert!(
+		grades.contains("local:bob,,,graded,,5,10,50,50,"),
+		"{grades}"
+	);
+	let files: Vec<_> = std::fs::read_dir(dir.join("out/archive"))
+		.unwrap()
+		.map(|e| e.unwrap().file_name().into_string().unwrap())
+		.collect();
+	assert!(
+		files.iter().all(|f| f.ends_with(".csv")),
+		"no second copy of the record: {files:?}"
+	);
+
+	args.extend(["--format", "json"]);
+	refused(scriptmark(dir, &args), "unexpected argument '--format'");
+}
+
+#[test]
 fn rescoring_runs_nothing_and_keeps_the_earlier_revision() {
 	let temp = bench();
 	let dir = temp.path();
