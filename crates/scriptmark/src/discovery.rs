@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::roster::Roster;
 
-/// Directory archives are expanded into, beside the directory being scanned.
+/// Directory archives are expanded into, inside the directory being scanned.
 const EXTRACT_DIR: &str = ".scriptmark_extracted";
 
 /// Map file extensions to language identifiers.
@@ -55,7 +55,10 @@ fn extract_sid(filename: &str) -> Option<String> {
 	Some(sid)
 }
 
-/// Expand every archive in a directory into `{EXTRACT_DIR}/{archive_stem}/`.
+/// Expand every archive in a directory into `{EXTRACT_DIR}/{archive file name}/`.
+///
+/// Named by the whole file name, not the stem: each expansion clears its directory, so
+/// `hw.zip` and `hw.tar` must not share one, and the stem of `...zip` is `..`.
 fn extract_archives(
 	dir: &Path,
 	diagnostics: &mut Vec<InputDiagnostic>,
@@ -90,11 +93,8 @@ fn extract_archives(
 	archives.sort();
 
 	for archive in archives {
-		let stem = archive
-			.file_stem()
-			.and_then(|s| s.to_str())
-			.unwrap_or("unknown");
-		let target = extract_root.join(stem);
+		let name = archive.file_name().expect("a directory entry has a name");
+		let target = extract_root.join(name);
 		extracted.extend(crate::archive::expand(
 			&archive,
 			&target,
@@ -178,7 +178,7 @@ pub fn load_local_input(
 		.map(|p| p.as_ref().to_path_buf())
 		.chain(extra_dirs)
 		.collect();
-	// Walk nested submissions; never revisit the extraction cache or directory symlinks.
+	// Walk nested submissions; never revisit the extraction directory or directory symlinks.
 	let mut index = 0;
 	while index < all_paths.len() {
 		let dir = &all_paths[index];
@@ -269,7 +269,7 @@ pub fn load_local_input(
 				.and_then(|e| e.to_str())
 				.unwrap_or("")
 				.to_lowercase();
-			// Inside an extraction directory the archive stem carries the key; the files
+			// A file out of an archive takes its key from the archive's name; the files
 			// within it are named by the student.
 			let default_key = if let Some(FileOrigin::Archive { archive, .. }) = origins.get(&path)
 			{
@@ -543,14 +543,141 @@ mod tests {
 			}
 		);
 
-		// A second run reuses the extraction and must still report where the file came from.
+		// A second run extracts again and must report the same file, from the same place.
 		let again = scan(dir.path());
 		let bob_again = again
 			.students
 			.iter()
 			.find(|s| s.key().raw() == "bob")
 			.expect("bob");
+		assert_eq!(bob_again.files()[0].path, bob.files()[0].path);
 		assert_eq!(bob_again.files()[0].origin, bob.files()[0].origin);
+	}
+
+	fn zip_at(path: &Path, entries: &[(&str, &str)]) {
+		use std::io::Write as _;
+		let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+		for (entry, body) in entries {
+			zip.start_file(*entry, zip::write::SimpleFileOptions::default())
+				.unwrap();
+			zip.write_all(body.as_bytes()).unwrap();
+		}
+		zip.finish().unwrap();
+	}
+
+	fn bodies(student: &StudentSubmission) -> Vec<(String, String)> {
+		student
+			.files()
+			.iter()
+			.map(|f| (f.file_name(), std::fs::read_to_string(&f.path).unwrap()))
+			.collect()
+	}
+
+	/// P-868: the student replaces `bob_hw.zip`, fixing `sum.py` and renaming `util.py`.
+	/// The scan grades the new bytes, and the old `util.py` does not linger in the
+	/// extraction to be picked up as a submission of its own.
+	#[test]
+	fn test_a_replaced_archive_is_scanned_from_its_new_contents() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("bob_hw.zip");
+		zip_at(&zip_path, &[("sum.py", "wrong"), ("util.py", "u")]);
+		let first = scan(dir.path());
+		assert_eq!(
+			bodies(&first.students[0]),
+			[
+				("sum.py".into(), "wrong".into()),
+				("util.py".into(), "u".into())
+			]
+		);
+
+		zip_at(&zip_path, &[("sum.py", "right"), ("helpers.py", "u")]);
+		let input = scan(dir.path());
+
+		let keys: Vec<String> = input.students.iter().map(|s| s.key().raw()).collect();
+		assert_eq!(keys, ["bob"]);
+		assert_eq!(
+			bodies(&input.students[0]),
+			[
+				("helpers.py".into(), "u".into()),
+				("sum.py".into(), "right".into())
+			]
+		);
+		assert!(input.unmatched.is_empty(), "got {:?}", input.unmatched);
+	}
+
+	/// `bob_hw.zip` and `bob_hw.tar` share a stem. Each archive gets its own extraction, so
+	/// refreshing one never deletes or relabels the other's files.
+	#[test]
+	fn test_archives_sharing_a_stem_keep_separate_extractions() {
+		let dir = tempfile::tempdir().unwrap();
+		let zip_path = dir.path().join("bob_hw.zip");
+		zip_at(&zip_path, &[("lab.py", "from zip")]);
+		let tar_path = dir.path().join("bob_hw.tar");
+		{
+			let mut tar = tar::Builder::new(std::fs::File::create(&tar_path).unwrap());
+			let mut header = tar::Header::new_gnu();
+			header.set_size(8);
+			header.set_mode(0o644);
+			header.set_cksum();
+			tar.append_data(&mut header, "lab.py", &b"from tar"[..])
+				.unwrap();
+			tar.finish().unwrap();
+		}
+
+		for _ in 0..2 {
+			let input = scan(dir.path());
+			let bob = &input.students[0];
+			let mut got: Vec<(PathBuf, String)> = bob
+				.files()
+				.iter()
+				.map(|f| match &f.origin {
+					FileOrigin::Archive { archive, .. } => {
+						(archive.clone(), std::fs::read_to_string(&f.path).unwrap())
+					}
+					other => panic!("not from an archive: {other:?}"),
+				})
+				.collect();
+			got.sort();
+			assert_eq!(
+				got,
+				[
+					(tar_path.clone(), "from tar".to_string()),
+					(zip_path.clone(), "from zip".to_string())
+				]
+			);
+		}
+	}
+
+	/// The stem of `...zip` is `..` and of `..zip` is `.`, so an extraction directory named
+	/// after the stem would be the scanned directory itself, or every archive's extraction
+	/// at once. Refreshing that would delete the submissions.
+	#[test]
+	fn test_extraction_stays_inside_its_own_directory_whatever_the_archive_is_called() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("alice_sum.py"), "a").unwrap();
+		zip_at(&dir.path().join("bob_hw.zip"), &[("sum.py", "b")]);
+		zip_at(&dir.path().join("...zip"), &[("x.py", "x")]);
+		zip_at(&dir.path().join("..zip"), &[("y.py", "y")]);
+
+		for _ in 0..2 {
+			let input = scan(dir.path());
+			let bob = input
+				.students
+				.iter()
+				.find(|s| s.key().raw() == "bob")
+				.expect("bob");
+			assert_eq!(bodies(bob), [("sum.py".into(), "b".into())]);
+		}
+		assert_eq!(
+			std::fs::read_to_string(dir.path().join("alice_sum.py")).unwrap(),
+			"a"
+		);
+		// Each archive landed in its own directory, and nothing beside the submissions.
+		let extracted = dir.path().join(EXTRACT_DIR);
+		assert!(extracted.join("...zip/x.py").is_file());
+		assert!(extracted.join("..zip/y.py").is_file());
+		assert!(!dir.path().join("x.py").exists());
+		assert!(!dir.path().join("y.py").exists());
 	}
 
 	/// Characterisation test for the zip-bomb guards, written before P-670 lifts this loop

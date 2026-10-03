@@ -482,4 +482,50 @@ mod tests {
 		assert_eq!(entry.expanded[0].entry, "src/Lab5.py");
 		assert!(entry.expanded[0].path.is_file());
 	}
+
+	/// P-868: a re-fetch replaces the attachment's bytes at the same path — a download
+	/// whose size did not match, or a hand-repaired bundle. The next load expands the new
+	/// archive, not what the old one left beside it.
+	#[test]
+	fn test_a_replaced_zip_attachment_is_expanded_from_its_new_bytes() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = dir.path();
+		let zip_path = root.join("attachments/3/work.zip");
+		std::fs::create_dir_all(zip_path.parent().unwrap()).unwrap();
+		std::fs::write(root.join(PAYLOAD_FILE), "{}").unwrap();
+		let store = |entries: &[(&str, &str)]| {
+			use std::io::Write as _;
+			let mut zip = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
+			for (name, body) in entries {
+				zip.start_file(*name, zip::write::SimpleFileOptions::default())
+					.unwrap();
+				zip.write_all(body.as_bytes()).unwrap();
+			}
+			zip.finish().unwrap();
+			let manifest: Manifest = Manifest::from([(
+				"3".to_string(),
+				AttachmentRecord::Stored {
+					path: zip_path.clone(),
+					size: std::fs::metadata(&zip_path).unwrap().len(),
+				},
+			)]);
+			std::fs::write(
+				root.join(MANIFEST_FILE),
+				serde_json::to_string(&manifest).unwrap(),
+			)
+			.unwrap();
+		};
+		store(&[("src/Lab5.py", "wrong"), ("src/util.py", "u")]);
+		load(root).unwrap();
+
+		store(&[("src/Lab5.py", "right")]);
+		let (_, downloads, diagnostics) = load(root).unwrap();
+
+		assert!(diagnostics.is_empty(), "got {diagnostics:?}");
+		let entry = downloads.get(&3).unwrap().as_ref().unwrap();
+		assert_eq!(entry.expanded.len(), 1);
+		let lab5 = &entry.expanded[0].path;
+		assert_eq!(std::fs::read_to_string(lab5).unwrap(), "right");
+		assert!(!lab5.with_file_name("util.py").exists());
+	}
 }

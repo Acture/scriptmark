@@ -273,8 +273,6 @@ impl<'a> Sink<'a> {
 		self.total_bytes += size;
 		self.file_count += 1;
 		self.claimed.insert(out_path.clone(), name.to_string());
-		// Provenance is recorded whether or not the bytes are written this run, so a cached
-		// extraction still traces every file back to the entry it came from.
 		self.extracted.push(ExtractedFile {
 			out_path: out_path.clone(),
 			archive: self.archive.to_path_buf(),
@@ -294,17 +292,16 @@ impl<'a> Sink<'a> {
 		self.file_count -= 1;
 	}
 
-	/// Write an accepted entry, unless it is already there from an earlier run.
+	/// Write an accepted entry.
 	fn write(&mut self, name: &str, out_path: &Path, size: u64, read: &mut dyn Read) {
-		if out_path.exists() {
-			return;
-		}
 		let mut buf = Vec::new();
 		let failure = match read.read_to_end(&mut buf) {
 			Err(_) => Some("unreadable entry".to_string()),
 			Ok(_) => std::fs::write(out_path, &buf).err().map(|e| e.to_string()),
 		};
 		if let Some(reason) = failure {
+			// A failed write can leave a truncated file, and the scan lists this directory.
+			std::fs::remove_file(out_path).ok();
 			self.rollback(name, out_path, size, reason);
 		}
 	}
@@ -319,8 +316,10 @@ fn unreadable(archive: &Path, reason: String) -> InputDiagnostic {
 
 /// Expand `archive` into `target`, writing only the entries `wanted` accepts.
 ///
-/// Entries are flattened onto their base names. Already-extracted files are not rewritten,
-/// but their provenance is recorded again, so a cached extraction still traces back.
+/// Entries are flattened onto their base names. `target` belongs to this archive alone and
+/// is rebuilt on every call: whatever an earlier expansion left there is removed first, so
+/// it holds exactly what the archive yields now. A student who re-uploads under the same
+/// name is graded on the new bytes, and an entry they dropped does not linger to be graded.
 pub(crate) fn expand(
 	archive: &Path,
 	target: &Path,
@@ -332,10 +331,19 @@ pub(crate) fn expand(
 	};
 
 	let before = diagnostics.len();
-	if let Err(e) = std::fs::create_dir_all(target) {
+	// Cleared before the archive is opened, so a replacement that will not open grades
+	// nothing rather than its predecessor's files.
+	let fresh = match std::fs::remove_dir_all(target) {
+		Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+		_ => std::fs::create_dir_all(target),
+	};
+	if let Err(e) = fresh {
 		diagnostics.push(unreadable(
 			archive,
-			format!("cannot create extraction directory: {e}"),
+			format!(
+				"cannot prepare extraction directory {}: {e}",
+				target.display()
+			),
 		));
 		return Vec::new();
 	}
@@ -797,5 +805,109 @@ mod tests {
 			&diagnostics[0].kind,
 			DiagnosticKind::ArchiveEmpty { .. }
 		));
+	}
+
+	fn listing(dir: &Path) -> Vec<String> {
+		let mut names: Vec<String> = std::fs::read_dir(dir)
+			.unwrap()
+			.map(|e| e.unwrap().file_name().into_string().unwrap())
+			.collect();
+		names.sort();
+		names
+	}
+
+	/// P-868: a student re-uploads under the same name. Same entry name, same size — nothing
+	/// short of the bytes tells the two apart, and the bytes are what gets graded.
+	#[test]
+	fn test_a_replaced_archive_is_expanded_from_its_new_bytes() {
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("out");
+		let mut diagnostics = Vec::new();
+		let archive = zip_with(dir.path(), "hw.zip", &[("src/lab5.py", b"x=1")]);
+		expand(&archive, &target, &is_gradeable, &mut diagnostics);
+
+		zip_with(dir.path(), "hw.zip", &[("src/lab5.py", b"x=2")]);
+		let files = expand(&archive, &target, &is_gradeable, &mut diagnostics);
+
+		assert_eq!(files.len(), 1);
+		assert_eq!(std::fs::read(&files[0].out_path).unwrap(), b"x=2");
+		assert!(diagnostics.is_empty(), "got {diagnostics:?}");
+	}
+
+	/// The extraction directory is listed, not just the entries `expand` returns, so a file
+	/// the new archive no longer holds must not be left there to be graded.
+	#[test]
+	fn test_an_entry_dropped_or_renamed_in_the_new_archive_leaves_nothing_behind() {
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("out");
+		let mut diagnostics = Vec::new();
+		let archive = zip_with(
+			dir.path(),
+			"hw.zip",
+			&[("lab5.py", b"x=1"), ("util.py", b"y=1"), ("old.py", b"z=1")],
+		);
+		expand(&archive, &target, &is_gradeable, &mut diagnostics);
+		assert_eq!(listing(&target), ["lab5.py", "old.py", "util.py"]);
+
+		// util.py is gone; old.py is now new.py.
+		let archive = zip_with(
+			dir.path(),
+			"hw.zip",
+			&[("lab5.py", b"x=1"), ("new.py", b"z=1")],
+		);
+		let files = expand(&archive, &target, &is_gradeable, &mut diagnostics);
+
+		assert_eq!(listing(&target), ["lab5.py", "new.py"]);
+		let entries: Vec<&str> = files.iter().map(|f| f.entry.as_str()).collect();
+		assert_eq!(entries, ["lab5.py", "new.py"]);
+	}
+
+	#[test]
+	fn test_an_unchanged_archive_expands_to_the_same_files_every_time() {
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("out");
+		let archive = zip_with(
+			dir.path(),
+			"hw.zip",
+			&[("src/lab5.py", b"x=1"), ("util.py", b"y=1")],
+		);
+		let expanded = || {
+			let mut diagnostics = Vec::new();
+			let files: Vec<(PathBuf, String, Vec<u8>)> =
+				expand(&archive, &target, &is_gradeable, &mut diagnostics)
+					.into_iter()
+					.map(|f| {
+						let bytes = std::fs::read(&f.out_path).unwrap();
+						(f.out_path, f.entry, bytes)
+					})
+					.collect();
+			assert!(diagnostics.is_empty(), "got {diagnostics:?}");
+			files
+		};
+
+		let first = expanded();
+		assert_eq!(first.len(), 2);
+		assert_eq!(expanded(), first);
+	}
+
+	/// A replacement that cannot be opened is reported, and grades nothing — least of all
+	/// the files its predecessor left.
+	#[test]
+	fn test_an_unreadable_replacement_leaves_nothing_of_the_old_extraction() {
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("out");
+		let archive = zip_with(dir.path(), "hw.zip", &[("lab5.py", b"x=1")]);
+		expand(&archive, &target, &is_gradeable, &mut Vec::new());
+
+		std::fs::write(&archive, b"not a zip").unwrap();
+		let mut diagnostics = Vec::new();
+		let files = expand(&archive, &target, &is_gradeable, &mut diagnostics);
+
+		assert!(files.is_empty());
+		assert!(matches!(
+			&diagnostics[..],
+			[d] if matches!(d.kind, DiagnosticKind::ArchiveUnreadable { .. })
+		));
+		assert!(listing(&target).is_empty());
 	}
 }

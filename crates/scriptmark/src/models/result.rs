@@ -301,7 +301,7 @@ pub struct SubmissionVersion {
 	/// Every runnable file of the attempt, by path.
 	pub files: Vec<FileVersion>,
 	/// The archives those files were extracted from: a replaced archive is a changed
-	/// submission even while an earlier extraction still sits on disk.
+	/// submission even when the files graded out of it are byte-identical.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub archives: Vec<FileVersion>,
 }
