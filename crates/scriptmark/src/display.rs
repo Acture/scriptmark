@@ -4,6 +4,7 @@ use scriptmark::export;
 use scriptmark::models::{
 	Fault, GradeOutcome, ItemOutcome, StudentReport, SubmissionOutcome, TestStatus,
 };
+use scriptmark::record::{Change, GradeState, Standing};
 
 /// Display a summary table of all student results.
 pub fn display_summary(reports: &[&StudentReport], title: &str) {
@@ -261,5 +262,68 @@ pub fn display_stats(reports: &[&StudentReport]) {
 	}
 	if unscored > 0 {
 		println!("  {unscored:>4} not scored");
+	}
+}
+
+/// What a rescore changed: every student whose grade differs from the previous revision.
+pub fn display_changes(previous: Option<u32>, revision: u32, changes: &[Change], students: usize) {
+	let Some(previous) = previous else {
+		println!(
+			"\n{} revision {revision} is the first score of this evidence",
+			"Rescored:".bold()
+		);
+		return;
+	};
+	println!(
+		"\n{} revision {revision} against revision {previous}: {} of {students} students changed",
+		"Rescored:".bold(),
+		changes.len().to_string().yellow()
+	);
+	if changes.is_empty() {
+		return;
+	}
+	let mut table = Table::new();
+	table
+		.load_preset(UTF8_FULL)
+		.set_content_arrangement(ContentArrangement::Dynamic)
+		.set_header(vec![
+			Cell::new("ID").fg(Color::Cyan),
+			Cell::new(format!("Revision {previous}")).fg(Color::White),
+			Cell::new(format!("Revision {revision}")).fg(Color::Yellow),
+		]);
+	for change in changes {
+		table.add_row(vec![
+			Cell::new(&change.student_id),
+			Cell::new(change.before.as_ref().map(standing).unwrap_or_default()),
+			Cell::new(standing(&change.after)),
+		]);
+	}
+	println!("{table}");
+}
+
+/// A grade in one cell: `87.5 (35/40, raw 87.5)`, or `withheld: teacher_fault`.
+fn standing(standing: &Standing) -> String {
+	let points = |x: f64| export::number(x, export::POINTS_DECIMALS);
+	match (standing.state, standing.final_grade) {
+		(GradeState::Graded, Some(grade)) => {
+			let mut text = format!(
+				"{} ({}/{}, raw {})",
+				export::number(grade, export::POINTS_DECIMALS),
+				standing.score.map(points).unwrap_or_default(),
+				points(standing.max),
+				standing.raw_grade.map(points).unwrap_or_default()
+			);
+			if let Some(reason) = standing.reason {
+				text.push_str(&format!(", {}", export::word(&reason)));
+			}
+			text
+		}
+		_ => format!(
+			"withheld: {}",
+			standing
+				.reason
+				.map(|r| export::word(&r))
+				.unwrap_or_default()
+		),
 	}
 }

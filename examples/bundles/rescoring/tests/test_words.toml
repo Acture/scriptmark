@@ -1,0 +1,27 @@
+# Counting words: whitespace of any kind and length separates them.
+
+[meta]
+name = "words"
+file = "text.py"
+function = "count_words"
+language = "python"
+
+[[cases]]
+name = "two words"
+args = ["hello world"]
+expect = 2
+
+[[cases]]
+name = "extra spaces"
+args = ["  hello   world  "]
+expect = 2
+
+[[cases]]
+name = "empty"
+args = [""]
+expect = 0
+
+[[cases]]
+name = "lines"
+args = ["one\ntwo\nthree"]
+expect = 3

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::models::{FileOrigin, StudentFile, StudentSubmission, Target, TestSpec, normalize_key};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
 	pub students: Vec<StudentRule>,
@@ -19,7 +19,7 @@ pub struct Config {
 	pub overrides: Vec<ItemOverride>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum StudentRule {
 	/// Zero-based component of the directory path relative to the scanned root.
@@ -30,7 +30,7 @@ pub enum StudentRule {
 	Regex { regex: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OwnerOverride {
 	/// Relative path within a scanned root, or an absolute path.
@@ -38,7 +38,7 @@ pub struct OwnerOverride {
 	pub student: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemRule {
 	pub id: String,
@@ -50,7 +50,7 @@ pub struct ItemRule {
 	pub functions: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ItemOverride {
 	/// A rendered student key (`local:alice`, `canvas:123`, or a confirmed number).

@@ -13,6 +13,7 @@ use scriptmark::models::{
 	AssignmentInput, DiagnosticSeverity, StudentKey, StudentReport, StudentSubmission,
 	SubmissionOutcome, TestSpec,
 };
+use scriptmark::record::{self, Evidence, Record, View};
 use scriptmark::roster::load_roster;
 use scriptmark::runner::frozen::{self, Frozen, Generation};
 use scriptmark::runner::generation::SeedSource;
@@ -39,8 +40,12 @@ enum Commands {
 	Run(RunArgs),
 	/// Preview student, file and function matching without running student programs
 	Match(MatchArgs),
-	/// Summarize existing results (re-analyze without re-running)
+	/// Score a grading record again under the current policy, without running anything
+	Rescore(RescoreArgs),
+	/// Summarize a grading record as one of its revisions scored it
 	Summarize(SummarizeArgs),
+	/// Write a revision's grades as CSV
+	Export(ExportArgs),
 	/// Canvas LMS: browse courses, and fetch an assignment for grading
 	#[command(subcommand)]
 	Canvas(CanvasCommand),
@@ -116,13 +121,10 @@ struct GradeArgs {
 	#[arg(long, default_value = "python3")]
 	python: String,
 
-	/// Archive results to this directory (JSON/CSV)
+	/// Also write CSV tables to this directory: one row per case, and one per student's
+	/// grade, beside the frozen inputs. The JSON is the record at --output.
 	#[arg(short, long)]
 	archive: Option<PathBuf>,
-
-	/// Archive format
-	#[arg(short, long, default_value = "csv")]
-	format: String,
 
 	/// Save results to SQLite database
 	#[arg(long)]
@@ -130,6 +132,11 @@ struct GradeArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+
+	/// Replace the grading record at --output even when it holds rescored revisions,
+	/// discarding them. Long form only: there is no -f.
+	#[arg(long)]
+	force: bool,
 }
 
 #[derive(Parser)]
@@ -175,6 +182,11 @@ struct RunArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+
+	/// Replace the grading record at --output even when it holds rescored revisions,
+	/// discarding them. Long form only: there is no -f.
+	#[arg(long)]
+	force: bool,
 }
 
 #[derive(Parser)]
@@ -193,16 +205,60 @@ struct MatchArgs {
 	assignment: Option<PathBuf>,
 	#[arg(long, default_value = "python3")]
 	python: String,
+
+	/// Replace the grading record at --output even when it holds rescored revisions,
+	/// discarding them. Long form only: there is no -f.
+	#[arg(long)]
+	force: bool,
+}
+
+/// Which score revision of a grading record to read.
+#[derive(clap::Args)]
+struct RevisionArg {
+	/// The score revision to read; the latest by default
+	#[arg(long, value_name = "N")]
+	revision: Option<u32>,
+}
+
+#[derive(Parser)]
+struct RescoreArgs {
+	/// The grading record, as `grade` or `run` wrote it. The new revision is added to it.
+	record: PathBuf,
+
+	/// The assignment.toml holding the policy to score under. Defaults to the one the
+	/// record was graded with, or one beside its tests directory.
+	#[arg(long)]
+	assignment: Option<PathBuf>,
+
+	/// Save the new revision to SQLite database
+	#[arg(long)]
+	db: Option<PathBuf>,
 }
 
 #[derive(Parser)]
 struct SummarizeArgs {
-	/// Path to results JSON file, as `grade` wrote it
+	/// Path to the grading record, as `grade`, `run` or `rescore` wrote it
 	results: PathBuf,
 
 	/// Path to roster CSV
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
+
+	#[command(flatten)]
+	revision: RevisionArg,
+}
+
+#[derive(Parser)]
+struct ExportArgs {
+	/// Path to the grading record
+	results: PathBuf,
+
+	/// Where to write the grades
+	#[arg(short, long, default_value = "grades.csv")]
+	output: PathBuf,
+
+	#[command(flatten)]
+	revision: RevisionArg,
 }
 
 #[derive(Subcommand)]
@@ -292,8 +348,12 @@ struct GradesPushArgs {
 	#[arg(long)]
 	assignment_id: u64,
 
-	/// Path to results JSON file (from scriptmark grade)
+	/// Path to the grading record
 	results: PathBuf,
+
+	/// The score revision to push. Required when the record holds more than one.
+	#[arg(long, value_name = "N")]
+	revision: Option<u32>,
 }
 
 #[derive(Parser)]
@@ -317,8 +377,11 @@ struct SimilarityArgs {
 
 #[derive(Parser)]
 struct ReportArgs {
-	/// Path to results JSON file (from scriptmark grade)
+	/// Path to the grading record
 	results: PathBuf,
+
+	#[command(flatten)]
+	revision: RevisionArg,
 
 	/// Output HTML report path
 	#[arg(short, long, default_value = "report.html")]
@@ -351,6 +414,16 @@ enum DbAction {
 		#[arg(default_value = "scriptmark.db")]
 		path: PathBuf,
 	},
+	/// Save a revision of a grading record as a session
+	Save {
+		/// The grading record
+		record: PathBuf,
+		#[command(flatten)]
+		revision: RevisionArg,
+		/// Database file path
+		#[arg(long, default_value = "scriptmark.db")]
+		db: PathBuf,
+	},
 	/// Import a roster CSV into the database
 	ImportRoster {
 		/// Roster CSV file
@@ -380,7 +453,7 @@ fn build_local_input(
 	submissions: &[PathBuf],
 	declared: &Declared,
 	roster_path: Option<&PathBuf>,
-	preview: bool,
+	purpose: Purpose,
 ) -> Result<AssignmentInput> {
 	let (assignment, attempt_policy) = (declared.assignment.clone(), declared.attempt_policy);
 
@@ -406,7 +479,7 @@ fn build_local_input(
 	// itself about who a 学号 belongs to would attribute somebody's work to the wrong name.
 	// Stop before running anything rather than producing results nobody should act on.
 	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
-	if !preview && !errors.is_empty() {
+	if purpose != Purpose::Preview && !errors.is_empty() {
 		anyhow::bail!(
 			"refusing to grade: {} problem(s) with the input\n  {}",
 			errors.len(),
@@ -501,7 +574,9 @@ async fn main() -> Result<()> {
 		Commands::Grade(args) => cmd_grade(args).await,
 		Commands::Run(args) => cmd_run(args).await,
 		Commands::Match(args) => cmd_match(args),
+		Commands::Rescore(args) => cmd_rescore(args),
 		Commands::Summarize(args) => cmd_summarize(args),
+		Commands::Export(args) => cmd_export(args),
 		Commands::Canvas(cmd) => cmd_canvas(cmd).await,
 		Commands::RosterPull(args) => cmd_roster_pull(args).await,
 		Commands::GradesPush(args) => cmd_grades_push(args).await,
@@ -512,13 +587,31 @@ async fn main() -> Result<()> {
 	}
 }
 
-/// Read a results file `grade` or `run` wrote. A file from before grades were scored per
-/// item is refused rather than reinterpreted: what its numbers meant is not recoverable.
-fn parse_results(content: &str) -> Result<Vec<StudentReport>> {
-	serde_json::from_str(content).context(
-		"failed to parse the results file; results written before per-item grading are not \
-		 read — grade the submissions again",
-	)
+/// A revision of the grading record at `path`: the latest unless one is named, and the
+/// unscored evidence when nothing has scored it yet.
+fn load_view(path: &Path, revision: Option<u32>) -> Result<(Record, View)> {
+	let record = Record::load(path)?;
+	let view = record.view(revision)?;
+	Ok((record, view))
+}
+
+/// The revision a view shows, for consumers that need grades.
+fn scored(view: &View, path: &Path) -> Result<u32> {
+	view.revision.with_context(|| {
+		format!(
+			"{} has no score revision yet: score it with `scriptmark rescore {}`",
+			path.display(),
+			path.display()
+		)
+	})
+}
+
+/// How a summary names what it shows.
+fn shown(path: &Path, view: &View) -> String {
+	match view.revision {
+		Some(n) => format!("{} (revision {n} of {})", path.display(), view.of),
+		None => format!("{} (unscored)", path.display()),
+	}
 }
 
 /// A fault or cause as the snake_case word the JSON results use; empty when absent.
@@ -533,8 +626,8 @@ fn label<T: serde::Serialize>(value: Option<T>) -> String {
 /// be prepared stops the run before any student is graded, and so do fresh inputs that
 /// would replace other inputs frozen beside `output`.
 ///
-/// Returns the reports and the inputs they were graded on, for `save_frozen` once the
-/// results are written.
+/// Returns the reports, the inputs they were graded on, for `save_frozen` once the
+/// results are written, and the interpreter that ran them.
 async fn run_bundles(
 	students: &[StudentSubmission],
 	specs: Vec<TestSpec>,
@@ -542,7 +635,7 @@ async fn run_bundles(
 	timeout: u64,
 	output: &Path,
 	options: &FrozenArgs,
-) -> Result<(Vec<StudentReport>, Frozen)> {
+) -> Result<(Vec<StudentReport>, Frozen, String)> {
 	let generation = match &options.replay {
 		Some(path) => Generation::Replay(Frozen::load(path)?),
 		None => Generation::fresh(),
@@ -575,10 +668,11 @@ async fn run_bundles(
 		}
 	}
 	run_options.python = executor.python_cmd().to_string();
+	let python = run_options.python.clone();
 	// Units run in their own process groups, so the terminal's Ctrl-C reaches only the
 	// grader: take them down with it rather than leave them running to their timeouts.
 	tokio::select! {
-		reports = orchestrator::run_all(students, bundles.into(), executor, &run_options) => Ok((reports, inputs)),
+		reports = orchestrator::run_all(students, bundles.into(), executor, &run_options) => Ok((reports, inputs, python)),
 		_ = tokio::signal::ctrl_c() => {
 			scriptmark::runner::python::kill_all_units();
 			anyhow::bail!("interrupted: every running unit was stopped")
@@ -611,6 +705,27 @@ struct Batch {
 	specs: Vec<TestSpec>,
 	policy: Policy,
 	matching: scriptmark::matching::Config,
+	/// Where it all was found, for the grading record.
+	inputs: record::Inputs,
+}
+
+/// What a batch is prepared for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+	/// Grading: an input with errors is refused, and a Canvas bundle keeps its record of
+	/// what was graded.
+	Grade,
+	/// A matching preview: an input with errors is shown, not refused.
+	Preview,
+	/// Checking evidence against the input as it is now: errors are refused, and nothing is
+	/// written.
+	Verify,
+}
+
+/// A path as an absolute one, without resolving links: what was found under it is recorded,
+/// and must be found again under the same name whatever the working directory.
+fn absolute(path: &Path) -> Result<PathBuf> {
+	std::path::absolute(path).with_context(|| format!("cannot resolve {}", path.display()))
 }
 
 /// Load the assignment and the specs, settle the items and the policy against each other,
@@ -618,13 +733,22 @@ struct Batch {
 fn prepare_batch(
 	submissions: &[PathBuf],
 	canvas: Option<&PathBuf>,
-	tests_dir: &std::path::Path,
+	tests_dir: &Path,
 	assignment_path: Option<&PathBuf>,
 	roster: Option<&PathBuf>,
-	preview: bool,
+	purpose: Purpose,
 ) -> Result<Batch> {
-	let mut declared = assignment::load(assignment_path.map(PathBuf::as_path), tests_dir)?;
-	let specs = load_specs_from_dir(tests_dir).context("Failed to load test specifications")?;
+	let tests_dir = absolute(tests_dir)?;
+	let submissions = submissions
+		.iter()
+		.map(|p| absolute(p))
+		.collect::<Result<Vec<_>>>()?;
+	let canvas = canvas.map(|p| absolute(p)).transpose()?;
+	let roster = roster.map(|p| absolute(p)).transpose()?;
+	let assignment_path = assignment_path.map(|p| absolute(p)).transpose()?;
+
+	let mut declared = assignment::load(assignment_path.as_deref(), &tests_dir)?;
+	let specs = load_specs_from_dir(&tests_dir).context("Failed to load test specifications")?;
 	println!("Loaded {} test specs", specs.len());
 
 	let policy = assignment::settle(&mut declared.assignment, &declared.grading, &specs)?;
@@ -639,39 +763,126 @@ fn prepare_batch(
 
 	// Names, roster membership and submission state all come from the model, so there is
 	// no separate roster merge afterwards.
-	let input = match canvas {
-		Some(bundle) => build_canvas_input(bundle, &declared, preview)?,
-		None => build_local_input(submissions, &declared, roster, preview)?,
+	let (input, source) = match &canvas {
+		Some(bundle) => (
+			build_canvas_input(bundle, &declared, purpose)?,
+			record::Source::Canvas {
+				bundle: bundle.clone(),
+			},
+		),
+		None => (
+			build_local_input(&submissions, &declared, roster.as_ref(), purpose)?,
+			record::Source::Local {
+				dirs: submissions,
+				roster,
+			},
+		),
 	};
 	Ok(Batch {
 		input,
 		specs,
 		policy,
 		matching: declared.matching,
+		inputs: record::Inputs {
+			tests: tests_dir,
+			assignment: declared.path.map(|p| absolute(&p)).transpose()?,
+			source,
+		},
 	})
 }
 
+/// Refuse to write a run's record over one holding rescored revisions — before anything
+/// runs, so a refused run costs nothing — unless `--force` says to discard them. Even then
+/// the record is replaced only once the run has succeeded.
+fn check_output(output: &Path, force: bool) -> Result<()> {
+	match record::check_replaceable(output) {
+		Ok(()) => Ok(()),
+		Err(why) if force => {
+			eprintln!("  note: {why}; --force replaces it once this run succeeds");
+			Ok(())
+		}
+		Err(why) => Err(anyhow::anyhow!(
+			"{why}: move it aside, write this run elsewhere with --output, or pass --force to \
+			 discard them"
+		))
+		.context("refusing to replace the grading record"),
+	}
+}
+
+/// Run the batch and record what it found, unscored. The submissions are fingerprinted
+/// before the run and checked after it, and the specs before they are prepared.
+async fn execute(
+	input: &AssignmentInput,
+	specs: Vec<TestSpec>,
+	inputs: record::Inputs,
+	run_options: RunOptions,
+	timeout: u64,
+	output: &Path,
+	frozen_args: &FrozenArgs,
+) -> Result<(Record, Frozen)> {
+	let spec_versions = record::spec_versions(&specs)?;
+	let versions = record::submission_versions(&input.students)?;
+	let matching = run_options.matching.clone();
+	let (mut reports, frozen, python) = run_bundles(
+		&input.students,
+		specs,
+		run_options,
+		timeout,
+		output,
+		frozen_args,
+	)
+	.await?;
+	record::seal(&mut reports, &input.students, versions)?;
+	let bundle = record::bundle_version(
+		spec_versions,
+		timeout,
+		python,
+		&frozen,
+		(!frozen.is_empty()).then(|| frozen::beside(output)),
+	);
+	let record = Record::new(Evidence {
+		scriptmark: env!("CARGO_PKG_VERSION").to_string(),
+		assignment: (&input.assignment).into(),
+		inputs,
+		attempt_policy: input.attempt_policy,
+		matching,
+		bundle,
+		students: reports,
+	})?;
+	Ok((record, frozen))
+}
+
+/// Write a grading record where `output` says, its directory made first.
+fn write_record(record: &Record, output: &Path) -> Result<()> {
+	record
+		.write(output)
+		.with_context(|| format!("failed to write {}", output.display()))
+}
+
 async fn cmd_grade(args: GradeArgs) -> Result<()> {
+	check_output(&args.output, args.force)?;
 	let Batch {
 		input,
 		specs,
 		policy,
 		matching,
+		inputs,
 	} = prepare_batch(
 		&args.submissions,
 		args.canvas.as_ref(),
 		&args.tests_dir,
 		args.assignment.as_ref(),
 		args.roster.as_ref(),
-		false,
+		Purpose::Grade,
 	)?;
 
-	let (mut reports, inputs) = run_bundles(
-		&input.students,
+	let (mut record, frozen) = execute(
+		&input,
 		specs,
+		inputs,
 		RunOptions {
 			python: args.python,
-			matching,
+			matching: matching.clone(),
 			concurrency: args
 				.concurrency
 				.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
@@ -683,26 +894,23 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	.await?;
 
 	let items = &input.assignment.items;
-	grading::grade_all(&mut reports, items, &policy)?;
-	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
+	let revision = record.score(items, &policy)?;
+	let view = record.view(Some(revision))?;
+	let reports = &view.reports;
 
 	// Display
 	let report_refs: Vec<_> = reports.iter().collect();
 	display::display_summary(&report_refs, &args.tests_dir.display().to_string());
 	display::display_failures(&report_refs);
 	display::display_stats(&report_refs);
-	for warning in grading::diagnostics(&reports, items) {
+	for warning in grading::diagnostics(reports, items) {
 		eprintln!("  warning: {warning}");
 	}
 
-	// Save raw results
-	if let Some(parent) = args.output.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
-	let json = serde_json::to_string_pretty(&reports)?;
-	std::fs::write(&args.output, &json)?;
+	// The grading record: the evidence and its first revision.
+	write_record(&record, &args.output)?;
 	println!("\nResults saved to {}", args.output.display());
-	save_frozen(&inputs, &args.output)?;
+	save_frozen(&frozen, &args.output)?;
 
 	// Archive: the evidence per case, and the grades per student.
 	if let Some(archive_dir) = &args.archive {
@@ -712,139 +920,138 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 			.file_name()
 			.and_then(|n| n.to_str())
 			.unwrap_or("results");
-		let archive_path = archive_dir.join(format!("archive_{stem}.{}", args.format));
+		let archive_path = archive_dir.join(format!("archive_{stem}.csv"));
 		let grades_path = archive_dir.join(format!("grades_{stem}.csv"));
-		if !inputs.is_empty() {
+		if !frozen.is_empty() {
 			let cases_path = archive_dir.join(format!("cases_{stem}.json"));
-			inputs.write(&cases_path)?;
+			frozen.write(&cases_path)?;
 			println!("Inputs written to {}", cases_path.display());
 		}
-		scriptmark::export::write_grades_csv(
-			&reports,
-			items,
-			std::fs::File::create(&grades_path)?,
-		)?;
+		scriptmark::export::write_grades_csv(reports, items, std::fs::File::create(&grades_path)?)?;
 		println!("Grades written to {}", grades_path.display());
 
-		match args.format.as_str() {
-			"json" => {
-				std::fs::write(&archive_path, &json)?;
-			}
-			"csv" => {
-				let mut wtr = csv::Writer::from_path(&archive_path)?;
-				wtr.write_record([
-					"student_name",
-					"student_id",
-					"submission_state",
-					"item_id",
-					"case_name",
-					"status",
-					"actual",
-					"expected",
-					"message",
-					"elapsed_ms",
-					"fault",
-					"cause",
-				])?;
-				for report in &reports {
-					let state = label(Some(report.submission_state));
-					let mut rows = 0usize;
-					for test_result in &report.test_results {
-						for case in &test_result.cases {
-							rows += 1;
-							wtr.write_record([
-								report.student_name.as_deref().unwrap_or(""),
-								&report.student_id,
-								&state,
-								&test_result.item_id,
-								&case.case_name,
-								&format!("{:?}", case.status),
-								case.actual.as_deref().unwrap_or(""),
-								case.expected.as_deref().unwrap_or(""),
-								case.failure
-									.as_ref()
-									.map(|f| f.message.as_str())
-									.unwrap_or(""),
-								&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
-								&label(case.fault),
-								&label(case.cause),
-							])?;
-						}
-					}
-					// Every student gets at least one row, so the CSV covers the same cohort
-					// as the JSON archive rather than quietly dropping non-submitters. Its
-					// message says why there is no grade.
-					if rows == 0 {
-						let why = report.error.clone().unwrap_or_else(|| {
-							label(report.grade.as_ref().and_then(|g| g.reason()))
-						});
-						wtr.write_record([
-							report.student_name.as_deref().unwrap_or(""),
-							&report.student_id,
-							&state,
-							"",
-							"",
-							if report.error.is_some() {
-								"Error".to_string()
-							} else {
-								format!("{:?}", report.status())
-							}
-							.as_str(),
-							"",
-							"",
-							&why,
-							"",
-							"",
-							"",
-						])?;
-					}
+		let mut wtr = csv::Writer::from_path(&archive_path)?;
+		wtr.write_record([
+			"student_name",
+			"student_id",
+			"submission_state",
+			"item_id",
+			"case_name",
+			"status",
+			"actual",
+			"expected",
+			"message",
+			"elapsed_ms",
+			"fault",
+			"cause",
+		])?;
+		for report in reports {
+			let state = label(Some(report.submission_state));
+			let mut rows = 0usize;
+			for test_result in &report.test_results {
+				for case in &test_result.cases {
+					rows += 1;
+					wtr.write_record([
+						report.student_name.as_deref().unwrap_or(""),
+						&report.student_id,
+						&state,
+						&test_result.item_id,
+						&case.case_name,
+						&format!("{:?}", case.status),
+						case.actual.as_deref().unwrap_or(""),
+						case.expected.as_deref().unwrap_or(""),
+						case.failure
+							.as_ref()
+							.map(|f| f.message.as_str())
+							.unwrap_or(""),
+						&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
+						&label(case.fault),
+						&label(case.cause),
+					])?;
 				}
-				wtr.flush()?;
 			}
-			other => anyhow::bail!("unknown archive format '{other}': use json or csv"),
+			// Every student gets at least one row, so the CSV covers the same cohort
+			// as the JSON archive rather than quietly dropping non-submitters. Its
+			// message says why there is no grade.
+			if rows == 0 {
+				let why = report
+					.error
+					.clone()
+					.unwrap_or_else(|| label(report.grade.as_ref().and_then(|g| g.reason())));
+				wtr.write_record([
+					report.student_name.as_deref().unwrap_or(""),
+					&report.student_id,
+					&state,
+					"",
+					"",
+					if report.error.is_some() {
+						"Error".to_string()
+					} else {
+						format!("{:?}", report.status())
+					}
+					.as_str(),
+					"",
+					"",
+					&why,
+					"",
+					"",
+					"",
+				])?;
+			}
 		}
+		wtr.flush()?;
 		println!("Archived to {}", archive_path.display());
 	}
 
-	// 9. Save to database if --db specified
 	if let Some(db_path) = &args.db {
-		let database =
-			scriptmark::db::Database::open(db_path).context("Failed to open database")?;
-
-		if let Some(roster) = &input.roster {
-			database
-				.import_roster(roster)
-				.context("Failed to import roster")?;
-		}
-
-		let session_id = database
-			.save_session(
-				&input.assignment.name,
-				&reports,
-				Some(&serde_json::to_string(&serde_json::json!({
-					"grading": policy.config(),
-					"items": items,
-				}))?),
-			)
-			.context("Failed to save session to database")?;
-
-		println!(
-			"Saved to database: {} (session #{})",
-			db_path.display(),
-			session_id
-		);
+		save_to_db(db_path, &record, revision, input.roster.as_ref())?;
 	}
 
 	Ok(())
 }
 
+/// Save a revision as a database session, importing the roster it was graded with first.
+/// Saving one revision twice finds the session it already has.
+fn save_to_db(
+	db_path: &Path,
+	record: &Record,
+	revision: u32,
+	roster: Option<&scriptmark::roster::Roster>,
+) -> Result<()> {
+	let database = scriptmark::db::Database::open(db_path).context("Failed to open database")?;
+	if let Some(roster) = roster {
+		database
+			.import_roster(roster)
+			.context("Failed to import roster")?;
+	}
+	let saved = database
+		.save_revision(record, revision)
+		.context("Failed to save session to database")?;
+	if saved.created {
+		println!(
+			"Saved to database: {} (session #{}, revision {revision})",
+			db_path.display(),
+			saved.id
+		);
+	} else {
+		println!(
+			"Revision {revision} is already in {} as session #{}",
+			db_path.display(),
+			saved.id
+		);
+	}
+	Ok(())
+}
+
 async fn cmd_run(args: RunArgs) -> Result<()> {
+	check_output(&args.output, args.force)?;
 	// The policy is settled even though nothing is scored: a run whose results cannot be
 	// graded should say so now, not after the class has run.
 	let Batch {
 		input,
 		specs,
 		matching,
+		inputs,
 		..
 	} = prepare_batch(
 		&args.submissions,
@@ -852,16 +1059,17 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 		&args.tests_dir,
 		args.assignment.as_ref(),
 		args.roster.as_ref(),
-		false,
+		Purpose::Grade,
 	)?;
 
-	// A JSON array, the same shape `grade` writes; unscored until graded.
-	let (results, inputs) = run_bundles(
-		&input.students,
+	// The same grading record `grade` writes, with no revision until it is scored.
+	let (record, frozen) = execute(
+		&input,
 		specs,
+		inputs,
 		RunOptions {
 			python: args.python,
-			matching,
+			matching: matching.clone(),
 			concurrency: args
 				.concurrency
 				.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
@@ -872,18 +1080,19 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 	)
 	.await?;
 
-	if let Some(parent) = args.output.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
-	let json = serde_json::to_string_pretty(&results)?;
-	std::fs::write(&args.output, &json)?;
-	println!("Results saved to {}", args.output.display());
-	save_frozen(&inputs, &args.output)?;
+	write_record(&record, &args.output)?;
+	println!(
+		"Results saved to {}; score them with `scriptmark rescore {}`",
+		args.output.display(),
+		args.output.display()
+	);
+	save_frozen(&frozen, &args.output)?;
 
 	Ok(())
 }
 
 fn cmd_match(args: MatchArgs) -> Result<()> {
+	check_output(&args.output, args.force)?;
 	let Batch {
 		input,
 		specs,
@@ -895,7 +1104,7 @@ fn cmd_match(args: MatchArgs) -> Result<()> {
 		&args.tests_dir,
 		args.assignment.as_ref(),
 		args.roster.as_ref(),
-		true,
+		Purpose::Preview,
 	)?;
 	let preview = scriptmark::matching::preview(input, &specs, &matching, &args.python)?;
 	if let Some(parent) = args.output.parent() {
@@ -911,13 +1120,74 @@ fn cmd_match(args: MatchArgs) -> Result<()> {
 	Ok(())
 }
 
+/// Score a grading record's evidence again under the policy as it is now, as a new
+/// revision. Nothing runs: the record is refused unless its assignment, submissions, matching
+/// and tests are still what they were, because otherwise its evidence describes something
+/// that no longer exists.
+fn cmd_rescore(args: RescoreArgs) -> Result<()> {
+	let mut record = Record::load(&args.record)?;
+	let inputs = record.evidence.inputs.clone();
+	let (submissions, canvas, roster) = match &inputs.source {
+		record::Source::Local { dirs, roster } => (dirs.clone(), None, roster.clone()),
+		record::Source::Canvas { bundle } => (Vec::new(), Some(bundle.clone()), None),
+	};
+	let assignment = args.assignment.clone().or(inputs.assignment.clone());
+	let Batch {
+		input,
+		specs,
+		policy,
+		matching,
+		..
+	} = prepare_batch(
+		&submissions,
+		canvas.as_ref(),
+		&inputs.tests,
+		assignment.as_ref(),
+		roster.as_ref(),
+		Purpose::Verify,
+	)?;
+	record.check(&record::Current {
+		assignment: &input.assignment,
+		attempt_policy: input.attempt_policy,
+		matching: &matching,
+		specs: &specs,
+		students: &input.students,
+	})?;
+
+	let items = &input.assignment.items;
+	let previous = record.latest().cloned();
+	let revision = record.score(items, &policy)?;
+	let view = record.view(Some(revision))?;
+
+	let report_refs: Vec<_> = view.reports.iter().collect();
+	display::display_summary(&report_refs, &shown(&args.record, &view));
+	display::display_stats(&report_refs);
+	for warning in grading::diagnostics(&view.reports, items) {
+		eprintln!("  warning: {warning}");
+	}
+	let current = record.revision(revision)?;
+	display::display_changes(
+		previous.as_ref().map(|p| p.revision),
+		revision,
+		&record::diff(previous.as_ref(), current),
+		view.reports.len(),
+	);
+
+	write_record(&record, &args.record)?;
+	println!("\nRevision {revision} added to {}", args.record.display());
+
+	if let Some(db_path) = &args.db {
+		save_to_db(db_path, &record, revision, input.roster.as_ref())?;
+	}
+	Ok(())
+}
+
 fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
-	let content = std::fs::read_to_string(&args.results).context("Failed to read results file")?;
-	let mut reports = parse_results(&content)?;
+	let (_, mut view) = load_view(&args.results, args.revision.revision)?;
 
 	if let Some(roster_path) = &args.roster {
 		let roster = load_roster(roster_path).context("Failed to load roster")?;
-		for report in reports.iter_mut() {
+		for report in view.reports.iter_mut() {
 			// `student_id` is a rendered key, so it is parsed back rather than compared as
 			// text — otherwise a run made without --roster, whose ids carry a `local:`
 			// prefix, would match nothing. `name_of` answers only when the key is
@@ -929,15 +1199,32 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 		}
 	}
 
-	// Shown as `grade` scored them. Scoring again under another policy is P-678's regrade,
-	// which records what changed; a summary that silently re-scored could not.
-	reports.sort_by(|a, b| a.student_id.cmp(&b.student_id));
-
-	let report_refs: Vec<_> = reports.iter().collect();
-	display::display_summary(&report_refs, &args.results.display().to_string());
+	// Shown as the revision scored them: a summary never scores. `rescore` does, and
+	// records what changed.
+	let report_refs: Vec<_> = view.reports.iter().collect();
+	display::display_summary(&report_refs, &shown(&args.results, &view));
 	display::display_failures(&report_refs);
 	display::display_stats(&report_refs);
 
+	Ok(())
+}
+
+fn cmd_export(args: ExportArgs) -> Result<()> {
+	let (_, view) = load_view(&args.results, args.revision.revision)?;
+	let revision = scored(&view, &args.results)?;
+	if let Some(parent) = args.output.parent().filter(|p| !p.as_os_str().is_empty()) {
+		std::fs::create_dir_all(parent)?;
+	}
+	scriptmark::export::write_grades_csv(
+		&view.reports,
+		&view.items,
+		std::fs::File::create(&args.output)
+			.with_context(|| format!("failed to create {}", args.output.display()))?,
+	)?;
+	println!(
+		"Grades of revision {revision} written to {}",
+		args.output.display()
+	);
 	Ok(())
 }
 
@@ -952,7 +1239,7 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 fn build_canvas_input(
 	bundle: &std::path::Path,
 	declared: &Declared,
-	preview: bool,
+	purpose: Purpose,
 ) -> Result<AssignmentInput> {
 	use scriptmark::canvas::bundle;
 
@@ -990,7 +1277,7 @@ fn build_canvas_input(
 	report_input(&input);
 
 	let errors: Vec<String> = input.errors().map(|d| d.to_string()).collect();
-	if !preview && !errors.is_empty() {
+	if purpose != Purpose::Preview && !errors.is_empty() {
 		anyhow::bail!(
 			"refusing to grade: {} problem(s) with the input\n  {}",
 			errors.len(),
@@ -999,8 +1286,8 @@ fn build_canvas_input(
 	}
 
 	// The record of which attempt was graded, and of every file's provenance, outlives the
-	// process that produced it.
-	if !preview {
+	// process that produced it. Checking a record against the bundle writes nothing.
+	if purpose == Purpose::Grade {
 		bundle::save_input(bundle, &input)
 			.with_context(|| format!("failed to write {}", bundle::input_path(bundle).display()))?;
 	}
@@ -1117,24 +1404,53 @@ async fn cmd_roster_pull(args: RosterPullArgs) -> Result<()> {
 }
 
 async fn cmd_grades_push(args: GradesPushArgs) -> Result<()> {
-	let client = scriptmark::canvas::CanvasClient::new(&args.canvas_url)
-		.context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?;
-
-	let content = std::fs::read_to_string(&args.results).context("Failed to read results file")?;
-	let reports = parse_results(&content)?;
+	// Everything about what to push is settled before Canvas is contacted.
+	let record = Record::load(&args.results)?;
+	if args.revision.is_none() && record.revisions.len() > 1 {
+		anyhow::bail!(
+			"{} holds {} score revisions; name the one to push with --revision",
+			args.results.display(),
+			record.revisions.len()
+		);
+	}
+	// The record says which Canvas assignment its evidence belongs to; pushing it anywhere
+	// else would publish one assignment's grades as another's.
+	let graded_for = &record.evidence.assignment;
+	for (flag, recorded, what) in [
+		(args.course_id, graded_for.canvas_course_id, "course"),
+		(
+			args.assignment_id,
+			graded_for.canvas_assignment_id,
+			"assignment",
+		),
+	] {
+		if let Some(recorded) = recorded
+			&& recorded != flag
+		{
+			anyhow::bail!(
+				"refusing to push: {} was graded for Canvas {what} {recorded}, not {flag}",
+				args.results.display()
+			);
+		}
+	}
+	let view = record.view(args.revision)?;
+	let revision = scored(&view, &args.results)?;
 
 	// Only graded students are pushed — a real 0 included, a withheld grade never. The
 	// Canvas user id is the one import recorded: parsing student_id as an integer would
 	// either fail for every 学号 or, worse, post to whichever user held that number.
 	let scriptmark::export::PushSet { grades, skipped } =
-		scriptmark::export::grades_to_push(&reports)?;
+		scriptmark::export::grades_to_push(&view.reports)?;
 	for (why, n) in &skipped {
 		println!("Skipping {n} student(s): {why}");
 	}
 
+	let client = scriptmark::canvas::CanvasClient::new(&args.canvas_url)
+		.context("Failed to create Canvas client (is CANVAS_TOKEN set?)")?;
 	println!(
-		"Pushing {} grades to Canvas assignment {}...",
+		"Pushing {} grades of revision {revision} (evidence {}) to Canvas assignment {}...",
 		grades.len(),
+		&record.digest[..12],
 		args.assignment_id
 	);
 	let results = client
@@ -1232,8 +1548,8 @@ fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
 }
 
 fn cmd_report(args: ReportArgs) -> Result<()> {
-	let content = std::fs::read_to_string(&args.results).context("Failed to read results file")?;
-	let reports = parse_results(&content)?;
+	let (_, view) = load_view(&args.results, args.revision.revision)?;
+	let reports = view.reports;
 
 	let similarity = if let Some(sim_dir) = &args.similarity_dir {
 		let mut submissions: std::collections::HashMap<String, Vec<PathBuf>> =
@@ -1273,6 +1589,22 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 			println!("Database initialized: {}", path.display());
 			Ok(())
 		}
+		DbAction::Save {
+			record,
+			revision,
+			db,
+		} => {
+			let (saved, view) = load_view(&record, revision.revision)?;
+			let revision = scored(&view, &record)?;
+			// The roster the record was graded with, when it had one, names its students.
+			let roster = match &saved.evidence.inputs.source {
+				record::Source::Local {
+					roster: Some(path), ..
+				} => Some(load_roster(path).context("Failed to load roster")?),
+				_ => None,
+			};
+			save_to_db(&db, &saved, revision, roster.as_ref())
+		}
 		DbAction::ImportRoster { roster, db } => {
 			let database =
 				scriptmark::db::Database::open(&db).context("Failed to open database")?;
@@ -1299,15 +1631,17 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 			}
 			use owo_colors::OwoColorize;
 			println!(
-				"{:>4}  {:<20}  {:>8}  {:>8}  Date",
-				"ID", "Assignment", "Students", "Avg"
+				"{:>4}  {:<20}  {:>3}  {:<12}  {:>8}  {:>8}  Date",
+				"ID", "Assignment", "Rev", "Evidence", "Students", "Avg"
 			);
-			println!("{}", "-".repeat(70));
+			println!("{}", "-".repeat(90));
 			for s in &sessions {
 				println!(
-					"{:>4}  {:<20}  {:>8}  {:>7}  {}",
+					"{:>4}  {:<20}  {:>3}  {:<12}  {:>8}  {:>7}  {}",
 					s.id.to_string().cyan(),
 					s.assignment,
+					s.revision,
+					&s.evidence[..s.evidence.len().min(12)],
 					s.student_count,
 					s.avg_grade
 						.map(|a| format!("{a:.1}"))
@@ -1331,10 +1665,10 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 			use owo_colors::OwoColorize;
 			println!("History for {} ({}):\n", name.bold(), student_id.cyan());
 			println!(
-				"{:<15}  {:>24}  {:>10}  {:>8}/{:<8}  Date",
-				"Assignment", "Grade", "Pass Rate", "Passed", "Total"
+				"{:<15}  {:>3}  {:>24}  {:>10}  {:>8}/{:<8}  Date",
+				"Assignment", "Rev", "Grade", "Pass Rate", "Passed", "Total"
 			);
-			println!("{}", "-".repeat(90));
+			println!("{}", "-".repeat(96));
 			for (session, result) in &history {
 				let grade_color = match result.fraction() {
 					Some(f) if f >= 0.9 => "\x1b[32m",
@@ -1344,8 +1678,9 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 				};
 				let grade_text = result.grade_text();
 				println!(
-					"{:<15}  {}{:>24}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
+					"{:<15}  {:>3}  {}{:>24}\x1b[0m  {:>9.1}%  {:>8}/{}  {}",
 					session.assignment,
+					session.revision,
 					grade_color,
 					grade_text,
 					result.pass_rate,

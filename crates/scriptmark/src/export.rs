@@ -36,7 +36,7 @@ pub fn grades_to_push(reports: &[StudentReport]) -> Result<PushSet> {
 	for report in reports {
 		let Some(grade) = &report.grade else {
 			bail!(
-				"{} has no grade: these are `run` results; score them with `grade`",
+				"{} has no grade: the record has no score revision; score it with `scriptmark rescore`",
 				report.student_id
 			);
 		};
@@ -88,7 +88,7 @@ pub fn write_grades_csv<W: Write>(
 	for report in reports {
 		let Some(grade) = &report.grade else {
 			bail!(
-				"{} has no grade: these are `run` results; score them with `grade`",
+				"{} has no grade: the record has no score revision; score it with `scriptmark rescore`",
 				report.student_id
 			);
 		};

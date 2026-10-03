@@ -1,27 +1,51 @@
-use rusqlite::Row;
+use rusqlite::{OptionalExtension, Row};
 
 use crate::models::{GradeOutcome, Reason, StudentReport};
+use crate::record::Record;
 
 use super::{Database, DbError};
 
-/// A grading session row.
+/// A grading session: one score revision of one grading record's evidence.
 #[derive(Debug, Clone)]
 pub struct Session {
 	pub id: i64,
 	pub assignment: String,
-	pub spec_title: Option<String>,
-	pub grading_policy: Option<String>,
+	/// The digest of the evidence the revision scored.
+	pub evidence: String,
+	pub revision: u32,
+	/// The test bundle's version, as the record holds it (JSON).
+	pub bundle: String,
+	/// The revision's items and grading policy (JSON).
+	pub grading_policy: String,
 	pub student_count: i64,
 	/// Over graded students only; `None` when nobody was graded.
 	pub avg_grade: Option<f64>,
 	pub created_at: String,
 }
 
-/// Whether a stored result carries a grade.
+/// What a session is a session of.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionOf<'a> {
+	pub assignment: &'a str,
+	pub evidence: &'a str,
+	pub revision: u32,
+	/// The revision's checksum.
+	pub checksum: &'a str,
+	pub bundle: &'a str,
+	pub grading_policy: &'a str,
+}
+
+/// A stored session, and whether this save stored it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Saved {
+	pub id: i64,
+	/// `false` when the revision was already saved, as session `id`.
+	pub created: bool,
+}
+
+/// Whether a stored result is a number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowState {
-	/// Saved from results that were never scored.
-	Unscored,
 	Graded,
 	Withheld,
 }
@@ -31,6 +55,7 @@ pub enum RowState {
 pub struct ResultRow {
 	pub student_id: String,
 	pub student_name: Option<String>,
+	pub canvas_user_id: Option<u64>,
 	pub pass_rate: f64,
 	pub state: RowState,
 	/// Why withheld, or why a graded 0 is a policy 0.
@@ -71,9 +96,14 @@ impl ResultRow {
 	}
 }
 
-const SESSION_COLUMNS: &str = "s.id, s.assignment, s.spec_title, s.grading_policy, s.student_count, s.avg_grade, s.created_at";
-const RESULT_COLUMNS: &str = "r.student_id, st.name, r.pass_rate, r.grade, r.reason, r.score, \
-	 r.max_score, r.raw_grade, r.final_grade, r.lint_score, r.total_cases, r.passed_cases";
+const SESSION_COLUMNS: &str = "s.id, s.assignment, s.evidence, s.revision, s.bundle, \
+	 s.grading_policy, s.student_count, s.avg_grade, s.created_at";
+/// The name the record stored, else the roster's.
+const RESULT_COLUMNS: &str = "r.student_id, COALESCE(r.student_name, st.name), r.canvas_user_id, \
+	 r.pass_rate, r.grade, r.reason, r.score, r.max_score, r.raw_grade, r.final_grade, \
+	 r.lint_score, r.total_cases, r.passed_cases";
+/// Newest first; a revision saved in the same second as its predecessor still sorts after it.
+const NEWEST_FIRST: &str = "s.created_at DESC, s.id DESC";
 
 /// A run made without --roster leaves keys unconfirmed, so the id carries a `local:` prefix
 /// that students.id never does. Match either form. (substr, not ltrim: ltrim strips a
@@ -88,11 +118,13 @@ fn session_at(row: &Row, at: usize) -> rusqlite::Result<Session> {
 	Ok(Session {
 		id: row.get(at)?,
 		assignment: row.get(at + 1)?,
-		spec_title: row.get(at + 2)?,
-		grading_policy: row.get(at + 3)?,
-		student_count: row.get(at + 4)?,
-		avg_grade: row.get(at + 5)?,
-		created_at: row.get(at + 6)?,
+		evidence: row.get(at + 2)?,
+		revision: row.get(at + 3)?,
+		bundle: row.get(at + 4)?,
+		grading_policy: row.get(at + 5)?,
+		student_count: row.get(at + 6)?,
+		avg_grade: row.get(at + 7)?,
+		created_at: row.get(at + 8)?,
 	})
 }
 
@@ -105,43 +137,67 @@ fn result_at(row: &Row, at: usize) -> rusqlite::Result<ResultRow> {
 			Box::new(DbError::Stored(what)),
 		)
 	};
-	let state = match row.get::<_, Option<String>>(at + 3)?.as_deref() {
-		None => RowState::Unscored,
-		Some("graded") => RowState::Graded,
-		Some("withheld") => RowState::Withheld,
-		Some(other) => return Err(bad(3, format!("grade state '{other}'"))),
+	let state = match row.get::<_, String>(at + 4)?.as_str() {
+		"graded" => RowState::Graded,
+		"withheld" => RowState::Withheld,
+		other => return Err(bad(4, format!("grade state '{other}'"))),
 	};
 	let reason = row
-		.get::<_, Option<String>>(at + 4)?
+		.get::<_, Option<String>>(at + 5)?
 		.map(|text| {
 			serde_json::from_value::<Reason>(serde_json::Value::String(text.clone()))
-				.map_err(|_| bad(4, format!("reason '{text}'")))
+				.map_err(|_| bad(5, format!("reason '{text}'")))
 		})
+		.transpose()?;
+	let canvas_user_id = row
+		.get::<_, Option<i64>>(at + 2)?
+		.map(|id| u64::try_from(id).map_err(|_| bad(2, format!("Canvas user id {id}"))))
 		.transpose()?;
 	Ok(ResultRow {
 		student_id: row.get(at)?,
 		student_name: row.get(at + 1)?,
-		pass_rate: row.get(at + 2)?,
+		canvas_user_id,
+		pass_rate: row.get(at + 3)?,
 		state,
 		reason,
-		score: row.get(at + 5)?,
-		max_score: row.get(at + 6)?,
-		raw_grade: row.get(at + 7)?,
-		final_grade: row.get(at + 8)?,
-		lint_score: row.get(at + 9)?,
-		total_cases: row.get(at + 10)?,
-		passed_cases: row.get(at + 11)?,
+		score: row.get(at + 6)?,
+		max_score: row.get(at + 7)?,
+		raw_grade: row.get(at + 8)?,
+		final_grade: row.get(at + 9)?,
+		lint_score: row.get(at + 10)?,
+		total_cases: row.get(at + 11)?,
+		passed_cases: row.get(at + 12)?,
 	})
 }
 
 impl Database {
-	/// Save a grading session with all student reports. Returns session ID.
+	/// Save revision `revision` of `record` as a session. A revision already saved is found,
+	/// not saved twice.
+	pub fn save_revision(&self, record: &Record, revision: u32) -> Result<Saved, DbError> {
+		let invalid = |e: anyhow::Error| DbError::Record(format!("{e:#}"));
+		let entry = record.revision(revision).map_err(invalid)?;
+		let view = record.view(Some(revision)).map_err(invalid)?;
+		self.save_session(
+			&SessionOf {
+				assignment: &record.evidence.assignment.name,
+				evidence: &record.digest,
+				revision,
+				checksum: &entry.checksum,
+				bundle: &serde_json::to_string(&record.evidence.bundle)?,
+				grading_policy: &serde_json::to_string(&entry.policy)?,
+			},
+			&view.reports,
+		)
+	}
+
+	/// Save scored reports as a session, in one transaction. Returns the session it already
+	/// has when this revision of this evidence was saved before, and refuses one saved under
+	/// the same number with other grades.
 	pub fn save_session(
 		&self,
-		assignment: &str,
+		of: &SessionOf,
 		reports: &[StudentReport],
-		grading_policy_json: Option<&str>,
-	) -> Result<i64, DbError> {
+	) -> Result<Saved, DbError> {
 		// Two reports for one student would be merged by UNIQUE(session_id, student_id)
 		// while student_count still claimed both — the silent overwrite this model exists
 		// to prevent. Refuse before writing anything.
@@ -150,6 +206,26 @@ impl Database {
 			if !seen.insert(report.student_id.as_str()) {
 				return Err(DbError::DuplicateStudent(report.student_id.clone()));
 			}
+		}
+		if let Some(report) = reports.iter().find(|r| r.grade.is_none()) {
+			return Err(DbError::Unscored(report.student_id.clone()));
+		}
+		if let Some((id, checksum)) = self
+			.conn
+			.query_row(
+				"SELECT id, checksum FROM sessions WHERE evidence = ?1 AND revision = ?2",
+				rusqlite::params![of.evidence, of.revision],
+				|row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+			)
+			.optional()?
+		{
+			if checksum != of.checksum {
+				return Err(DbError::Conflict {
+					session: id,
+					revision: of.revision,
+				});
+			}
+			return Ok(Saved { id, created: false });
 		}
 
 		// Average over students who actually have a grade: ungraded students would
@@ -160,55 +236,70 @@ impl Database {
 			.collect();
 		let avg = (!graded.is_empty()).then(|| graded.iter().sum::<f64>() / graded.len() as f64);
 
-		self.conn.execute(
-			"INSERT INTO sessions (assignment, student_count, avg_grade, grading_policy)
-			 VALUES (?1, ?2, ?3, ?4)",
-			rusqlite::params![assignment, reports.len() as i64, avg, grading_policy_json],
+		let tx = self.conn.unchecked_transaction()?;
+		tx.execute(
+			"INSERT INTO sessions
+			 (assignment, evidence, revision, checksum, bundle, grading_policy, student_count,
+			  avg_grade)
+			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+			rusqlite::params![
+				of.assignment,
+				of.evidence,
+				of.revision,
+				of.checksum,
+				of.bundle,
+				of.grading_policy,
+				reports.len() as i64,
+				avg
+			],
 		)?;
-		let session_id = self.conn.last_insert_rowid();
-
-		let mut stmt = self.conn.prepare(
-			"INSERT INTO results
-			 (session_id, student_id, pass_rate, grade, reason, score, max_score, raw_grade,
-			  final_grade, lint_score, total_cases, passed_cases, details)
-			 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-		)?;
-
-		for report in reports {
-			let grade = report.grade.as_ref();
-			let (state, score, raw_grade) = match grade.map(|g| &g.outcome) {
-				None => (None, None, None),
-				Some(GradeOutcome::Graded {
-					score, raw_grade, ..
-				}) => (Some("graded"), Some(*score), Some(*raw_grade)),
-				Some(GradeOutcome::Withheld { .. }) => (Some("withheld"), None, None),
-			};
-			stmt.execute(rusqlite::params![
-				session_id,
-				report.student_id,
-				report.pass_rate(),
-				state,
-				grade
-					.and_then(|g| g.reason())
-					.map(|r| crate::export::word(&r)),
-				score,
-				grade.map(|g| g.max),
-				raw_grade,
-				report.final_grade(),
-				report.lint_score(),
-				report.total_cases() as i64,
-				report.total_passed() as i64,
-				serde_json::to_string(report)?,
-			])?;
+		let session_id = tx.last_insert_rowid();
+		{
+			let mut stmt = tx.prepare(
+				"INSERT INTO results
+				 (session_id, student_id, student_name, canvas_user_id, pass_rate, grade, reason,
+				  score, max_score, raw_grade, final_grade, lint_score, total_cases,
+				  passed_cases, details)
+				 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+			)?;
+			for report in reports {
+				let grade = report.grade.as_ref().expect("checked above");
+				let (state, score, raw_grade) = match &grade.outcome {
+					GradeOutcome::Graded {
+						score, raw_grade, ..
+					} => ("graded", Some(*score), Some(*raw_grade)),
+					GradeOutcome::Withheld { .. } => ("withheld", None, None),
+				};
+				stmt.execute(rusqlite::params![
+					session_id,
+					report.student_id,
+					report.student_name,
+					report.canvas_user_id.map(|id| id as i64),
+					report.pass_rate(),
+					state,
+					grade.reason().map(|r| crate::export::word(&r)),
+					score,
+					grade.max,
+					raw_grade,
+					report.final_grade(),
+					report.lint_score(),
+					report.total_cases() as i64,
+					report.total_passed() as i64,
+					serde_json::to_string(report)?,
+				])?;
+			}
 		}
-
-		Ok(session_id)
+		tx.commit()?;
+		Ok(Saved {
+			id: session_id,
+			created: true,
+		})
 	}
 
 	/// List all sessions.
 	pub fn list_sessions(&self) -> Result<Vec<Session>, DbError> {
 		let mut stmt = self.conn.prepare(&format!(
-			"SELECT {SESSION_COLUMNS} FROM sessions s ORDER BY s.created_at DESC"
+			"SELECT {SESSION_COLUMNS} FROM sessions s ORDER BY {NEWEST_FIRST}"
 		))?;
 		let rows = stmt.query_map([], |row| session_at(row, 0))?;
 		Ok(rows.collect::<Result<_, _>>()?)
@@ -267,10 +358,10 @@ impl Database {
 			 JOIN sessions s ON r.session_id = s.id
 			 {JOIN_STUDENT}
 			 WHERE r.student_id IN (?1, 'local:' || ?1, ?2)
-			 ORDER BY s.created_at DESC"
+			 ORDER BY {NEWEST_FIRST}"
 		))?;
 		let rows = stmt.query_map(rusqlite::params![bare, student_id], |row| {
-			Ok((session_at(row, 0)?, result_at(row, 7)?))
+			Ok((session_at(row, 0)?, result_at(row, 9)?))
 		})?;
 		Ok(rows.collect::<Result<_, _>>()?)
 	}

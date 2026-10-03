@@ -32,8 +32,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   succeeds, stage `notes` in this repository and commit/push its new gitlink. A failed
   push must never leave a published parent pointer to unavailable notes.
 - The README contains the complete command sequence. Keep original histories and
-  resolve divergence without overwriting either side. The migration provenance and
-  P-673 uncommitted-document handoff are in `notes/scriptmark/MIGRATION.md`.
+  resolve divergence without overwriting either side.
 - Linear is the execution home. Keep runnable examples, code, measurements and raw
   artifacts here; maintain narrative/design documentation on the notes branch.
   Historical code paths inside imported plans describe their original revision.
@@ -63,7 +62,8 @@ default Python is newer than the PyO3 version supports; see the P-676 validation
 
 Single `scriptmark` crate (lib + bin) with `scriptmark-py` as separate cdylib for PyO3.
 
-Data flows: TOML specs + student files → Runner → Results → Display/DB/HTML.
+Data flows: TOML specs + student files → Runner → grading record (evidence + score
+revisions) → Display/DB/HTML/Canvas. `rescore` adds a revision from saved evidence.
 
 ```
 models/         Data models, TOML spec parsing, grading policies
@@ -71,7 +71,8 @@ discovery       Student file discovery + ZIP extraction
 runner/         PythonExecutor (subprocess), orchestrator, sandbox (setrlimit),
                 parametrize, expander, oracle, linter
 checker/        Checker trait (8 impls) + Rhai + Python checkers
-db/             SQLite (rusqlite bundled): students, sessions, results, similarity
+record          Grading record: versioned evidence, score revisions, rescore reuse checks
+db/             SQLite (rusqlite bundled): students, sessions (= revisions), results, similarity
 canvas/         Canvas LMS API client (reqwest + rustls): roster pull, grades push
 tui/            ratatui terminal UI: students/sessions/similarity tabs
 scriptmark-py   PyO3 bindings: grade, run, discover, load_spec (maturin, separate crate)
@@ -100,6 +101,7 @@ Zero and withheld grades stay distinct. See the notes' teacher contract for poli
 - `crates/scriptmark/src/runner/orchestrator.rs` — Runs vars→setup→expand→oracle→execute pipeline per student, tokio parallel.
 - `crates/scriptmark/src/models/spec.rs` — All TOML spec structs (TestSpec, TestCase, SetupStep, Parametrize, Oracle, LintConfig, CheckMethod).
 - `crates/scriptmark/src/discovery.rs` — File discovery + ZIP archive extraction with size/count limits.
+- `crates/scriptmark/src/record.rs` — The grading record every consumer reads (`--output`): evidence with submission/spec fingerprints, append-only score revisions, `check()` refusing evidence whose tests, submissions or matching changed.
 - `crates/scriptmark/src/grading.rs` — GradingPolicy dispatch (templates + Rhai formulas).
 - `crates/scriptmark/src/main.rs` — All CLI command handlers.
 - `crates/scriptmark-py/src/lib.rs` — PyO3 bindings: grade(), run(), discover(), load_spec(), StudentResult, TestSpec classes.
