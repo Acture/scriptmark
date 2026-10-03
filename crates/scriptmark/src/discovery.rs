@@ -17,7 +17,7 @@ use crate::models::{
 };
 use crate::roster::Roster;
 
-/// Directory archives are expanded into, beside the directory being scanned.
+/// Directory archives are expanded into, inside the directory being scanned.
 const EXTRACT_DIR: &str = ".scriptmark_extracted";
 
 /// Map file extensions to language identifiers.
@@ -672,7 +672,10 @@ mod tests {
 			std::fs::read_to_string(dir.path().join("alice_sum.py")).unwrap(),
 			"a"
 		);
-		// Nothing was extracted beside the submissions.
+		// Each archive landed in its own directory, and nothing beside the submissions.
+		let extracted = dir.path().join(EXTRACT_DIR);
+		assert!(extracted.join("...zip/x.py").is_file());
+		assert!(extracted.join("..zip/y.py").is_file());
 		assert!(!dir.path().join("x.py").exists());
 		assert!(!dir.path().join("y.py").exists());
 	}

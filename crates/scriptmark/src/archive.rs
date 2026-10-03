@@ -300,6 +300,8 @@ impl<'a> Sink<'a> {
 			Ok(_) => std::fs::write(out_path, &buf).err().map(|e| e.to_string()),
 		};
 		if let Some(reason) = failure {
+			// A failed write can leave a truncated file, and the scan lists this directory.
+			std::fs::remove_file(out_path).ok();
 			self.rollback(name, out_path, size, reason);
 		}
 	}
