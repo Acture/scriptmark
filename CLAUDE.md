@@ -9,9 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Documentation is in the `notes/` git submodule:
   `https://github.com/Acture/obsidian-vault.git`, branch `project/scriptmark`.
-  Start at `notes/scriptmark/README.md`; the teacher contract is
-  `notes/scriptmark/docs/test-bundles.md`, and plans are in
-  `notes/scriptmark/docs/plans/`. Do not recreate a maintained root `docs/` tree.
+  Start at `notes/README.md`; the teacher contract is
+  `notes/docs/test-bundles.md`, and plans are in
+  `notes/docs/plans/`. Do not recreate a maintained root `docs/` tree.
 - Default to the latest remote `project/scriptmark` notes. At the start of every
   session, after pulling code, and before reading or editing notes, run
   `fish scripts/update-notes.fish` from this repository. This initializes missing
@@ -21,14 +21,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   then run the same helper. It stops on local notes edits, unpushed commits or divergence;
   preserve and reconcile them instead of resetting or force-pushing. If fetching fails,
   report that the latest notes were not verified; do not silently describe stale notes as current.
-- Edit only `notes/scriptmark/`. A newer notes checkout can make the parent's gitlink
+- Edit only `notes/`. A newer notes checkout can make the parent's gitlink
   dirty; review `git diff --submodule=log -- notes` and include the updated reference in
   the next code commit. Do not reset notes just to remove that expected difference.
 - The gitlink remains a concrete saved checkpoint because Git requires one. Use
   `git submodule update --init --checkout -- notes` only for an explicitly requested
   historical reproduction, with clean notes. Pinned checkout is not the daily workflow.
-- Stage with `git -C notes add -- scriptmark/`, commit in `notes`, and push with
-  `git -C notes push origin HEAD:refs/heads/project/scriptmark`. Only after that push
+- Stage with `git -C notes add README.md`, commit in `notes`, and push with
+  `python3 (git -C notes rev-parse --path-format=absolute --git-common-dir)/hooks/notes-boundary/submit_project.py --repo notes`. Only after that push
   succeeds, stage `notes` in this repository and commit/push its new gitlink. A failed
   push must never leave a published parent pointer to unavailable notes.
 - The README contains the complete command sequence. Keep original histories and
@@ -150,3 +150,19 @@ seed = 42
 [cases.parametrize.oracle]
 rhai = "if a >= b { a } else { b }"
 ```
+
+
+## Project notes submission
+
+`docs/` is reserved for public documentation. Private research notes live in `notes/`, which tracks `project/scriptmark` in `Acture/obsidian-vault`; start at `notes/README.md`. This checkout's root contains only this project's notes. Master places these notes under `scriptmark/`. Keep automation and vault configuration on master. Preserve existing local edits when updating a checkout.
+
+Install or refresh the trusted submission tools in Git metadata, including in new clones:
+
+```fish
+git -C notes fetch origin refs/heads/master:refs/remotes/origin/master
+set notes_common_gitdir (git -C notes rev-parse --path-format=absolute --git-common-dir)
+git -C notes show origin/master:.github/scripts/install_push_hook.py > "$notes_common_gitdir/install_push_hook.py"
+python3 "$notes_common_gitdir/install_push_hook.py" --repo notes --source-ref origin/master
+```
+
+After committing specific note files, submit through `python3 "$notes_common_gitdir/hooks/notes-boundary/submit_project.py" --repo notes`. The remote requires `notes-boundary/root/scriptmark` from GitHub Actions. Only after successful submission should this repository commit and push the `notes` gitlink. See the central repository's `项目接入.md` for initialization, updates and conflict handling.

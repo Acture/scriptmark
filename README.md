@@ -10,12 +10,12 @@ Automated grading CLI for student programming assignments. Rust core, TOML test 
 ## Documentation and checkout
 
 Project documentation lives in
-[Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark/scriptmark),
+[Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark),
 mounted here as the `notes/` submodule. Start with
 [the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/README.md)
-or open `notes/scriptmark/README.md` locally. The teacher guide is
-`notes/scriptmark/docs/test-bundles.md`; design records are under
-`notes/scriptmark/docs/plans/`. Access to the notes repository is required to initialize it.
+or open `notes/README.md` locally. The teacher guide is
+`notes/docs/test-bundles.md`; design records are under
+`notes/docs/plans/`. Access to the notes repository is required to initialize it.
 
 Daily work uses the latest `project/scriptmark` notes. Clone, then initialize/update
 the notes and attach their project branch:
@@ -53,11 +53,11 @@ To edit documentation, update first, then publish the notes before the parent re
 
 ```fish
 fish scripts/update-notes.fish
-# Edit notes/scriptmark/; inspect the changes before staging.
+# Edit notes/; inspect the changes before staging.
 git -C notes diff -- scriptmark/
-git -C notes add -- scriptmark/
+git -C notes add README.md
 git -C notes commit -m "docs(scriptmark): describe the change"
-git -C notes push origin HEAD:refs/heads/project/scriptmark
+python3 (git -C notes rev-parse --path-format=absolute --git-common-dir)/hooks/notes-boundary/submit_project.py --repo notes
 and git add notes
 and git commit -m "docs: update ScriptMark notes"
 and git push
