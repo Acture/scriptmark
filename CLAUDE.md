@@ -9,9 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 - Documentation is in the `notes/` git submodule:
   `https://github.com/Acture/obsidian-vault.git`, branch `project/scriptmark`.
-  Start at `notes/scriptmark/README.md`; the teacher contract is
-  `notes/scriptmark/docs/test-bundles.md`, and plans are in
-  `notes/scriptmark/docs/plans/`. Do not recreate a maintained root `docs/` tree.
+  Start at `notes/README.md`; the teacher contract is
+  `notes/docs/test-bundles.md`, and plans are in
+  `notes/docs/plans/`. Do not recreate a maintained root `docs/` tree.
 - Default to the latest remote `project/scriptmark` notes. At the start of every
   session, after pulling code, and before reading or editing notes, run
   `fish scripts/update-notes.fish` from this repository. This initializes missing
@@ -21,16 +21,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   then run the same helper. It stops on local notes edits, unpushed commits or divergence;
   preserve and reconcile them instead of resetting or force-pushing. If fetching fails,
   report that the latest notes were not verified; do not silently describe stale notes as current.
-- Edit only `notes/scriptmark/`. A newer notes checkout can make the parent's gitlink
+- Edit only `notes/`. A newer notes checkout can make the parent's gitlink
   dirty; review `git diff --submodule=log -- notes` and include the updated reference in
   the next code commit. Do not reset notes just to remove that expected difference.
 - The gitlink remains a concrete saved checkpoint because Git requires one. Use
   `git submodule update --init --checkout -- notes` only for an explicitly requested
   historical reproduction, with clean notes. Pinned checkout is not the daily workflow.
-- Stage with `git -C notes add -- scriptmark/`, commit in `notes`, and push with
-  `git -C notes push origin HEAD:refs/heads/project/scriptmark`. Only after that push
-  succeeds, stage `notes` in this repository and commit/push its new gitlink. A failed
-  push must never leave a published parent pointer to unavailable notes.
+- Stage specific documents in `notes/` and commit there. Publish with the master-owned
+  `hooks/notes-boundary/submit_project.py --repo notes` under the notes repository's
+  common Git directory; it runs the required remote check before pushing that SHA.
+  Install/update this helper from the notes repository's trusted `origin/master` as
+  shown in README. Direct pushes of unchecked commits are rejected. Only after a
+  successful submission, stage `notes` here and commit/push its new gitlink.
 - The README contains the complete command sequence. Keep original histories and
   resolve divergence without overwriting either side.
 - Linear is the execution home. Keep runnable examples, code, measurements and raw
@@ -61,6 +63,11 @@ default Python is newer than the PyO3 version supports; see the P-676 validation
 ## Architecture
 
 Single `scriptmark` crate (lib + bin) with `scriptmark-py` as separate cdylib for PyO3.
+
+All product source is under `src/`: Rust packages live in `src/crates/` and the
+Python package entry point in `src/python/scriptmark/`. Workspace/build configuration
+stays at the repository root, where Cargo and Maturin commands are run. The module
+paths below are relative to `src/crates/scriptmark/src/`.
 
 Data flows: TOML specs + student files → Runner → grading record (evidence + score
 revisions) → Display/DB/HTML/Canvas. `rescore` adds a revision from saved evidence.
@@ -96,21 +103,21 @@ Zero and withheld grades stay distinct. See the notes' teacher contract for poli
 
 ## Critical Files
 
-- `crates/scriptmark/src/runner/python.rs` — PythonExecutor + embedded helper scripts (HELPER_SCRIPT, CHAIN_HELPER_SCRIPT). Contains import allowlist, env sanitization, `sandboxed_cmd()`, `spawn_with_timeout()`.
-- `crates/scriptmark/src/runner/sandbox.rs` — SandboxConfig + setrlimit application. Platform-conditional: RLIMIT_AS skipped on macOS, RLIMIT_* constants differ between Linux (c_uint) and macOS (c_int).
-- `crates/scriptmark/src/runner/orchestrator.rs` — Runs vars→setup→expand→oracle→execute pipeline per student, tokio parallel.
-- `crates/scriptmark/src/models/spec.rs` — All TOML spec structs (TestSpec, TestCase, SetupStep, Parametrize, Oracle, LintConfig, CheckMethod).
-- `crates/scriptmark/src/discovery.rs` — File discovery + ZIP archive extraction with size/count limits.
-- `crates/scriptmark/src/record.rs` — The grading record every consumer reads (`--output`): evidence with submission/spec fingerprints, append-only score revisions, `check()` refusing evidence whose tests, submissions or matching changed.
-- `crates/scriptmark/src/grading.rs` — GradingPolicy dispatch (templates + Rhai formulas).
-- `crates/scriptmark/src/main.rs` — All CLI command handlers.
-- `crates/scriptmark-py/src/lib.rs` — PyO3 bindings: grade(), run(), discover(), load_spec(), StudentResult, TestSpec classes.
+- `src/crates/scriptmark/src/runner/python.rs` — PythonExecutor + embedded helper scripts (HELPER_SCRIPT, CHAIN_HELPER_SCRIPT). Contains import allowlist, env sanitization, `sandboxed_cmd()`, `spawn_with_timeout()`.
+- `src/crates/scriptmark/src/runner/sandbox.rs` — SandboxConfig + setrlimit application. Platform-conditional: RLIMIT_AS skipped on macOS, RLIMIT_* constants differ between Linux (c_uint) and macOS (c_int).
+- `src/crates/scriptmark/src/runner/orchestrator.rs` — Runs vars→setup→expand→oracle→execute pipeline per student, tokio parallel.
+- `src/crates/scriptmark/src/models/spec.rs` — All TOML spec structs (TestSpec, TestCase, SetupStep, Parametrize, Oracle, LintConfig, CheckMethod).
+- `src/crates/scriptmark/src/discovery.rs` — File discovery + ZIP archive extraction with size/count limits.
+- `src/crates/scriptmark/src/record.rs` — The grading record every consumer reads (`--output`): evidence with submission/spec fingerprints, append-only score revisions, `check()` refusing evidence whose tests, submissions or matching changed.
+- `src/crates/scriptmark/src/grading.rs` — GradingPolicy dispatch (templates + Rhai formulas).
+- `src/crates/scriptmark/src/main.rs` — All CLI command handlers.
+- `src/crates/scriptmark-py/src/lib.rs` — PyO3 bindings: grade(), run(), discover(), load_spec(), StudentResult, TestSpec classes.
 
 ## Conventions
 
 - Workspace dependencies in root `Cargo.toml`, crates reference with `{ workspace = true }`
 - `thiserror` for library error types, `anyhow` for CLI/binary error handling
-- All checkers implement `Checker` trait in `crates/scriptmark/src/checker/mod.rs`
+- All checkers implement `Checker` trait in `src/crates/scriptmark/src/checker/mod.rs`
 - Integration tests spawn real Python processes — need `python3` available
 - `scriptmark-py` has `publish = false` (cdylib, distributed via PyPI/maturin, not crates.io)
 - Platform-specific code uses `#[cfg(target_os = "macos")]` / `#[cfg(target_os = "linux")]` for rlimit types

@@ -17,7 +17,7 @@ use scriptmark::runner::python::PythonExecutor;
 use scriptmark::spec_loader::{load_spec, load_specs_from_dir};
 
 fn examples() -> PathBuf {
-	Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples")
+	Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../examples")
 }
 
 async fn grade_example(name: &str) -> Vec<StudentReport> {

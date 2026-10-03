@@ -7,15 +7,33 @@
 
 Automated grading CLI for student programming assignments. Rust core, TOML test specifications, Python bindings via PyO3.
 
+## Repository layout
+
+```text
+src/
+  crates/
+    scriptmark/       Rust library, CLI and integration tests
+    scriptmark-py/    Rust bindings for the Python extension
+  python/
+    scriptmark/       Python package entry point
+examples/             Runnable teacher test bundles
+notes/                Project documentation submodule
+scripts/              Repository maintenance commands
+```
+
+Run Cargo and Maturin commands from the repository root. `Cargo.toml` and
+`pyproject.toml` configure both builds; the compiled Python extension is packaged
+with `src/python/scriptmark/`.
+
 ## Documentation and checkout
 
 Project documentation lives in
-[Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark/scriptmark),
+[Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark),
 mounted here as the `notes/` submodule. Start with
-[the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/README.md)
-or open `notes/scriptmark/README.md` locally. The teacher guide is
-`notes/scriptmark/docs/test-bundles.md`; design records are under
-`notes/scriptmark/docs/plans/`. Access to the notes repository is required to initialize it.
+[the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/README.md)
+or open `notes/README.md` locally. The teacher guide is
+`notes/docs/test-bundles.md`; design records are under
+`notes/docs/plans/`. Access to the notes repository is required to initialize it.
 
 Daily work uses the latest `project/scriptmark` notes. Clone, then initialize/update
 the notes and attach their project branch:
@@ -49,19 +67,35 @@ git commit -m "docs: update ScriptMark notes"
 git push
 ```
 
+Before the first documentation push in a clone, install the trusted boundary checker
+from the notes repository's `master`. Repeat this when its submission tooling changes:
+
+```fish
+git -C notes -c fetch.prune=false -c fetch.pruneTags=false fetch --no-tags origin refs/heads/master:refs/remotes/origin/master
+and set notes_common_gitdir (git -C notes rev-parse --path-format=absolute --git-common-dir)
+and git -C notes show origin/master:.github/scripts/install_push_hook.py > "$notes_common_gitdir/install_push_hook.py"
+and python3 "$notes_common_gitdir/install_push_hook.py" --repo notes --source-ref origin/master
+```
+
 To edit documentation, update first, then publish the notes before the parent reference:
 
 ```fish
 fish scripts/update-notes.fish
-# Edit notes/scriptmark/; inspect the changes before staging.
-git -C notes diff -- scriptmark/
-git -C notes add -- scriptmark/
+# Edit project documents directly in notes/; stage the specific files changed.
+git -C notes diff
+git -C notes add README.md
 git -C notes commit -m "docs(scriptmark): describe the change"
-git -C notes push origin HEAD:refs/heads/project/scriptmark
+set notes_common_gitdir (git -C notes rev-parse --path-format=absolute --git-common-dir)
+python3 "$notes_common_gitdir/hooks/notes-boundary/submit_project.py" --repo notes
 and git add notes
 and git commit -m "docs: update ScriptMark notes"
 and git push
 ```
+
+The submission helper runs the required remote boundary check and pushes the checked
+commit. A direct push of an unchecked commit is rejected. The notes repository's
+[project instructions](https://github.com/Acture/obsidian-vault/blob/master/项目接入.md)
+own this workflow.
 
 Push the notes successfully **before** updating the code repository's gitlink. If a
 fast-forward fails, resolve the divergence while preserving both versions. Do not
@@ -199,7 +233,7 @@ print(spec.name, spec.function, spec.num_cases)
 Teachers can configure student ownership, item file patterns, function aliases and
 per-student overrides in `assignment.toml`. Preview decisions and candidates with
 `scriptmark match`; unresolved conflicts withhold grades. See
-[matching rules](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/matching.md).
+[matching rules](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/matching.md).
 
 ```toml
 [meta]
@@ -247,7 +281,7 @@ Reference answers are computed before grading and frozen for reuse. `--replay` v
 their sources and configuration, then reuses the answers without recomputing them.
 References can also supply declared exceptions, stdout and text files; see the
 [reference bundle](examples/bundles/reference_oracle) and
-[answer contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#reference-implementations).
+[answer contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#reference-implementations).
 
 Every case runs in its own process and working directory. When state should carry over —
 an object built once and driven step by step — say so with a scenario:
@@ -278,7 +312,7 @@ expect = 150
 Anything a bundle cannot honour — an unknown field, a checker that does not exist, a
 case with nothing to judge — is refused before a single student runs. Every failure says
 whose it is: the student's, the teacher's, or the machine's. See
-[the teacher guide](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md) for the full contract, and
+[the teacher guide](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md) for the full contract, and
 [examples/bundles](examples/bundles) for a pure function, a shared object and file I/O.
 
 ### Scoring
@@ -305,7 +339,7 @@ points = 3
 aggregation = "proportional"  # points × pass rate; or "all_or_nothing"
 ```
 
-See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#scoring) for every rule.
+See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#scoring) for every rule.
 
 ### Checkers
 
@@ -323,7 +357,7 @@ See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project
 ## Features
 
 - **Custom test engine** -- subprocess execution, no pytest dependency
-- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
+- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
 - **Per-item scoring** -- declared points and aggregation; zero and withheld kept apart in every export
