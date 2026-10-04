@@ -7,36 +7,62 @@
 
 Automated grading CLI for student programming assignments. Rust core, TOML test specifications, Python bindings via PyO3.
 
+## Repository layout
+
+```text
+src/
+  crates/
+    scriptmark/       Rust library, CLI and integration tests
+    scriptmark-py/    Rust bindings for the Python extension
+  python/
+    scriptmark/       Python package entry point
+examples/             Runnable teacher test bundles
+notes/                Private project documentation submodule
+```
+
+Run Cargo and Maturin commands from the repository root. `Cargo.toml` and
+`pyproject.toml` configure both builds; the compiled Python extension is packaged
+with `src/python/scriptmark/`.
+
 ## Documentation and checkout
 
-Project documentation lives in
+Public documentation belongs in `docs/`. Private project documentation lives in
 [Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark),
 mounted here as the `notes/` submodule. Start with
-[the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/README.md)
+[the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/README.md)
 or open `notes/README.md` locally. The teacher guide is
 `notes/docs/test-bundles.md`; design records are under
 `notes/docs/plans/`. Access to the notes repository is required to initialize it.
+Building and using ScriptMark does not require access to private notes.
 
-Daily work uses the latest `project/scriptmark` notes. Clone, then initialize/update
-the notes and attach their project branch:
+Daily work uses the latest `project/scriptmark` notes through Git's native submodule
+commands. In a new clone, initialize the notes and attach their project branch:
 
 ```fish
 git clone https://github.com/Acture/scriptmark.git
-cd scriptmark
-fish scripts/update-notes.fish
+and cd scriptmark
+and git submodule update --init --remote --no-single-branch -- notes
+and git -C notes switch project/scriptmark
 ```
 
 At the start of each work session, after pulling code changes, and before reading or
-editing notes, use the same command:
+editing an existing notes checkout, update it from the project branch:
 
 ```fish
-fish scripts/update-notes.fish
+git -C notes -c fetch.prune=false -c fetch.pruneTags=false fetch --no-tags origin refs/heads/project/scriptmark:refs/remotes/origin/project/scriptmark
+and test (git -C notes status --porcelain | count) -eq 0
+and git -C notes merge-base --is-ancestor HEAD origin/project/scriptmark
+and git -C notes switch project/scriptmark
+and git -C notes merge-base --is-ancestor HEAD origin/project/scriptmark
+and git -C notes merge --ff-only origin/project/scriptmark
 ```
 
-The helper fetches the configured project branch, fast-forwards it and leaves it
-checked out for editing. It also works after a single-branch clone. Local edits,
-unpushed commits and divergence stop the update so they can be preserved and resolved.
-If fetching fails, the checkout has not been confirmed current.
+The explicit fetch also works with a single-branch notes clone. The checks before
+and after switching preserve unpublished work both at the current HEAD and on an
+existing local project branch. A failed command stops the sequence: inspect
+`git -C notes status` and `git -C notes log --oneline origin/project/scriptmark..HEAD`,
+then preserve and reconcile local edits, unpushed commits or divergence. Do not skip
+the checks or reset the notes. If fetching fails, the checkout is not confirmed current.
 
 Git still records a concrete submodule commit in each code commit. That is a saved
 checkpoint, not the daily reading policy; newer notes normally make `git status` show
@@ -49,19 +75,35 @@ git commit -m "docs: update ScriptMark notes"
 git push
 ```
 
-To edit documentation, update first, then publish the notes before the parent reference:
+Before the first documentation push in a clone, install the trusted boundary checker
+from the notes repository's `master`. Repeat this when its submission tooling changes:
 
 ```fish
-fish scripts/update-notes.fish
-# Edit notes/; inspect the changes before staging.
-git -C notes diff -- scriptmark/
+git -C notes -c fetch.prune=false -c fetch.pruneTags=false fetch --no-tags origin refs/heads/master:refs/remotes/origin/master
+and set notes_common_gitdir (git -C notes rev-parse --path-format=absolute --git-common-dir)
+and git -C notes show origin/master:.github/scripts/install_push_hook.py > "$notes_common_gitdir/install_push_hook.py"
+and python3 "$notes_common_gitdir/install_push_hook.py" --repo notes --source-ref origin/master
+```
+
+To edit documentation, complete the update sequence above first, then publish the
+notes before the parent reference:
+
+```fish
+# Edit project documents directly in notes/; stage the specific files changed.
+git -C notes diff
 git -C notes add README.md
 git -C notes commit -m "docs(scriptmark): describe the change"
-python3 (git -C notes rev-parse --path-format=absolute --git-common-dir)/hooks/notes-boundary/submit_project.py --repo notes
+set notes_common_gitdir (git -C notes rev-parse --path-format=absolute --git-common-dir)
+python3 "$notes_common_gitdir/hooks/notes-boundary/submit_project.py" --repo notes
 and git add notes
 and git commit -m "docs: update ScriptMark notes"
 and git push
 ```
+
+The submission helper runs the required remote boundary check and pushes the checked
+commit. A direct push of an unchecked commit is rejected. The notes repository's
+[project instructions](https://github.com/Acture/obsidian-vault/blob/master/项目接入.md)
+own this workflow.
 
 Push the notes successfully **before** updating the code repository's gitlink. If a
 fast-forward fails, resolve the divergence while preserving both versions. Do not
@@ -71,7 +113,9 @@ documentation edits belong on the notes branch.
 Only when explicitly reproducing an older code revision, restore its recorded notes
 with `git submodule update --init --checkout -- notes` from a clean notes checkout.
 Ordinary `git clone --recurse-submodules` uses that recorded checkpoint too; run the
-helper afterwards for current notes. Git has no floating gitlink that advances by itself.
+update sequence above afterwards for current notes. Git has no floating gitlink that
+advances by itself. Shared notes tooling and its maintenance belong to the notes
+repository; ScriptMark does not carry its own synchronization script.
 
 ## Installation
 
@@ -199,7 +243,7 @@ print(spec.name, spec.function, spec.num_cases)
 Teachers can configure student ownership, item file patterns, function aliases and
 per-student overrides in `assignment.toml`. Preview decisions and candidates with
 `scriptmark match`; unresolved conflicts withhold grades. See
-[matching rules](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/matching.md).
+[matching rules](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/matching.md).
 
 ```toml
 [meta]
@@ -247,7 +291,7 @@ Reference answers are computed before grading and frozen for reuse. `--replay` v
 their sources and configuration, then reuses the answers without recomputing them.
 References can also supply declared exceptions, stdout and text files; see the
 [reference bundle](examples/bundles/reference_oracle) and
-[answer contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#reference-implementations).
+[answer contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#reference-implementations).
 
 Every case runs in its own process and working directory. When state should carry over —
 an object built once and driven step by step — say so with a scenario:
@@ -278,7 +322,7 @@ expect = 150
 Anything a bundle cannot honour — an unknown field, a checker that does not exist, a
 case with nothing to judge — is refused before a single student runs. Every failure says
 whose it is: the student's, the teacher's, or the machine's. See
-[the teacher guide](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md) for the full contract, and
+[the teacher guide](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md) for the full contract, and
 [examples/bundles](examples/bundles) for a pure function, a shared object and file I/O.
 
 ### Scoring
@@ -305,7 +349,7 @@ points = 3
 aggregation = "proportional"  # points × pass rate; or "all_or_nothing"
 ```
 
-See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#scoring) for every rule.
+See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#scoring) for every rule.
 
 ### Checkers
 
@@ -323,7 +367,7 @@ See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project
 ## Features
 
 - **Custom test engine** -- subprocess execution, no pytest dependency
-- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
+- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
 - **Per-item scoring** -- declared points and aggregation; zero and withheld kept apart in every export

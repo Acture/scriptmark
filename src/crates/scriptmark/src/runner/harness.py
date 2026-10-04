@@ -355,7 +355,7 @@ def _removed_checker(*args, **kwargs):
 		"@checker no longer binds a checker to a function: put "
 		'check = { function = "<checker name>" } on each case it should judge '
 		"(https://github.com/Acture/obsidian-vault/blob/project/scriptmark/"
-		"scriptmark/docs/test-bundles.md#migrating-an-older-spec)"
+		"docs/test-bundles.md#migrating-an-older-spec)"
 	)
 
 

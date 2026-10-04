@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-	"crates/scriptmark",
-	"crates/scriptmark-py",
+	"src/crates/scriptmark",
+	"src/crates/scriptmark-py",
 ]
 
 [workspace.package]
