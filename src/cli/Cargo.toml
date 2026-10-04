@@ -36,4 +36,5 @@ scriptmark-core = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 zip = { workspace = true }
 toml = { workspace = true }
+calamine = { workspace = true }
 wiremock = "0.6.5"

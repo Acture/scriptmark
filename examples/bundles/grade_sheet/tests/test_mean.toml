@@ -1,0 +1,17 @@
+# 平均值: the mean of a list.
+
+[meta]
+name = "mean"
+file = "lab.py"
+function = "mean"
+language = "python"
+
+[[cases]]
+name = "整数"
+args = [[1, 2, 3]]
+expect = 2.0
+
+[[cases]]
+name = "小数"
+args = [[0.5, 1.5]]
+expect = 1.0

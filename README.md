@@ -165,6 +165,9 @@ scriptmark grade submissions/ -t tests/ --force
 # Read the latest revision, or any other with --revision N
 scriptmark summarize output/results.json --revision 1
 scriptmark export output/results.json -o grades.csv
+# The same grades as a workbook: 学号 kept as text, scores as numbers, and sheets for the
+# items, the cases behind each grade and the record and revision they came from
+scriptmark export output/results.json -o grades.xlsx
 scriptmark db save output/results.json --revision 1 --db grades.db
 
 # Preview student/file/function matching; edit assignment.toml to resolve candidates
@@ -329,6 +332,7 @@ See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
 - **Per-item scoring** -- declared points and aggregation; zero and withheld kept apart in every export
+- **Grade sheets** -- one row per student as CSV or XLSX from one table, naming the assignment, revision and evidence they came from
 - **Canvas LMS** -- roster pull, grades push
 - **Similarity detection** -- style + structural code comparison
 - **TUI + HTML reports** -- interactive browser and standalone dashboards

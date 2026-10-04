@@ -208,7 +208,10 @@ fn the_archive_is_tables_and_the_json_is_the_record() {
 	args.extend(["--archive", "out/archive"]);
 	succeeded(scriptmark(dir, &args));
 	let cases = std::fs::read_to_string(dir.join("out/archive/archive_tests.csv")).unwrap();
-	assert!(cases.starts_with("student_name,student_id,"), "{cases}");
+	assert!(
+		cases.starts_with("\u{feff}student_id,student_name,"),
+		"{cases}"
+	);
 	let grades = std::fs::read_to_string(dir.join("out/archive/grades_tests.csv")).unwrap();
 	assert!(
 		grades.contains("local:bob,,,graded,,5,10,50,50,"),

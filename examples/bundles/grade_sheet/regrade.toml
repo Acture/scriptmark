@@ -1,0 +1,18 @@
+# The same items; a roster student who hands in nothing now gets 0, with its reason.
+[assignment]
+name = "lab3 统计"
+
+[grading]
+missing = "zero"
+
+[[items]]
+id = "mean"
+title = "平均值"
+points = 6
+aggregation = "proportional"
+
+[[items]]
+id = "parity"
+title = "奇偶判断"
+points = 1
+aggregation = "proportional"

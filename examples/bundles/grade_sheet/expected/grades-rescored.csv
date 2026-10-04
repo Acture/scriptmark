@@ -1,0 +1,7 @@
+﻿student_id,student_name,canvas_user_id,state,reason,score,max,raw_grade,final_grade,mean_score,mean_state,mean_reason,parity_score,parity_state,parity_reason,assignment,revision,evidence
+0012301,张三,,graded,,7,7,100,100,6,graded,,1,graded,,lab3 统计,2,36a938ed4d85
+0012302,李四,,graded,,6.3333,7,90.48,90.48,6,graded,,0.3333,graded,,lab3 统计,2,36a938ed4d85
+0012303,王五,,graded,,0,7,0,0,0,graded,,0,graded,,lab3 统计,2,36a938ed4d85
+0012304,赵六,,graded,not_submitted,0,7,0,0,0,graded,not_submitted,0,graded,not_submitted,lab3 统计,2,36a938ed4d85
+0012305,钱七,,graded,,1,7,14.29,14.29,0,graded,,1,graded,,lab3 统计,2,36a938ed4d85
+local:0012399,,,withheld,pending_review,,7,,,,,,,,,lab3 统计,2,36a938ed4d85
