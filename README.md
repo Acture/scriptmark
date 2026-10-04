@@ -17,7 +17,7 @@ src/
   python/
     scriptmark/       Python package entry point
 examples/             Runnable teacher test bundles
-notes/                Project documentation submodule
+notes/                Private project documentation submodule
 ```
 
 Run Cargo and Maturin commands from the repository root. `Cargo.toml` and
@@ -26,13 +26,14 @@ with `src/python/scriptmark/`.
 
 ## Documentation and checkout
 
-Project documentation lives in
+Public documentation belongs in `docs/`. Private project documentation lives in
 [Acture/obsidian-vault, branch `project/scriptmark`](https://github.com/Acture/obsidian-vault/tree/project/scriptmark),
 mounted here as the `notes/` submodule. Start with
 [the project index](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/README.md)
 or open `notes/README.md` locally. The teacher guide is
 `notes/docs/test-bundles.md`; design records are under
 `notes/docs/plans/`. Access to the notes repository is required to initialize it.
+Building and using ScriptMark does not require access to private notes.
 
 Daily work uses the latest `project/scriptmark` notes through Git's native submodule
 commands. In a new clone, initialize the notes and attach their project branch:

@@ -7,11 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `CLAUDE.md` is the canonical project instruction file; `AGENTS.md` and
 `.github/copilot-instructions.md` are symlinks to it.
 
-- Documentation is in the `notes/` git submodule:
+- Public documentation belongs in `docs/`. Private documentation is in the `notes/` git submodule:
   `https://github.com/Acture/obsidian-vault.git`, branch `project/scriptmark`.
   Start at `notes/README.md`; the teacher contract is
   `notes/docs/test-bundles.md`, and plans are in
-  `notes/docs/plans/`. Do not recreate a maintained root `docs/` tree.
+  `notes/docs/plans/`. Do not copy private notes into the public documentation tree.
+  The project branch root contains only this project's notes; the vault's `master`
+  places them under `scriptmark/`. Keep shared automation and vault configuration on master.
 - Default to the latest remote `project/scriptmark` notes. At the start of every
   session, after pulling code, and before reading or editing notes, follow the native
   Git update sequence in README's "Documentation and checkout" section. It explicitly
@@ -25,7 +27,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   that the latest notes were not verified; do not describe stale notes as current.
   Shared synchronization and submission tooling belongs to the notes repository;
   do not add a project-local notes updater.
-- Edit only `notes/`. A newer notes checkout can make the parent's gitlink
+- Edit private documentation only in `notes/`. A newer notes checkout can make the parent's gitlink
   dirty; review `git diff --submodule=log -- notes` and include the updated reference in
   the next code commit. Do not reset notes just to remove that expected difference.
 - The gitlink remains a concrete saved checkpoint because Git requires one. Use
@@ -34,6 +36,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Stage specific documents in `notes/` and commit there. Publish with the master-owned
   `hooks/notes-boundary/submit_project.py --repo notes` under the notes repository's
   common Git directory; it runs the required remote check before pushing that SHA.
+  The remote requires `notes-boundary/root/scriptmark` from GitHub Actions.
   Install/update this helper from the notes repository's trusted `origin/master` as
   shown in README. Direct pushes of unchecked commits are rejected. Only after a
   successful submission, stage `notes` here and commit/push its new gitlink.
