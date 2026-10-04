@@ -2,27 +2,24 @@
 
 [![CI](https://img.shields.io/github/actions/workflow/status/Acture/scriptmark/ci.yml?label=CI)](https://github.com/Acture/scriptmark/actions)
 [![Crates.io](https://img.shields.io/crates/v/scriptmark)](https://crates.io/crates/scriptmark)
-[![PyPI](https://img.shields.io/pypi/v/scriptmark)](https://pypi.org/project/scriptmark/)
 [![License](https://img.shields.io/crates/l/scriptmark)](https://spdx.org/licenses/GPL-3.0-or-later.html)
 
-Automated grading CLI for student programming assignments. Rust core, TOML test specifications, Python bindings via PyO3.
+Automated grading CLI for student programming assignments. Rust core and CLI with TOML test specifications.
 
 ## Repository layout
 
 ```text
 src/
-  crates/
-    scriptmark/       Rust library, CLI and integration tests
-    scriptmark-py/    Rust bindings for the Python extension
-  python/
-    scriptmark/       Python package entry point
+  core/               scriptmark-core: grading engine and input/record models
+  cli/                scriptmark: CLI, Canvas, SQLite, TUI and presentation
 examples/             Runnable teacher test bundles
 notes/                Private project documentation submodule
 ```
 
-Run Cargo and Maturin commands from the repository root. `Cargo.toml` and
-`pyproject.toml` configure both builds; the compiled Python extension is packaged
-with `src/python/scriptmark/`.
+Run Cargo commands from the repository root. The CLI depends on `scriptmark-core`;
+the core has no CLI, network, database or terminal UI dependencies. Python 3 is still
+required to execute student submissions, teacher checkers and reference solutions.
+ScriptMark is distributed as a Rust CLI; it does not expose a Python package/API.
 
 ## Documentation and checkout
 
@@ -120,8 +117,7 @@ repository; ScriptMark does not carry its own synchronization script.
 ## Installation
 
 ```bash
-cargo install scriptmark     # Rust
-pip install scriptmark        # Python
+cargo install scriptmark
 ```
 
 ## Quick Start
@@ -201,44 +197,6 @@ scriptmark roster-pull --course-id 12345
 
 # Browse results interactively
 scriptmark tui grades.db
-```
-
-## Python API
-
-```python
-import scriptmark
-
-# One-shot grading, under the assignment.toml beside tests/ (or pass assignment=...).
-# freeze= keeps the generated inputs; replay= grades on ones kept earlier; output= writes
-# the grading record.
-results = scriptmark.grade(
-    ["submissions/"], "tests/", freeze="output/cases.json", output="output/results.json"
-)
-for r in results:
-    if r.grade is None:
-        print(f"{r.student_id}: withheld ({r.reason})")
-    else:
-        print(f"{r.student_id}: {r.grade} ({r.score}/{r.max} points)")
-
-# After editing the policy, score the record again without running anything
-# (records graded from a Canvas bundle are rescored with the CLI)
-change = scriptmark.rescore("output/results.json")  # {"revision": 2, "changes": [...]}
-first = scriptmark.load_record("output/results.json", revision=1)
-
-# Discover student files (convenience view — drops non-submitters and orphan files)
-# Keys are rendered student keys: a bare 学号 once a roster confirms it, otherwise
-# `local:<token>` — the prefix means nothing has vouched for that filename token yet.
-subs = scriptmark.discover(["submissions/"])  # {'local:alice': ['path/to/alice_lab5.py'], ...}
-
-# The full input model: every student keeps an outcome, nothing is dropped
-inp = scriptmark.load_input(["submissions/"], roster="roster.csv")
-for s in inp["students"]:
-    print(s["identity"]["key"], s["state"])   # not_submitted | submitted_empty | executable
-print(inp["unmatched"], inp["diagnostics"])
-
-# Load and inspect a spec
-spec = scriptmark.load_spec("tests/test_lab5.toml")
-print(spec.name, spec.function, spec.num_cases)
 ```
 
 ## TOML Test Specs

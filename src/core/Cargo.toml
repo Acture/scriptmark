@@ -1,0 +1,42 @@
+[package]
+name = "scriptmark-core"
+description = "Grading engine and evidence model for ScriptMark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
+
+[features]
+test-support = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+csv = { workspace = true }
+tokio = { workspace = true }
+rhai = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+zip = { workspace = true }
+rust_xlsxwriter = { workspace = true }
+libc = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+tar = "0.4.46"
+flate2 = "1.1.10"
+sevenz-rust2 = "0.23.0"
+rars = "0.9.4"
+bzip2-rs = "0.1.2"
+lzma-rs = "0.3.0"
+tempfile = "3"
+sha2 = "0.10"
+
+[dev-dependencies]
+calamine = { workspace = true }
