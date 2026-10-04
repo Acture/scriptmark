@@ -182,11 +182,15 @@ tests_submission/
 
 # P-669 test fixtures — the broad rules above (*.csv, submissions, templates, config.toml)
 # must not swallow committed test data.
-!src/crates/scriptmark/tests/fixtures/**
+!src/core/tests/fixtures/**
+!src/cli/tests/fixtures/**
 # ...but not what running the suite over them produces.
-src/crates/scriptmark/tests/fixtures/**/__pycache__/
-src/crates/scriptmark/tests/fixtures/**/.scriptmark_extracted/
-src/crates/scriptmark/tests/fixtures/**/.DS_Store
+src/core/tests/fixtures/**/__pycache__/
+src/cli/tests/fixtures/**/__pycache__/
+src/core/tests/fixtures/**/.scriptmark_extracted/
+src/cli/tests/fixtures/**/.scriptmark_extracted/
+src/core/tests/fixtures/**/.DS_Store
+src/cli/tests/fixtures/**/.DS_Store
 
 # P-674 example bundles ship their students; `submissions` above would drop them.
 !examples/bundles/*/submissions/

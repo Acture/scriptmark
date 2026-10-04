@@ -55,41 +55,40 @@ Automated grading CLI for student programming assignments. Rust core with custom
 ```bash
 cargo check                              # Fast type check
 cargo build -p scriptmark                # Build CLI binary
-cargo test -p scriptmark                 # Core and integration tests; requires Python
-cargo test --workspace                   # Includes the PyO3 binding crate
-cargo clippy --all-targets               # Lint — must be 0 warnings
+cargo test -p scriptmark-core            # Core tests; requires Python
+cargo test -p scriptmark                 # CLI and adapter integration tests
+cargo test --workspace                   # Both crates
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt                                # Format all code
 cargo fmt --check                        # Verify formatting
-maturin develop                          # Build + install PyO3 Python bindings locally
 ```
 
-Single test: `cargo test -p scriptmark test_name -- --nocapture`.
-For the PyO3 crate, select a supported interpreter via `PYO3_PYTHON` when the machine's
-default Python is newer than the PyO3 version supports; see the P-676 validation record.
+Single test: `cargo test -p scriptmark-core test_name -- --nocapture` (or `-p scriptmark`
+for CLI tests). Python 3 is required by the subprocess executor, not by a Python SDK.
 
 ## Architecture
 
-Single `scriptmark` crate (lib + bin) with `scriptmark-py` as separate cdylib for PyO3.
+Two Rust crates live directly under `src/`: `src/core/` contains `scriptmark-core`,
+and `src/cli/` contains the `scriptmark` CLI and its adapters. The CLI depends on the
+core; core must not depend on CLI, HTTP, SQLite or terminal UI libraries.
 
-All product source is under `src/`: Rust packages live in `src/crates/` and the
-Python package entry point in `src/python/scriptmark/`. Workspace/build configuration
-stays at the repository root, where Cargo and Maturin commands are run. The module
-paths below are relative to `src/crates/scriptmark/src/`.
+Cargo workspace/build configuration stays at the repository root. There is no Python
+package, PyO3 binding or Python wheel release. Embedded Python executor/checker code
+and runnable Python assignment examples remain part of the Rust product.
 
 Data flows: TOML specs + student files → Runner → grading record (evidence + score
 revisions) → Display/DB/HTML/Canvas. `rescore` adds a revision from saved evidence.
 
 ```
-models/         Data models, TOML spec parsing, grading policies
-discovery       Student file discovery + ZIP extraction
-runner/         PythonExecutor (subprocess), orchestrator, sandbox (setrlimit),
+core/src/models/     Data models, TOML spec parsing, grading policies
+core/src/discovery   Student file discovery + archive extraction
+core/src/runner/     PythonExecutor (subprocess), orchestrator, sandbox (setrlimit),
                 parametrize, expander, oracle, linter
-checker/        Checker trait (8 impls) + Rhai + Python checkers
-record          Grading record: versioned evidence, score revisions, rescore reuse checks
-db/             SQLite (rusqlite bundled): students, sessions (= revisions), results, similarity
-canvas/         Canvas LMS API client (reqwest + rustls): roster pull, grades push
-tui/            ratatui terminal UI: students/sessions/similarity tabs
-scriptmark-py   PyO3 bindings: grade, run, discover, load_spec (maturin, separate crate)
+core/src/checker/    Checker trait + Rhai + Python checkers
+core/src/record      Versioned evidence, score revisions, rescore reuse checks
+cli/src/db/          SQLite: students, sessions (= revisions), results, similarity
+cli/src/canvas/      Canvas HTTP client and offline bundle adapter
+cli/src/tui/         ratatui terminal UI: students/sessions/similarity tabs
 ```
 
 ## Key Design Decisions
@@ -110,23 +109,24 @@ Zero and withheld grades stay distinct. See the notes' teacher contract for poli
 
 ## Critical Files
 
-- `src/crates/scriptmark/src/runner/python.rs` — PythonExecutor + embedded helper scripts (HELPER_SCRIPT, CHAIN_HELPER_SCRIPT). Contains import allowlist, env sanitization, `sandboxed_cmd()`, `spawn_with_timeout()`.
-- `src/crates/scriptmark/src/runner/sandbox.rs` — SandboxConfig + setrlimit application. Platform-conditional: RLIMIT_AS skipped on macOS, RLIMIT_* constants differ between Linux (c_uint) and macOS (c_int).
-- `src/crates/scriptmark/src/runner/orchestrator.rs` — Runs vars→setup→expand→oracle→execute pipeline per student, tokio parallel.
-- `src/crates/scriptmark/src/models/spec.rs` — All TOML spec structs (TestSpec, TestCase, SetupStep, Parametrize, Oracle, LintConfig, CheckMethod).
-- `src/crates/scriptmark/src/discovery.rs` — File discovery + ZIP archive extraction with size/count limits.
-- `src/crates/scriptmark/src/record.rs` — The grading record every consumer reads (`--output`): evidence with submission/spec fingerprints, append-only score revisions, `check()` refusing evidence whose tests, submissions or matching changed.
-- `src/crates/scriptmark/src/grading.rs` — GradingPolicy dispatch (templates + Rhai formulas).
-- `src/crates/scriptmark/src/main.rs` — All CLI command handlers.
-- `src/crates/scriptmark-py/src/lib.rs` — PyO3 bindings: grade(), run(), discover(), load_spec(), StudentResult, TestSpec classes.
+- `src/core/src/runner/python.rs` — PythonExecutor and embedded harness. Starts the isolated Python subprocess and checks its output.
+- `src/core/src/runner/sandbox.rs` — SandboxConfig + setrlimit application. Platform-conditional: RLIMIT_AS skipped on macOS, RLIMIT_* constants differ between Linux (c_uint) and macOS (c_int).
+- `src/core/src/runner/orchestrator.rs` — Runs prepared bundles per student, tokio parallel.
+- `src/core/src/models/spec.rs` — TOML test specification types.
+- `src/core/src/discovery.rs` — File discovery and archive extraction with size/count limits.
+- `src/core/src/record.rs` — Versioned grading evidence and score revisions, including reuse checks.
+- `src/core/src/grading.rs` — GradingPolicy dispatch (templates + Rhai formulas).
+- `src/cli/src/main.rs` — CLI command handlers and application orchestration.
 
 ## Conventions
 
 - Workspace dependencies in root `Cargo.toml`, crates reference with `{ workspace = true }`
 - `thiserror` for library error types, `anyhow` for CLI/binary error handling
-- All checkers implement `Checker` trait in `src/crates/scriptmark/src/checker/mod.rs`
+- All checkers implement `Checker` trait in `src/core/src/checker/mod.rs`
 - Integration tests spawn real Python processes — need `python3` available
-- `scriptmark-py` has `publish = false` (cdylib, distributed via PyPI/maturin, not crates.io)
+- `scriptmark-core` exposes grading models and operations; CLI adapters import it directly, without compatibility re-exports.
+- Core's `test-support` feature exposes shared graded/withheld report fixtures for adapter tests; it is enabled only by the CLI's dev-dependency.
+- Publish both Rust packages with `cargo publish --workspace`, which orders workspace dependencies before their consumers.
 - Platform-specific code uses `#[cfg(target_os = "macos")]` / `#[cfg(target_os = "linux")]` for rlimit types
 
 ## TOML Spec Example

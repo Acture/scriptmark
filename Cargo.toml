@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
 members = [
-	"src/crates/scriptmark",
-	"src/crates/scriptmark-py",
+	"src/core",
+	"src/cli",
 ]
 
 [workspace.package]
@@ -17,12 +17,12 @@ categories = ["command-line-utilities"]
 readme = "README.md"
 
 [workspace.dependencies]
+scriptmark-core = { path = "src/core", version = "0.3.0" }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 toml = "0.8"
 csv = "1"
-quick-xml = { version = "0.37", features = ["serialize"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
@@ -53,9 +53,6 @@ libc = "0.2"
 # Random
 rand = "0.9"
 rand_chacha = "0.9"
-
-# Python bindings
-pyo3 = { version = "0.24", features = ["extension-module"] }
 
 ratatui = "0.29"
 crossterm = "0.29"
