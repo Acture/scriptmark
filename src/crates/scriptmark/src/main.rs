@@ -253,7 +253,9 @@ struct ExportArgs {
 	/// Path to the grading record
 	results: PathBuf,
 
-	/// Where to write the grades
+	/// Where to write the grades: a `.csv` of the grades alone, or a `.xlsx` with the
+	/// items, the cases behind the grades and the record they came from on sheets of
+	/// their own
 	#[arg(short, long, default_value = "grades.csv")]
 	output: PathBuf,
 
@@ -614,14 +616,6 @@ fn shown(path: &Path, view: &View) -> String {
 	}
 }
 
-/// A fault or cause as the snake_case word the JSON results use; empty when absent.
-fn label<T: serde::Serialize>(value: Option<T>) -> String {
-	value
-		.and_then(|v| serde_json::to_value(v).ok())
-		.and_then(|v| v.as_str().map(str::to_string))
-		.unwrap_or_default()
-}
-
 /// Prepare every test bundle, then run them against every student. A bundle that cannot
 /// be prepared stops the run before any student is graded, and so do fresh inputs that
 /// would replace other inputs frozen beside `output`.
@@ -927,79 +921,11 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 			frozen.write(&cases_path)?;
 			println!("Inputs written to {}", cases_path.display());
 		}
-		scriptmark::export::write_grades_csv(reports, items, std::fs::File::create(&grades_path)?)?;
+		let grades = scriptmark::export::grades(&record, revision)?;
+		scriptmark::export::write_csv(&grades, std::fs::File::create(&grades_path)?)?;
 		println!("Grades written to {}", grades_path.display());
-
-		let mut wtr = csv::Writer::from_path(&archive_path)?;
-		wtr.write_record([
-			"student_name",
-			"student_id",
-			"submission_state",
-			"item_id",
-			"case_name",
-			"status",
-			"actual",
-			"expected",
-			"message",
-			"elapsed_ms",
-			"fault",
-			"cause",
-		])?;
-		for report in reports {
-			let state = label(Some(report.submission_state));
-			let mut rows = 0usize;
-			for test_result in &report.test_results {
-				for case in &test_result.cases {
-					rows += 1;
-					wtr.write_record([
-						report.student_name.as_deref().unwrap_or(""),
-						&report.student_id,
-						&state,
-						&test_result.item_id,
-						&case.case_name,
-						&format!("{:?}", case.status),
-						case.actual.as_deref().unwrap_or(""),
-						case.expected.as_deref().unwrap_or(""),
-						case.failure
-							.as_ref()
-							.map(|f| f.message.as_str())
-							.unwrap_or(""),
-						&case.elapsed_ms.map(|ms| ms.to_string()).unwrap_or_default(),
-						&label(case.fault),
-						&label(case.cause),
-					])?;
-				}
-			}
-			// Every student gets at least one row, so the CSV covers the same cohort
-			// as the JSON archive rather than quietly dropping non-submitters. Its
-			// message says why there is no grade.
-			if rows == 0 {
-				let why = report
-					.error
-					.clone()
-					.unwrap_or_else(|| label(report.grade.as_ref().and_then(|g| g.reason())));
-				wtr.write_record([
-					report.student_name.as_deref().unwrap_or(""),
-					&report.student_id,
-					&state,
-					"",
-					"",
-					if report.error.is_some() {
-						"Error".to_string()
-					} else {
-						format!("{:?}", report.status())
-					}
-					.as_str(),
-					"",
-					"",
-					&why,
-					"",
-					"",
-					"",
-				])?;
-			}
-		}
-		wtr.flush()?;
+		let cases = scriptmark::export::cases(reports);
+		scriptmark::export::write_csv(&cases, std::fs::File::create(&archive_path)?)?;
 		println!("Archived to {}", archive_path.display());
 	}
 
@@ -1210,17 +1136,15 @@ fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 }
 
 fn cmd_export(args: ExportArgs) -> Result<()> {
-	let (_, view) = load_view(&args.results, args.revision.revision)?;
+	let format = scriptmark::export::Format::of(&args.output)?;
+	let (record, view) = load_view(&args.results, args.revision.revision)?;
 	let revision = scored(&view, &args.results)?;
+	let sheet = scriptmark::export::sheet(&record, revision, format)?;
 	if let Some(parent) = args.output.parent().filter(|p| !p.as_os_str().is_empty()) {
 		std::fs::create_dir_all(parent)?;
 	}
-	scriptmark::export::write_grades_csv(
-		&view.reports,
-		&view.items,
-		std::fs::File::create(&args.output)
-			.with_context(|| format!("failed to create {}", args.output.display()))?,
-	)?;
+	std::fs::write(&args.output, sheet)
+		.with_context(|| format!("failed to write {}", args.output.display()))?;
 	println!(
 		"Grades of revision {revision} written to {}",
 		args.output.display()

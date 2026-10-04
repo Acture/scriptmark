@@ -170,6 +170,37 @@ pub fn round_half_away(x: f64, decimals: u8) -> f64 {
 	(x * factor).round() / factor
 }
 
+/// Why a student's evidence is never scored: who they are, and whether anything arrived,
+/// decide before any evidence does.
+pub fn gate(report: &StudentReport) -> Option<Reason> {
+	if report.excused {
+		Some(Reason::Excused)
+	} else if report.error.is_some() {
+		Some(Reason::GradingTaskFailed)
+	} else {
+		match report.submission_state {
+			SubmissionOutcome::ReceivedUnmatched => Some(Reason::PendingReview),
+			SubmissionOutcome::NotSubmitted => Some(Reason::NotSubmitted),
+			SubmissionOutcome::SubmittedEmpty => Some(Reason::SubmittedEmpty),
+			SubmissionOutcome::Executable => None,
+		}
+	}
+}
+
+/// What lint earns of the `points` it is worth: `None` when the tool did not run properly,
+/// which withholds the grade.
+pub fn lint_earned(points: u32, lint: Option<&LintOutcome>) -> Option<f64> {
+	match lint {
+		Some(LintOutcome::Scored { score }) if score.is_finite() => {
+			Some(f64::from(points) * score.clamp(0.0, 100.0) / 100.0)
+		}
+		// The linted item's file is missing, and `missing_file` already decided that item:
+		// withheld, or a 0 — which is what lint earns too.
+		Some(LintOutcome::NoFile) => Some(0.0),
+		Some(LintOutcome::Scored { .. } | LintOutcome::Failed { .. }) | None => None,
+	}
+}
+
 /// Score every report against `items`, replacing any earlier grade.
 ///
 /// Each report is scored on its own evidence alone. Errs only when the evidence breaks
@@ -209,20 +240,7 @@ fn grade_one(
 		detail: None,
 	};
 
-	// Who the student is, and whether anything arrived, decide before any evidence does.
-	let gate = if report.excused {
-		Some(Reason::Excused)
-	} else if report.error.is_some() {
-		Some(Reason::GradingTaskFailed)
-	} else {
-		match report.submission_state {
-			SubmissionOutcome::ReceivedUnmatched => Some(Reason::PendingReview),
-			SubmissionOutcome::NotSubmitted => Some(Reason::NotSubmitted),
-			SubmissionOutcome::SubmittedEmpty => Some(Reason::SubmittedEmpty),
-			SubmissionOutcome::Executable => None,
-		}
-	};
-	if let Some(reason) = gate {
+	if let Some(reason) = gate(report) {
 		let policy_zero = matches!(reason, Reason::NotSubmitted | Reason::SubmittedEmpty)
 			&& policy.config.missing == MissingPolicy::Zero;
 		if !policy_zero {
@@ -275,16 +293,9 @@ fn grade_one(
 		.sum();
 	let mut lint_withheld = None;
 	if let Some(points) = policy.config.lint_points {
-		match &report.lint {
-			Some(LintOutcome::Scored { score: lint }) if lint.is_finite() => {
-				score += f64::from(points) * lint.clamp(0.0, 100.0) / 100.0;
-			}
-			// The linted item's file is missing, and `missing_file` already decided that
-			// item: withheld, or a 0 — which is what lint earns too.
-			Some(LintOutcome::NoFile) => {}
-			Some(LintOutcome::Scored { .. } | LintOutcome::Failed { .. }) | None => {
-				lint_withheld = Some(Reason::LintFailed);
-			}
+		match lint_earned(points, report.lint.as_ref()) {
+			Some(earned) => score += earned,
+			None => lint_withheld = Some(Reason::LintFailed),
 		}
 	}
 

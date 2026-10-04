@@ -1,0 +1,28 @@
+# A class graded once and exported as a grade sheet, then rescored and exported again:
+#
+#   scriptmark grade submissions -t tests -r roster.csv -o out/results.json
+#   scriptmark export out/results.json -o out/grades.csv
+#   scriptmark export out/results.json -o out/grades.xlsx
+#   scriptmark rescore out/results.json --assignment regrade.toml
+#   scriptmark export out/results.json --revision 2 -o out/grades.xlsx
+#
+# One row per student, in 学号 order. 0012301 is right; 0012302 earns a third of `parity`;
+# 0012303 hands in wrong answers, a real 0; 0012304 hands in nothing, withheld; 0012305's
+# `mean` raises; and 0012399 is on no roster, withheld until someone reviews it. Under
+# regrade.toml, a missing submission is a 0, which the sheet marks `not_submitted`.
+# expected/ holds both CSVs as this build writes them; the evidence column is the only
+# part that differs on another machine.
+[assignment]
+name = "lab3 统计"
+
+[[items]]
+id = "mean"
+title = "平均值"
+points = 6
+aggregation = "proportional"
+
+[[items]]
+id = "parity"
+title = "奇偶判断"
+points = 1
+aggregation = "proportional"

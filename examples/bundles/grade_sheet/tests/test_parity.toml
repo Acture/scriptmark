@@ -1,0 +1,22 @@
+# 奇偶判断: three cases on one point, so passing one is a third of a point.
+
+[meta]
+name = "parity"
+file = "lab.py"
+function = "is_even"
+language = "python"
+
+[[cases]]
+name = "二"
+args = [2]
+expect = true
+
+[[cases]]
+name = "三"
+args = [3]
+expect = false
+
+[[cases]]
+name = "零"
+args = [0]
+expect = true
