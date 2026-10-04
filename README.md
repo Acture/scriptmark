@@ -18,7 +18,6 @@ src/
     scriptmark/       Python package entry point
 examples/             Runnable teacher test bundles
 notes/                Project documentation submodule
-scripts/              Repository maintenance commands
 ```
 
 Run Cargo and Maturin commands from the repository root. `Cargo.toml` and
@@ -35,26 +34,34 @@ or open `notes/README.md` locally. The teacher guide is
 `notes/docs/test-bundles.md`; design records are under
 `notes/docs/plans/`. Access to the notes repository is required to initialize it.
 
-Daily work uses the latest `project/scriptmark` notes. Clone, then initialize/update
-the notes and attach their project branch:
+Daily work uses the latest `project/scriptmark` notes through Git's native submodule
+commands. In a new clone, initialize the notes and attach their project branch:
 
 ```fish
 git clone https://github.com/Acture/scriptmark.git
-cd scriptmark
-fish scripts/update-notes.fish
+and cd scriptmark
+and git submodule update --init --remote --no-single-branch -- notes
+and git -C notes switch project/scriptmark
 ```
 
 At the start of each work session, after pulling code changes, and before reading or
-editing notes, use the same command:
+editing an existing notes checkout, update it from the project branch:
 
 ```fish
-fish scripts/update-notes.fish
+git -C notes -c fetch.prune=false -c fetch.pruneTags=false fetch --no-tags origin refs/heads/project/scriptmark:refs/remotes/origin/project/scriptmark
+and test (git -C notes status --porcelain | count) -eq 0
+and git -C notes merge-base --is-ancestor HEAD origin/project/scriptmark
+and git -C notes switch project/scriptmark
+and git -C notes merge-base --is-ancestor HEAD origin/project/scriptmark
+and git -C notes merge --ff-only origin/project/scriptmark
 ```
 
-The helper fetches the configured project branch, fast-forwards it and leaves it
-checked out for editing. It also works after a single-branch clone. Local edits,
-unpushed commits and divergence stop the update so they can be preserved and resolved.
-If fetching fails, the checkout has not been confirmed current.
+The explicit fetch also works with a single-branch notes clone. The checks before
+and after switching preserve unpublished work both at the current HEAD and on an
+existing local project branch. A failed command stops the sequence: inspect
+`git -C notes status` and `git -C notes log --oneline origin/project/scriptmark..HEAD`,
+then preserve and reconcile local edits, unpushed commits or divergence. Do not skip
+the checks or reset the notes. If fetching fails, the checkout is not confirmed current.
 
 Git still records a concrete submodule commit in each code commit. That is a saved
 checkpoint, not the daily reading policy; newer notes normally make `git status` show
@@ -77,10 +84,10 @@ and git -C notes show origin/master:.github/scripts/install_push_hook.py > "$not
 and python3 "$notes_common_gitdir/install_push_hook.py" --repo notes --source-ref origin/master
 ```
 
-To edit documentation, update first, then publish the notes before the parent reference:
+To edit documentation, complete the update sequence above first, then publish the
+notes before the parent reference:
 
 ```fish
-fish scripts/update-notes.fish
 # Edit project documents directly in notes/; stage the specific files changed.
 git -C notes diff
 git -C notes add README.md
@@ -105,7 +112,9 @@ documentation edits belong on the notes branch.
 Only when explicitly reproducing an older code revision, restore its recorded notes
 with `git submodule update --init --checkout -- notes` from a clean notes checkout.
 Ordinary `git clone --recurse-submodules` uses that recorded checkpoint too; run the
-helper afterwards for current notes. Git has no floating gitlink that advances by itself.
+update sequence above afterwards for current notes. Git has no floating gitlink that
+advances by itself. Shared notes tooling and its maintenance belong to the notes
+repository; ScriptMark does not carry its own synchronization script.
 
 ## Installation
 

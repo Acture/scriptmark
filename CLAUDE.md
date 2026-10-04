@@ -13,14 +13,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   `notes/docs/test-bundles.md`, and plans are in
   `notes/docs/plans/`. Do not recreate a maintained root `docs/` tree.
 - Default to the latest remote `project/scriptmark` notes. At the start of every
-  session, after pulling code, and before reading or editing notes, run
-  `fish scripts/update-notes.fish` from this repository. This initializes missing
-  notes, fetches the configured project branch, fast-forwards it and leaves that branch
-  checked out. It handles single-branch clones. Never assume the gitlink is the latest.
+  session, after pulling code, and before reading or editing notes, follow the native
+  Git update sequence in README's "Documentation and checkout" section. It explicitly
+  fetches the project branch, checks for local work, switches to `project/scriptmark`
+  and fast-forwards it. It handles single-branch clones. Never assume the gitlink is latest.
 - Clone with `git clone https://github.com/Acture/scriptmark.git`, enter the clone,
-  then run the same helper. It stops on local notes edits, unpushed commits or divergence;
-  preserve and reconcile them instead of resetting or force-pushing. If fetching fails,
-  report that the latest notes were not verified; do not silently describe stale notes as current.
+  then initialize with `git submodule update --init --remote --no-single-branch -- notes`
+  and `git -C notes switch project/scriptmark`. For existing notes, use the guarded
+  update sequence instead. Stop on local edits, unpushed commits or divergence; preserve
+  and reconcile them instead of resetting or force-pushing. If fetching fails, report
+  that the latest notes were not verified; do not describe stale notes as current.
+  Shared synchronization and submission tooling belongs to the notes repository;
+  do not add a project-local notes updater.
 - Edit only `notes/`. A newer notes checkout can make the parent's gitlink
   dirty; review `git diff --submodule=log -- notes` and include the updated reference in
   the next code commit. Do not reset notes just to remove that expected difference.
