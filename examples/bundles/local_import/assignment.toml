@@ -1,0 +1,18 @@
+[assignment]
+name = "Local import example"
+
+[input]
+submissions = ["submissions"]
+
+[input.roster]
+path = "roster.csv"
+header_row = 2
+
+[input.roster.columns]
+student_id = "学号"
+name = "姓名"
+
+[[items]]
+id = "double"
+points = 10
+aggregation = "proportional"

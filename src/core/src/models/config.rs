@@ -136,6 +136,8 @@ pub enum AttemptPolicy {
 pub struct AssignmentConfig {
 	pub assignment: AssignmentInfo,
 	#[serde(default)]
+	pub input: crate::input::local::Config,
+	#[serde(default)]
 	pub matching: crate::matching::Config,
 	/// Expected student files.
 	#[serde(default)]

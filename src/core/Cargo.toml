@@ -26,6 +26,7 @@ anyhow = { workspace = true }
 regex = { workspace = true }
 zip = { workspace = true }
 rust_xlsxwriter = { workspace = true }
+calamine = { workspace = true }
 libc = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
@@ -37,6 +38,3 @@ bzip2-rs = "0.1.2"
 lzma-rs = "0.3.0"
 tempfile = "3"
 sha2 = "0.10"
-
-[dev-dependencies]
-calamine = { workspace = true }

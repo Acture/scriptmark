@@ -206,148 +206,20 @@ fn merge_by_key(entries: Vec<RosterEntry>) -> (Vec<RosterEntry>, Vec<InputDiagno
 		if conflicted.contains(&key) {
 			continue;
 		}
-		diagnostics.push(InputDiagnostic::warning(
-			DiagnosticKind::DuplicateRosterEntry {
-				key: key.to_string(),
-				count,
-			},
-		));
+		let mut diagnostic = InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry {
+			key: key.to_string(),
+			count,
+		});
+		diagnostic.location = merged[first_seen[&key]].location.clone();
+		diagnostics.push(diagnostic);
 	}
 
 	(merged, diagnostics)
 }
 
-/// Load a roster CSV.
-///
-/// Expected format: `name,_,student_id` (header row skipped), or `name,student_id`.
-/// Handles a UTF-8 BOM. Column *mapping* — choosing which column is which — is P-672;
-/// this stays positional on purpose.
-///
-/// A row that parses but carries no usable student number is reported rather than skipped:
-/// dropping it silently would take that student out of the roster of record, and with them
-/// the `NotSubmitted` entry the model exists to preserve.
-pub fn load_roster(path: &Path) -> Result<Roster, RosterError> {
-	let content =
-		std::fs::read_to_string(path).map_err(|e| RosterError::IoError(path.to_path_buf(), e))?;
-
-	// Strip UTF-8 BOM if present
-	let content = content.strip_prefix('\u{feff}').unwrap_or(&content);
-
-	let mut reader = csv::ReaderBuilder::new()
-		.has_headers(true)
-		.flexible(true)
-		.from_reader(content.as_bytes());
-
-	// The width the file declares. A row that does not match it has shifted — usually an
-	// unescaped separator in a name — and its columns no longer mean what their position
-	// says, so it must not be read positionally.
-	let header_len = match reader.headers() {
-		Ok(header) => header.len(),
-		Err(e) => return Err(RosterError::CsvError(path.to_path_buf(), e)),
-	};
-
-	let mut entries = Vec::new();
-	let mut diagnostics = Vec::new();
-
-	for (row, result) in reader.records().enumerate() {
-		let record = result.map_err(|e| RosterError::CsvError(path.to_path_buf(), e))?;
-		// +2: one for the skipped header, one for 1-based line numbers.
-		let location = SourceLocation::row(path.to_path_buf(), row + 2);
-
-		// Format: name, _, student_id (or name, student_id)
-		let name = record.get(0).unwrap_or("").trim().to_string();
-		let student_number = if record.len() >= 3 {
-			record.get(2).unwrap_or("")
-		} else if record.len() >= 2 {
-			record.get(1).unwrap_or("")
-		} else {
-			diagnostics.push(
-				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
-					reason: format!("only {} column(s); need at least 2", record.len()),
-				})
-				.at(location),
-			);
-			continue;
-		};
-
-		let student_number = normalize_key(student_number);
-		if let Some(prefix) = crate::models::RESERVED_KEY_PREFIXES
-			.iter()
-			.find(|p| student_number.starts_with(**p))
-		{
-			diagnostics.push(
-				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
-					reason: format!(
-						"student id '{student_number}' starts with the reserved prefix '{prefix}'"
-					),
-				})
-				.at(location),
-			);
-			continue;
-		}
-
-		// Column 3 is the Canvas user id, which `roster-pull` now writes so that grade push
-		// never has to guess it. Read for every row, independently of the key decision
-		// below: a student with both a 学号 and a Canvas id needs both kept.
-		let canvas_user_id = record
-			.get(3)
-			.map(normalize_key)
-			.filter(|value| !value.is_empty())
-			.and_then(|value| value.parse::<u64>().ok());
-
-		if student_number.is_empty() {
-			// A Canvas enrollee with no SIS id is still a member. They are keyed by their
-			// Canvas id — but only from a row whose width matches the header, because a
-			// shifted row puts somebody's 学号 in this column, and keying on it would
-			// invent a Canvas user that does not exist.
-			if let Some(id) = canvas_user_id.filter(|_| record.len() == header_len) {
-				entries.push(RosterEntry {
-					key: StudentKey::CanvasUser(id),
-					source: RosterSource::Supplied,
-					name: (!name.is_empty()).then_some(name),
-					canvas_user_id: Some(id),
-					location: Some(location),
-				});
-				continue;
-			}
-
-			diagnostics.push(
-				InputDiagnostic::warning(DiagnosticKind::UnusableRosterRow {
-					reason: if name.is_empty() {
-						"blank row".to_string()
-					} else if record.len() != header_len {
-						format!(
-							"'{name}' has no student id, and the row has {} column(s) where the \
-							 header declares {header_len} — it has probably shifted",
-							record.len()
-						)
-					} else {
-						format!("'{name}' has no student id")
-					},
-				})
-				.at(location),
-			);
-			continue;
-		}
-
-		entries.push(RosterEntry {
-			key: StudentKey::Number(student_number),
-			source: RosterSource::Supplied,
-			name: (!name.is_empty()).then_some(name),
-			canvas_user_id,
-			location: Some(location),
-		});
-	}
-
-	Ok(Roster::with_diagnostics(entries, diagnostics))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum RosterError {
-	#[error("IO error reading {0}: {1}")]
-	IoError(std::path::PathBuf, std::io::Error),
-	#[error("CSV parse error in {0}: {1}")]
-	CsvError(std::path::PathBuf, csv::Error),
+/// Load a roster using the default table layout. Assignment inputs can configure columns.
+pub fn load_roster(path: &Path) -> anyhow::Result<Roster> {
+	crate::input::table::load(path, &crate::input::table::Options::default())
 }
 
 #[cfg(test)]

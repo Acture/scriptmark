@@ -201,6 +201,56 @@ scriptmark tui grades.db
 
 ## TOML Test Specs
 
+### Local input configuration
+
+`grade`, `run` and `match` can read submission paths and a CSV/XLSX roster from
+`assignment.toml`. Configured paths are relative to that file. See the
+[runnable local-import example](examples/bundles/local_import/README.md).
+
+```toml
+[input]
+submissions = ["submissions"]
+
+[input.roster]
+path = "roster.xlsx"
+sheet = "学生"
+header_row = 2
+
+[input.roster.columns]
+student_id = "学号"
+name = "姓名"
+# canvas_user_id = "Canvas ID"  # optional; distinct from the student number
+```
+
+Use `.csv` and omit `sheet` for CSV. Header rows and numeric column selectors start
+at 1; a column selector can also be an exact heading. Without a mapping, the default
+layout is `name,student_id` or `name,unused,student_id[,canvas_user_id]`. XLSX student
+IDs must be text cells; numeric cells are rejected because their original leading
+zeros cannot be established. Workbook files with several sheets need `sheet`.
+
+For an explicit class and file list, replace `[input]`/`[input.roster]` with:
+
+```toml
+[[input.students]]
+student_id = "00123"
+name = "张三"
+files = ["handins/answer.py"]  # individual files or archives; [] means no submission
+```
+
+An explicit list cannot be combined with a roster table or submission directory.
+It uses the same ownership and item matching component. Invalid identities/paths
+stop grading and remain visible in `match` diagnostics. An identical repeated roster
+row is reported and merged; conflicting rows are refused. CLI submission paths and
+`--roster` override configured paths in table mode. To use only configured sources:
+
+```fish
+scriptmark match -t tests/ --assignment assignment.toml
+scriptmark grade -t tests/ --assignment assignment.toml
+scriptmark export output/results.json -o grades.xlsx
+```
+
+### Test definitions
+
 Teachers can configure student ownership, item file patterns, function aliases and
 per-student overrides in `assignment.toml`. Preview decisions and candidates with
 `scriptmark match`; unresolved conflicts withhold grades. See

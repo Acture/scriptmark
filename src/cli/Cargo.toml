@@ -32,6 +32,7 @@ ratatui = { workspace = true }
 crossterm = { workspace = true }
 
 [dev-dependencies]
+rust_xlsxwriter = { workspace = true }
 scriptmark-core = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 zip = { workspace = true }

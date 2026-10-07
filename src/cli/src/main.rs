@@ -83,7 +83,7 @@ struct FrozenArgs {
 #[derive(Parser)]
 struct GradeArgs {
 	/// Directories containing student submissions
-	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	#[arg(conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
 
 	/// Grade from a Canvas bundle written by `scriptmark canvas fetch`.
@@ -100,7 +100,7 @@ struct GradeArgs {
 	#[arg(short, long, default_value = "output/results.json")]
 	output: PathBuf,
 
-	/// Path to roster CSV (name,_,student_id)
+	/// Roster CSV or XLSX; configure its layout in assignment.toml [input.roster]
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
 
@@ -142,7 +142,7 @@ struct GradeArgs {
 #[derive(Parser)]
 struct RunArgs {
 	/// Directories containing student submissions
-	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	#[arg(conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
 
 	/// Grade from a Canvas bundle written by `scriptmark canvas fetch`.
@@ -159,7 +159,7 @@ struct RunArgs {
 	#[arg(short, long, default_value = "output/results.json")]
 	output: PathBuf,
 
-	/// Path to roster CSV (name,_,student_id)
+	/// Roster CSV or XLSX; configure its layout in assignment.toml [input.roster]
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
 
@@ -191,7 +191,7 @@ struct RunArgs {
 
 #[derive(Parser)]
 struct MatchArgs {
-	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	#[arg(conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
 	#[arg(long)]
 	canvas: Option<PathBuf>,
@@ -454,23 +454,18 @@ enum DbAction {
 fn build_local_input(
 	submissions: &[PathBuf],
 	declared: &Declared,
-	roster_path: Option<&PathBuf>,
+	resolved: &scriptmark_core::input::local::Resolved,
 	purpose: Purpose,
 ) -> Result<AssignmentInput> {
 	let (assignment, attempt_policy) = (declared.assignment.clone(), declared.attempt_policy);
-
-	let roster = match roster_path {
-		Some(path) => Some(load_roster(path).context("Failed to load roster")?),
-		None => None,
-	};
 
 	let input = load_local_input(
 		submissions,
 		LocalInputOptions {
 			assignment,
-			roster: roster.as_ref(),
+			roster: resolved.roster.as_ref(),
 			attempt_policy,
-			matching: Some(&declared.matching),
+			matching: Some(&resolved.matching),
 		},
 	)
 	.context("Failed to discover submissions")?;
@@ -757,6 +752,11 @@ fn prepare_batch(
 
 	// Names, roster membership and submission state all come from the model, so there is
 	// no separate roster merge afterwards.
+	if canvas.is_some() && !declared.input.is_empty() {
+		anyhow::bail!(
+			"--canvas cannot be combined with assignment.toml [input]; use a separate local assignment configuration"
+		);
+	}
 	let (input, source) = match &canvas {
 		Some(bundle) => (
 			build_canvas_input(bundle, &declared, purpose)?,
@@ -764,13 +764,23 @@ fn prepare_batch(
 				bundle: bundle.clone(),
 			},
 		),
-		None => (
-			build_local_input(&submissions, &declared, roster.as_ref(), purpose)?,
-			record::Source::Local {
-				dirs: submissions,
-				roster,
-			},
-		),
+		None => {
+			let resolved = declared.input.resolve(
+				declared.path.as_deref(),
+				&submissions,
+				roster.as_deref(),
+				&declared.matching,
+			)?;
+			let input = build_local_input(&resolved.paths, &declared, &resolved, purpose)?;
+			declared.matching = resolved.matching;
+			(
+				input,
+				record::Source::Local {
+					dirs: submissions,
+					roster,
+				},
+			)
+		}
 	};
 	Ok(Batch {
 		input,
@@ -1520,14 +1530,28 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 		} => {
 			let (saved, view) = load_view(&record, revision.revision)?;
 			let revision = scored(&view, &record)?;
-			// The roster the record was graded with, when it had one, names its students.
-			let roster = match &saved.evidence.inputs.source {
-				record::Source::Local {
-					roster: Some(path), ..
-				} => Some(load_roster(path).context("Failed to load roster")?),
-				_ => None,
-			};
-			save_to_db(&db, &saved, revision, roster.as_ref())
+			// Use the identities frozen in the record, not a table that may have changed.
+			let roster = scriptmark_core::roster::Roster::from_entries(
+				saved
+					.evidence
+					.students
+					.iter()
+					.filter_map(|student| {
+						let key = StudentKey::parse(&student.student_id);
+						if matches!(key, StudentKey::Extracted(_)) {
+							return None;
+						}
+						Some(scriptmark_core::roster::RosterEntry {
+							key,
+							name: student.student_name.clone(),
+							canvas_user_id: student.canvas_user_id,
+							source: scriptmark_core::roster::RosterSource::Supplied,
+							location: None,
+						})
+					})
+					.collect(),
+			);
+			save_to_db(&db, &saved, revision, Some(&roster))
 		}
 		DbAction::ImportRoster { roster, db } => {
 			let database =

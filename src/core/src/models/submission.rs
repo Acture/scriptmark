@@ -536,6 +536,12 @@ pub enum DiagnosticSeverity {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum DiagnosticKind {
+	#[error("invalid submission path '{path}' for '{student}': {reason}")]
+	InvalidSubmissionPath {
+		path: PathBuf,
+		student: String,
+		reason: String,
+	},
 	#[error("ambiguous owner of '{path}': {decision:?}; add a matching.owners override")]
 	AmbiguousOwner {
 		path: PathBuf,
@@ -684,6 +690,18 @@ impl InputDiagnostic {
 
 impl fmt::Display for InputDiagnostic {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		if let Some(location) = &self.location {
+			if let Some(file) = &location.file {
+				write!(f, "{}", file.display())?;
+			}
+			if let Some(sheet) = &location.sheet {
+				write!(f, " [{sheet}]")?;
+			}
+			if let Some(row) = location.row {
+				write!(f, ":{row}")?;
+			}
+			write!(f, ": ")?;
+		}
 		write!(f, "{}", self.kind)
 	}
 }
