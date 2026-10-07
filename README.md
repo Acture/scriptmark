@@ -222,11 +222,14 @@ name = "姓名"
 # canvas_user_id = "Canvas ID"  # optional; distinct from the student number
 ```
 
-Use `.csv` and omit `sheet` for CSV. Header rows and numeric column selectors start
-at 1; a column selector can also be an exact heading. Without a mapping, the default
-layout is `name,student_id` or `name,unused,student_id[,canvas_user_id]`. XLSX student
-IDs must be text cells; numeric cells are rejected because their original leading
-zeros cannot be established. Workbook files with several sheets need `sheet`.
+`.xlsx` and `.xlsm` are read as workbooks; `.xls`/`.ods` must be saved as one of
+those first, and any other file is read as CSV (omit `sheet`). Header rows and numeric
+column selectors start at 1; a column selector can also be an exact heading. Without a
+mapping, the default layout is `name,student_id` or
+`name,unused,student_id[,canvas_user_id]`. XLSX student IDs must be text cells; numeric
+cells are rejected because their original leading zeros cannot be established. Workbook
+files with several sheets need `sheet`. Blank rows are skipped; a table with no usable
+student row below the header is refused rather than graded as an empty class.
 
 For an explicit class and file list, replace `[input]`/`[input.roster]` with:
 
@@ -240,13 +243,23 @@ files = ["handins/answer.py"]  # individual files or archives; [] means no submi
 An explicit list cannot be combined with a roster table or submission directory.
 It uses the same ownership and item matching component. Invalid identities/paths
 stop grading and remain visible in `match` diagnostics. An identical repeated roster
-row is reported and merged; conflicting rows are refused. CLI submission paths and
-`--roster` override configured paths in table mode. To use only configured sources:
+row is reported at each repeat and merged; conflicting rows are refused. CLI submission
+paths and `--roster` override configured paths in table mode. To use only configured
+sources:
 
 ```fish
 scriptmark match -t tests/ --assignment assignment.toml
 scriptmark grade -t tests/ --assignment assignment.toml
 scriptmark export output/results.json -o grades.xlsx
+```
+
+`summarize --roster` and `db import-roster` read a table with the default layout, or
+with the `[input.roster]` layout of `--assignment`, which also supplies the path when
+no roster file is given. A roster with errors is refused there as in grading:
+
+```fish
+scriptmark summarize output/results.json --assignment assignment.toml
+scriptmark db import-roster --assignment assignment.toml --db grades.db
 ```
 
 ### Test definitions

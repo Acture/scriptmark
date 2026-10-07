@@ -67,13 +67,7 @@ impl Config {
 		roster_override: Option<&Path>,
 		matching: &matching::Config,
 	) -> Result<Resolved> {
-		let base = assignment.and_then(Path::parent).unwrap_or(Path::new("."));
-		let resolve = |path: &Path| -> Result<PathBuf> {
-			if path.as_os_str().is_empty() {
-				bail!("an input path cannot be empty");
-			}
-			std::path::absolute(base.join(path)).context("cannot resolve local input path")
-		};
+		let resolve = |path: &Path| relative_to(assignment, path);
 		if !self.students.is_empty() {
 			if !self.submissions.is_empty()
 				|| !submissions.is_empty()
@@ -178,7 +172,17 @@ impl Config {
 		let paths = if submissions.is_empty() {
 			self.submissions
 				.iter()
-				.map(|path| resolve(path))
+				.map(|path| {
+					let resolved = resolve(path)?;
+					std::fs::metadata(&resolved).with_context(|| {
+						format!(
+							"{}: cannot read input.submissions entry '{}'",
+							assignment.unwrap_or(Path::new("assignment.toml")).display(),
+							path.display()
+						)
+					})?;
+					Ok(resolved)
+				})
 				.collect::<Result<Vec<_>>>()?
 		} else {
 			submissions.to_vec()
@@ -186,22 +190,45 @@ impl Config {
 		if paths.is_empty() {
 			bail!("provide submissions, input.submissions, or input.students in assignment.toml");
 		}
-		let roster_config = self.roster.clone().unwrap_or_default();
-		let roster_path = match roster_override {
-			Some(path) => Some(path.to_path_buf()),
-			None => roster_config.path.as_deref().map(resolve).transpose()?,
-		};
-		if self.roster.is_some() && roster_path.is_none() {
-			bail!("input.roster needs a path, or --roster");
-		}
-		let roster = roster_path
-			.as_deref()
-			.map(|path| table::load(path, &roster_config.options()))
-			.transpose()?;
 		Ok(Resolved {
 			paths,
-			roster,
+			roster: self.roster_table(assignment, roster_override)?,
 			matching: matching.clone(),
 		})
 	}
+
+	/// The table roster: `path` from the command line when given, otherwise
+	/// `input.roster.path`, read with the `[input.roster]` layout either way.
+	pub fn roster_table(
+		&self,
+		assignment: Option<&Path>,
+		path: Option<&Path>,
+	) -> Result<Option<Roster>> {
+		if !self.students.is_empty() {
+			bail!("input.students lists the class itself; it has no roster table");
+		}
+		let layout = self.roster.clone().unwrap_or_default();
+		let path = match path {
+			Some(path) => Some(path.to_path_buf()),
+			None => layout
+				.path
+				.as_deref()
+				.map(|path| relative_to(assignment, path))
+				.transpose()?,
+		};
+		if self.roster.is_some() && path.is_none() {
+			bail!("input.roster needs a path, or --roster");
+		}
+		path.map(|path| table::load(&path, &layout.options()))
+			.transpose()
+	}
+}
+
+/// A configured path, relative to the directory of the assignment file that names it.
+fn relative_to(assignment: Option<&Path>, path: &Path) -> Result<PathBuf> {
+	if path.as_os_str().is_empty() {
+		bail!("an input path cannot be empty");
+	}
+	let base = assignment.and_then(Path::parent).unwrap_or(Path::new("."));
+	std::path::absolute(base.join(path)).context("cannot resolve local input path")
 }

@@ -84,10 +84,19 @@ fn setup() -> tempfile::TempDir {
 }
 
 fn input(dir: &Path, config: &str) -> AssignmentInput {
+	input_with(dir, config, &[])
+}
+
+fn input_with(dir: &Path, config: &str, submissions: &[PathBuf]) -> AssignmentInput {
 	let declared = assignment::load(Some(&dir.join(config)), &dir.join("tests")).unwrap();
 	let resolved = declared
 		.input
-		.resolve(declared.path.as_deref(), &[], None, &declared.matching)
+		.resolve(
+			declared.path.as_deref(),
+			submissions,
+			None,
+			&declared.matching,
+		)
 		.unwrap();
 	load_local_input(
 		&resolved.paths,
@@ -243,8 +252,14 @@ fn table_mapping_errors_and_numeric_ids_name_the_source() {
 	let dir = setup();
 	let mut configured = options();
 	configured.columns.as_mut().unwrap().student_id = Column::Name("wrong heading".into());
-	let error = table::load(&dir.path().join("roster.csv"), &configured).unwrap_err();
-	assert!(format!("{error:#}").contains("missing column 'wrong heading'"));
+	let error = format!(
+		"{:#}",
+		table::load(&dir.path().join("roster.csv"), &configured).unwrap_err()
+	);
+	assert!(
+		error.contains("roster.csv:2: missing column 'wrong heading'"),
+		"{error}"
+	);
 	let error = table::load(&dir.path().join("roster.xlsx"), &options()).unwrap_err();
 	assert!(format!("{error:#}").contains("multiple worksheets"));
 	let mut book = Workbook::new();
@@ -344,7 +359,12 @@ fn config_paths_survive_another_working_directory_and_changes_refuse_rescore() {
 			output.to_str().unwrap(),
 		],
 	);
-	let original = std::fs::read_to_string(&config).unwrap();
+	// With only the policy changed, the record rescores from anywhere: it names its
+	// assignment absolutely.
+	let original = std::fs::read_to_string(&config).unwrap() + "\n[grading]\nscale = 20\n";
+	std::fs::write(&config, &original).unwrap();
+	success(elsewhere.path(), &["rescore", output.to_str().unwrap()]);
+	assert_eq!(Record::load(&output).unwrap().revisions.len(), 2);
 	std::fs::write(
 		&config,
 		original
@@ -359,7 +379,12 @@ fn config_paths_survive_another_working_directory_and_changes_refuse_rescore() {
 	);
 	let result = run(elsewhere.path(), &["rescore", output.to_str().unwrap()]);
 	assert!(!result.status.success());
-	assert_eq!(Record::load(&output).unwrap().revisions.len(), 1);
+	let stderr = String::from_utf8_lossy(&result.stderr);
+	assert!(
+		stderr.contains("student 001 is no longer in the input"),
+		"{stderr}"
+	);
+	assert_eq!(Record::load(&output).unwrap().revisions.len(), 2);
 }
 
 #[test]
@@ -498,4 +523,191 @@ fn the_shipped_local_import_example_runs_as_documented() {
 			[Some(100.0), Some(0.0), None]
 		);
 	}
+}
+
+#[test]
+fn rosters_read_outside_grading_use_the_same_mapping_and_refuse_errors() {
+	let dir = setup();
+	write(
+		dir.path(),
+		"plain.toml",
+		"[assignment]\nname = 'local example'\n",
+	);
+	success(
+		dir.path(),
+		&[
+			"grade",
+			"submissions",
+			"-t",
+			"tests",
+			"--assignment",
+			"plain.toml",
+			"-o",
+			"out/plain.json",
+		],
+	);
+	// The mapped table names the students, by --roster or by the assignment's own path.
+	for args in [
+		&["--roster", "roster.xlsx", "--assignment", "xlsx.toml"][..],
+		&["--assignment", "csv.toml"][..],
+	] {
+		let output = run(
+			dir.path(),
+			&[&["summarize", "out/plain.json"][..], args].concat(),
+		);
+		assert!(output.status.success(), "{args:?}");
+		assert!(String::from_utf8_lossy(&output.stdout).contains("张三"));
+	}
+	// Read with the default layout, the title row is taken for the header: refused, not a
+	// summary that silently names nobody.
+	let output = run(
+		dir.path(),
+		&["summarize", "out/plain.json", "--roster", "roster.csv"],
+	);
+	assert!(!output.status.success());
+	assert!(String::from_utf8_lossy(&output.stdout).contains("roster.csv:3: roster row unusable"));
+
+	let output = run(
+		dir.path(),
+		&["db", "import-roster", "roster.csv", "--db", "out/roster.db"],
+	);
+	assert!(!output.status.success());
+	success(
+		dir.path(),
+		&[
+			"db",
+			"import-roster",
+			"--assignment",
+			"xlsx.toml",
+			"--db",
+			"out/roster.db",
+		],
+	);
+	let name = |id: &str| {
+		scriptmark::db::Database::open(&dir.path().join("out/roster.db"))
+			.unwrap()
+			.get_student(id)
+			.unwrap()
+			.unwrap()
+			.name
+	};
+	assert_eq!(name("001").as_deref(), Some("张三"));
+
+	// A record that knows the students but not their names keeps the imported names.
+	let nameless = std::fs::read_to_string(dir.path().join("manifest.toml"))
+		.unwrap()
+		.replace("name = '张三'\n", "")
+		.replace("name = '李四'\n", "")
+		.replace("name = '王五'\n", "");
+	write(dir.path(), "nameless.toml", &nameless);
+	success(
+		dir.path(),
+		&[
+			"grade",
+			"-t",
+			"tests",
+			"--assignment",
+			"nameless.toml",
+			"-o",
+			"out/nameless.json",
+			"--db",
+			"out/roster.db",
+		],
+	);
+	assert_eq!(name("001").as_deref(), Some("张三"));
+}
+
+#[test]
+fn explicit_files_are_never_noise_and_rules_see_only_their_names() {
+	let dir = setup();
+	write(
+		dir.path(),
+		"submissions/__main__.py",
+		"def double(x):\n    return x * 2\n",
+	);
+	let manifest = std::fs::read_to_string(dir.path().join("manifest.toml"))
+		.unwrap()
+		.replace("submissions/001_work.py", "submissions/__main__.py");
+	write(dir.path(), "manifest.toml", &manifest);
+	let imported = input(dir.path(), "manifest.toml");
+	assert!(imported.errors().next().is_none());
+	assert_eq!(
+		imported.students[0].selected_attempt().unwrap().files.len(),
+		1
+	);
+
+	// A directory rule reads the directories below a scanned root. An explicit file has
+	// none, so the filename default decides — never a directory above the file.
+	write(
+		dir.path(),
+		"directory.toml",
+		"[assignment]\nname = 'local example'\n[[matching.students]]\nkind = 'directory'\nlevel = 0\n",
+	);
+	let file = dir.path().join("submissions/002_work.py");
+	let imported = input_with(dir.path(), "directory.toml", &[file]);
+	assert!(imported.errors().next().is_none());
+	assert_eq!(imported.students[0].identity.key.to_string(), "local:002");
+}
+
+#[test]
+fn blank_rows_are_skipped_and_an_empty_table_is_refused() {
+	let dir = setup();
+	write(
+		dir.path(),
+		"roster.csv",
+		"title\n姓名,学号\n张三,001\n,\n李四,002\n王五,003\n,\n,\n",
+	);
+	success(
+		dir.path(),
+		&["grade", "-t", "tests", "--assignment", "csv.toml"],
+	);
+
+	// A header row set below the data leaves nobody on the roster: refused, not a run in
+	// which every student is merely "not on the roster".
+	let roster = table::load(
+		&dir.path().join("roster.csv"),
+		&Options {
+			header_row: Some(6),
+			columns: None,
+			..options()
+		},
+	)
+	.unwrap();
+	assert!(
+		roster
+			.errors()
+			.any(|d| matches!(d.kind, DiagnosticKind::EmptyRoster { header_row: 6 }))
+	);
+	write(dir.path(), "roster.csv", "title\n姓名,学号\n,\n");
+	let output = run(
+		dir.path(),
+		&["grade", "-t", "tests", "--assignment", "csv.toml"],
+	);
+	assert!(!output.status.success());
+	assert!(
+		String::from_utf8_lossy(&output.stderr)
+			.contains("roster has no usable student rows below header row 2")
+	);
+}
+
+#[test]
+fn a_configured_submission_path_that_does_not_exist_names_the_assignment() {
+	let dir = setup();
+	let config = std::fs::read_to_string(dir.path().join("csv.toml"))
+		.unwrap()
+		.replace(
+			"submissions = ['submissions']",
+			"submissions = ['submisions']",
+		);
+	write(dir.path(), "csv.toml", &config);
+	let output = run(
+		dir.path(),
+		&["grade", "-t", "tests", "--assignment", "csv.toml"],
+	);
+	assert!(!output.status.success());
+	let stderr = String::from_utf8_lossy(&output.stderr);
+	assert!(
+		stderr.contains("csv.toml: cannot read input.submissions entry 'submisions'"),
+		"{stderr}"
+	);
 }

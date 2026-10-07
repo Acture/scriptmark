@@ -234,11 +234,13 @@ pub fn load_local_input(
 		index += 1;
 	}
 
-	let mut files: std::collections::BTreeSet<PathBuf> = paths
+	// Files named explicitly were chosen by the teacher, so they are never noise.
+	let explicit: std::collections::BTreeSet<PathBuf> = paths
 		.iter()
 		.filter(|p| p.as_ref().is_file())
 		.map(|p| p.as_ref().to_path_buf())
 		.collect();
+	let mut files = explicit.clone();
 	for dir_path in &all_paths {
 		let entries = std::fs::read_dir(dir_path)
 			.map_err(|e| DiscoveryError::IoError(dir_path.clone(), e))?;
@@ -276,7 +278,7 @@ pub fn load_local_input(
 		let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
 			continue;
 		};
-		if crate::archive::is_noise(filename) {
+		if crate::archive::is_noise(filename) && !explicit.contains(&path) {
 			continue;
 		}
 
@@ -299,12 +301,14 @@ pub fn load_local_input(
 			Some(FileOrigin::Archive { archive, .. }) => archive,
 			_ => &path,
 		};
+		// Rules see a path below a scanned directory. An explicit file or archive has no such
+		// root, so they see its name alone, never the directories above it.
 		let relative = paths
 			.iter()
 			.filter(|root| root.as_ref().is_dir())
 			.filter_map(|root| owner_path.strip_prefix(root.as_ref()).ok())
 			.min_by_key(|p| p.components().count())
-			.unwrap_or(owner_path);
+			.unwrap_or_else(|| Path::new(owner_path.file_name().unwrap_or_default()));
 		let owner = matching
 			.owner(relative, owner_path, default_key)
 			.map_err(|e| DiscoveryError::Matching(e.to_string()))?;

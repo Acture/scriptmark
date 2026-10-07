@@ -198,6 +198,30 @@ pub enum RecordError {
 }
 
 impl Record {
+	/// The roster members this record was graded with, as the evidence froze them — not as
+	/// a table that may since have changed. Students known only by a token taken from a
+	/// file name are not roster members.
+	pub fn roster(&self) -> crate::roster::Roster {
+		crate::roster::Roster::from_entries(
+			self.evidence
+				.students
+				.iter()
+				.filter_map(|student| {
+					let key = crate::models::StudentKey::parse(&student.student_id);
+					(!matches!(key, crate::models::StudentKey::Extracted(_))).then(|| {
+						crate::roster::RosterEntry {
+							key,
+							name: student.student_name.clone(),
+							canvas_user_id: student.canvas_user_id,
+							source: crate::roster::RosterSource::Supplied,
+							location: None,
+						}
+					})
+				})
+				.collect(),
+		)
+	}
+
 	/// Unscored evidence. Students are sorted by id; two with one id, or one already graded,
 	/// are refused: a revision could not tell them apart.
 	pub fn new(mut evidence: Evidence) -> Result<Record> {

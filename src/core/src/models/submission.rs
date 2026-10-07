@@ -547,6 +547,8 @@ pub enum DiagnosticKind {
 		path: PathBuf,
 		decision: crate::matching::Decision,
 	},
+	#[error("roster has no usable student rows below header row {header_row}")]
+	EmptyRoster { header_row: usize },
 	#[error("roster lists '{key}' in {count} identical rows; merged into one")]
 	DuplicateRosterEntry { key: String, count: usize },
 	#[error("roster rows disagree about who '{key}' is: {detail}")]
@@ -647,6 +649,22 @@ impl SourceLocation {
 	}
 }
 
+/// `file [sheet]:row`, with whichever parts are known.
+impl fmt::Display for SourceLocation {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		if let Some(file) = &self.file {
+			write!(f, "{}", file.display())?;
+		}
+		if let Some(sheet) = &self.sheet {
+			write!(f, " [{sheet}]")?;
+		}
+		if let Some(row) = self.row {
+			write!(f, ":{row}")?;
+		}
+		Ok(())
+	}
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InputDiagnostic {
 	pub severity: DiagnosticSeverity,
@@ -691,16 +709,7 @@ impl InputDiagnostic {
 impl fmt::Display for InputDiagnostic {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		if let Some(location) = &self.location {
-			if let Some(file) = &location.file {
-				write!(f, "{}", file.display())?;
-			}
-			if let Some(sheet) = &location.sheet {
-				write!(f, " [{sheet}]")?;
-			}
-			if let Some(row) = location.row {
-				write!(f, ":{row}")?;
-			}
-			write!(f, ": ")?;
+			write!(f, "{location}: ")?;
 		}
 		write!(f, "{}", self.kind)
 	}

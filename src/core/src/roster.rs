@@ -165,7 +165,9 @@ fn contradiction(kept: &RosterEntry, other: &RosterEntry) -> Option<String> {
 fn merge_by_key(entries: Vec<RosterEntry>) -> (Vec<RosterEntry>, Vec<InputDiagnostic>) {
 	let mut merged: Vec<RosterEntry> = Vec::new();
 	let mut first_seen: std::collections::BTreeMap<StudentKey, usize> = Default::default();
-	let mut repeats: std::collections::BTreeMap<StudentKey, usize> = Default::default();
+	// The location of every row after the first, each of which is the one to delete.
+	let mut repeats: std::collections::BTreeMap<StudentKey, Vec<Option<SourceLocation>>> =
+		Default::default();
 	let mut conflicted: std::collections::BTreeSet<StudentKey> = Default::default();
 	let mut diagnostics = Vec::new();
 
@@ -192,7 +194,10 @@ fn merge_by_key(entries: Vec<RosterEntry>) -> (Vec<RosterEntry>, Vec<InputDiagno
 			continue;
 		}
 
-		*repeats.entry(entry.key.clone()).or_insert(1) += 1;
+		repeats
+			.entry(entry.key.clone())
+			.or_default()
+			.push(entry.location.clone());
 		// Fill in only what the kept row does not already know.
 		if kept.name.is_none() {
 			kept.name = entry.name;
@@ -202,16 +207,19 @@ fn merge_by_key(entries: Vec<RosterEntry>) -> (Vec<RosterEntry>, Vec<InputDiagno
 		}
 	}
 
-	for (key, count) in repeats {
+	for (key, locations) in repeats {
 		if conflicted.contains(&key) {
 			continue;
 		}
-		let mut diagnostic = InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry {
-			key: key.to_string(),
-			count,
-		});
-		diagnostic.location = merged[first_seen[&key]].location.clone();
-		diagnostics.push(diagnostic);
+		let count = locations.len() + 1;
+		for location in locations {
+			let mut diagnostic = InputDiagnostic::warning(DiagnosticKind::DuplicateRosterEntry {
+				key: key.to_string(),
+				count,
+			});
+			diagnostic.location = location;
+			diagnostics.push(diagnostic);
+		}
 	}
 
 	(merged, diagnostics)
@@ -292,6 +300,33 @@ mod tests {
 			DiagnosticKind::DuplicateRosterEntry { key, count }
 				if key == "2024010001" && *count == 2
 		));
+		// The repeat is the row to delete, so that is the one named.
+		assert_eq!(
+			roster.diagnostics[0].location.as_ref().and_then(|l| l.row),
+			Some(3)
+		);
+	}
+
+	#[test]
+	fn test_every_repeated_row_is_located() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = write(
+			&dir,
+			"name,class,student_id\nAlice,A,2024010001\nBob,B,2024010002\nAlice,A,2024010001\nAlice,A,2024010001\n",
+		);
+
+		let roster = load_roster(&path).unwrap();
+		assert_eq!(roster.len(), 2);
+		let rows: Vec<Option<usize>> = roster
+			.diagnostics
+			.iter()
+			.map(|d| d.location.as_ref().and_then(|l| l.row))
+			.collect();
+		assert_eq!(rows, vec![Some(4), Some(5)]);
+		assert!(roster.diagnostics.iter().all(|d| matches!(
+			&d.kind,
+			DiagnosticKind::DuplicateRosterEntry { count, .. } if *count == 3
+		)));
 	}
 
 	#[test]
@@ -358,6 +393,53 @@ mod tests {
 		let location = roster.entries[0].location.as_ref().unwrap();
 		assert_eq!(location.file.as_deref(), Some(path.as_path()));
 		assert_eq!(location.row, Some(2));
+	}
+
+	#[test]
+	fn test_blank_rows_are_spacing_not_records() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = write(
+			&dir,
+			"name,class,student_id\nAlice,A,2024010001\n,,\n , ,\nBob,B,2024010002\n,,\n,,\n",
+		);
+
+		let roster = load_roster(&path).unwrap();
+		assert_eq!(roster.len(), 2);
+		assert!(roster.diagnostics.is_empty());
+	}
+
+	#[test]
+	fn test_a_roster_with_nobody_on_it_is_an_error() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = write(&dir, "name,class,student_id\n,,\n");
+
+		let roster = load_roster(&path).unwrap();
+		let errors: Vec<_> = roster.errors().collect();
+		assert_eq!(errors.len(), 1);
+		assert!(matches!(
+			errors[0].kind,
+			DiagnosticKind::EmptyRoster { header_row: 1 }
+		));
+		assert_eq!(
+			errors[0].to_string().split(": ").next(),
+			Some(path.to_str().unwrap())
+		);
+	}
+
+	#[test]
+	fn test_any_other_extension_is_read_as_csv_but_binary_spreadsheets_are_refused() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("roster.txt");
+		std::fs::write(&path, "name,class,student_id\nAlice,A,2024010001\n").unwrap();
+		assert_eq!(load_roster(&path).unwrap().len(), 1);
+
+		let xls = dir.path().join("roster.xls");
+		std::fs::write(&xls, [0xd0, 0xcf, 0x11, 0xe0]).unwrap();
+		let error = format!("{:#}", load_roster(&xls).unwrap_err());
+		assert!(
+			error.contains("save the roster as .xlsx or .csv"),
+			"{error}"
+		);
 	}
 
 	#[test]

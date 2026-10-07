@@ -28,6 +28,14 @@ It accepts individual files and archives; `files = []` records a non-submitter.
 File-to-item and function matching still use the normal `[matching]` rules.
 
 Run `match` to see import diagnostics without executing student code. Invalid rows,
-numeric Excel student IDs and invalid/duplicate submission paths stop grading, with
-the source file, worksheet and row where available. Repeated identical roster IDs
-are reported and merged; conflicting identities stop grading.
+numeric Excel student IDs, a roster with no usable student row and invalid/duplicate
+submission paths stop grading, with the source file, worksheet and row where available.
+Blank rows are skipped. Each repeat of an identical roster ID is reported and merged;
+conflicting identities stop grading.
+
+The same mapping names students outside grading:
+
+```fish
+cargo run -p scriptmark -- summarize output/local.json --assignment examples/bundles/local_import/assignment.toml
+cargo run -p scriptmark -- db import-roster --assignment examples/bundles/local_import/assignment.toml --db output/grades.db
+```

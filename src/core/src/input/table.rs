@@ -70,26 +70,7 @@ fn read(path: &Path, options: &Options) -> Result<Table> {
 		.map(str::to_ascii_lowercase)
 		.as_deref()
 	{
-		Some("csv") => {
-			if options.sheet.is_some() {
-				bail!("CSV has no worksheets; remove input.roster.sheet");
-			}
-			let mut reader = csv::ReaderBuilder::new()
-				.has_headers(false)
-				.flexible(true)
-				.from_path(path)?;
-			let mut rows = Vec::new();
-			for record in reader.records() {
-				let record = record?;
-				let row = record.position().map_or(1, |p| p.line() as usize);
-				rows.push((
-					row,
-					record.iter().map(|s| Data::String(s.to_owned())).collect(),
-				));
-			}
-			Ok(Table { sheet: None, rows })
-		}
-		Some("xlsx") => {
+		Some("xlsx" | "xlsm") => {
 			let mut book: Xlsx<_> = calamine::open_workbook(path)?;
 			let sheet = match &options.sheet {
 				Some(sheet) => sheet.clone(),
@@ -115,7 +96,37 @@ fn read(path: &Path, options: &Options) -> Result<Table> {
 				rows,
 			})
 		}
-		_ => bail!("roster must be a .csv or .xlsx file"),
+		Some("xls" | "xlsb" | "ods" | "numbers") => {
+			bail!("save the roster as .xlsx or .csv; this spreadsheet format is not read")
+		}
+		// Anything else is read as CSV, as rosters always were: `roster-pull -o` takes any name.
+		_ => {
+			if options.sheet.is_some() {
+				bail!("CSV has no worksheets; remove input.roster.sheet");
+			}
+			let mut reader = csv::ReaderBuilder::new()
+				.has_headers(false)
+				.flexible(true)
+				.from_path(path)?;
+			let mut rows = Vec::new();
+			for record in reader.records() {
+				let record = record?;
+				let row = record.position().map_or(1, |p| p.line() as usize);
+				rows.push((
+					row,
+					record.iter().map(|s| Data::String(s.to_owned())).collect(),
+				));
+			}
+			Ok(Table { sheet: None, rows })
+		}
+	}
+}
+
+fn is_blank(cell: &Data) -> bool {
+	match cell {
+		Data::Empty => true,
+		Data::String(value) => value.trim().is_empty(),
+		_ => false,
 	}
 }
 
@@ -168,6 +179,11 @@ pub fn load(path: &Path, options: &Options) -> Result<Roster> {
 	let table =
 		read(path, options).with_context(|| format!("cannot read roster {}", path.display()))?;
 	let header_row = options.header_row.unwrap_or(1);
+	let at = |row: Option<usize>| SourceLocation {
+		file: Some(path.to_path_buf()),
+		sheet: table.sheet.clone(),
+		row,
+	};
 	let header = table
 		.rows
 		.iter()
@@ -175,9 +191,8 @@ pub fn load(path: &Path, options: &Options) -> Result<Roster> {
 		.map(|(_, cells)| cells)
 		.with_context(|| {
 			format!(
-				"{} {:?}: header row {header_row} is missing (rows start at 1)",
-				path.display(),
-				table.sheet
+				"{}: header row {header_row} is missing (rows start at 1)",
+				at(None)
 			)
 		})?;
 	let mapping = options
@@ -205,18 +220,16 @@ pub fn load(path: &Path, options: &Options) -> Result<Roster> {
 			Ok((id, name, canvas))
 		})
 		.transpose()
-		.with_context(|| format!("{} {:?}:{header_row}", path.display(), table.sheet))?;
+		.with_context(|| at(Some(header_row)).to_string())?;
 	let mut entries = Vec::new();
 	let mut diagnostics = Vec::new();
 	for (row, cells) in &table.rows {
-		if *row <= header_row {
+		// A row with nothing in it is spacing, not a record: spreadsheets keep empty
+		// separator rows, and Excel's CSV export writes them as `,,`.
+		if *row <= header_row || cells.iter().all(is_blank) {
 			continue;
 		}
-		let location = SourceLocation {
-			file: Some(path.to_path_buf()),
-			sheet: table.sheet.clone(),
-			row: Some(*row),
-		};
+		let location = at(Some(*row));
 		let parsed = (|| -> Result<RosterEntry> {
 			if cells.len() != header.len() {
 				bail!(
@@ -263,6 +276,12 @@ pub fn load(path: &Path, options: &Options) -> Result<Roster> {
 				.at(location),
 			),
 		}
+	}
+	// A wrong header row or worksheet leaves nobody on the roster; grading against it would
+	// turn every student into "not on the roster" and lose every 缺交.
+	if entries.is_empty() {
+		diagnostics
+			.push(InputDiagnostic::error(DiagnosticKind::EmptyRoster { header_row }).at(at(None)));
 	}
 	Ok(Roster::with_diagnostics(entries, diagnostics))
 }

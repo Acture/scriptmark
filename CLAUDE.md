@@ -127,7 +127,7 @@ Zero and withheld grades stay distinct. See the notes' teacher contract for poli
 - Integration tests spawn real Python processes — need `python3` available
 - `scriptmark-core` exposes grading models and operations; CLI adapters import it directly, without compatibility re-exports.
 - Core's `test-support` feature exposes shared graded/withheld report fixtures for adapter tests; it is enabled only by the CLI's dev-dependency.
-- `[input]` in `assignment.toml` configures either submission paths plus a mapped CSV/XLSX roster, or `[[input.students]]` with exact files/archives. `grade`, `run` and `match` resolve the same input; rescore reconstructs it from saved CLI overrides and the recorded assignment file. File and function matching remains owned by `matching`.
+- `[input]` in `assignment.toml` configures either submission paths plus a mapped CSV/XLSX roster, or `[[input.students]]` with exact files/archives. `grade`, `run` and `match` resolve the same input; rescore reconstructs it from saved CLI overrides and the recorded assignment file. `summarize --roster` and `db import-roster` read tables through `Config::roster_table` with `--assignment`'s layout. DB saves import the identities frozen in the record (`Record::roster`). File and function matching remains owned by `matching`.
 - Publish both Rust packages with `cargo publish --workspace`, which orders workspace dependencies before their consumers.
 - Platform-specific code uses `#[cfg(target_os = "macos")]` / `#[cfg(target_os = "linux")]` for rlimit types
 
