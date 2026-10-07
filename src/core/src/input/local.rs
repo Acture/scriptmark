@@ -204,12 +204,12 @@ impl Config {
 		assignment: Option<&Path>,
 		path: Option<&Path>,
 	) -> Result<Option<Roster>> {
-		if !self.students.is_empty() {
-			bail!("input.students lists the class itself; it has no roster table");
-		}
 		let layout = self.roster.clone().unwrap_or_default();
 		let path = match path {
 			Some(path) => Some(path.to_path_buf()),
+			None if !self.students.is_empty() => {
+				bail!("input.students lists the class itself; it has no roster table to read")
+			}
 			None => layout
 				.path
 				.as_deref()

@@ -558,6 +558,31 @@ fn rosters_read_outside_grading_use_the_same_mapping_and_refuse_errors() {
 		assert!(output.status.success(), "{args:?}");
 		assert!(String::from_utf8_lossy(&output.stdout).contains("张三"));
 	}
+	// An explicit list has no table of its own, but a roster file given beside it is read.
+	write(dir.path(), "names.csv", "name,student_id\n张三,001\n");
+	let output = run(
+		dir.path(),
+		&[
+			"summarize",
+			"out/plain.json",
+			"--roster",
+			"names.csv",
+			"--assignment",
+			"manifest.toml",
+		],
+	);
+	assert!(output.status.success());
+	assert!(String::from_utf8_lossy(&output.stdout).contains("张三"));
+	let output = run(
+		dir.path(),
+		&[
+			"summarize",
+			"out/plain.json",
+			"--assignment",
+			"manifest.toml",
+		],
+	);
+	assert!(String::from_utf8_lossy(&output.stderr).contains("no roster table to read"));
 	// Read with the default layout, the title row is taken for the header: refused, not a
 	// summary that silently names nobody.
 	let output = run(

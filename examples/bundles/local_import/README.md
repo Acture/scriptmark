@@ -25,6 +25,8 @@ are relative to the working directory; positional submissions and `--roster` ove
 the corresponding configured paths. The explicit `input.students` list is a separate
 input mode and cannot be combined with a roster table or submission directories.
 It accepts individual files and archives; `files = []` records a non-submitter.
+A listed file is graded whatever its name, even one a directory scan would skip as
+noise (`.*`, `__*`).
 File-to-item and function matching still use the normal `[matching]` rules.
 
 Run `match` to see import diagnostics without executing student code. Invalid rows,

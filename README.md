@@ -241,7 +241,9 @@ files = ["handins/answer.py"]  # individual files or archives; [] means no submi
 ```
 
 An explicit list cannot be combined with a roster table or submission directory.
-It uses the same ownership and item matching component. Invalid identities/paths
+It uses the same ownership and item matching component. A file named explicitly, in
+the list or as a CLI path, is never skipped as noise (`.*`, `__*`), and student rules
+see only its file name, never the directories above it. Invalid identities/paths
 stop grading and remain visible in `match` diagnostics. An identical repeated roster
 row is reported at each repeat and merged; conflicting rows are refused. CLI submission
 paths and `--roster` override configured paths in table mode. To use only configured
