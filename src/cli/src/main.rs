@@ -10,11 +10,11 @@ use scriptmark_core::assignment::{self, Declared};
 use scriptmark_core::discovery::{LocalInputOptions, load_local_input};
 use scriptmark_core::grading::{self, Policy};
 use scriptmark_core::models::{
-	AssignmentInput, DiagnosticSeverity, StudentKey, StudentReport, StudentSubmission,
-	SubmissionOutcome, TestSpec,
+	AssignmentInput, DiagnosticSeverity, InputDiagnostic, StudentKey, StudentReport,
+	StudentSubmission, SubmissionOutcome, TestSpec,
 };
 use scriptmark_core::record::{self, Evidence, Record, View};
-use scriptmark_core::roster::load_roster;
+use scriptmark_core::roster::Roster;
 use scriptmark_core::runner::frozen::{self, Frozen, Generation};
 use scriptmark_core::runner::generation::SeedSource;
 use scriptmark_core::runner::orchestrator::{self, RunOptions};
@@ -83,7 +83,7 @@ struct FrozenArgs {
 #[derive(Parser)]
 struct GradeArgs {
 	/// Directories containing student submissions
-	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	#[arg(conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
 
 	/// Grade from a Canvas bundle written by `scriptmark canvas fetch`.
@@ -100,7 +100,7 @@ struct GradeArgs {
 	#[arg(short, long, default_value = "output/results.json")]
 	output: PathBuf,
 
-	/// Path to roster CSV (name,_,student_id)
+	/// Roster CSV or XLSX; configure its layout in assignment.toml [input.roster]
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
 
@@ -142,7 +142,7 @@ struct GradeArgs {
 #[derive(Parser)]
 struct RunArgs {
 	/// Directories containing student submissions
-	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	#[arg(conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
 
 	/// Grade from a Canvas bundle written by `scriptmark canvas fetch`.
@@ -159,7 +159,7 @@ struct RunArgs {
 	#[arg(short, long, default_value = "output/results.json")]
 	output: PathBuf,
 
-	/// Path to roster CSV (name,_,student_id)
+	/// Roster CSV or XLSX; configure its layout in assignment.toml [input.roster]
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
 
@@ -191,7 +191,7 @@ struct RunArgs {
 
 #[derive(Parser)]
 struct MatchArgs {
-	#[arg(required_unless_present = "canvas", conflicts_with = "canvas")]
+	#[arg(conflicts_with = "canvas")]
 	submissions: Vec<PathBuf>,
 	#[arg(long)]
 	canvas: Option<PathBuf>,
@@ -240,9 +240,14 @@ struct SummarizeArgs {
 	/// Path to the grading record, as `grade`, `run` or `rescore` wrote it
 	results: PathBuf,
 
-	/// Path to roster CSV
+	/// Roster CSV or XLSX whose names label the students
 	#[arg(short, long)]
 	roster: Option<PathBuf>,
+
+	/// Read the roster with this assignment's [input.roster] layout, and from its path when
+	/// --roster is absent
+	#[arg(long)]
+	assignment: Option<PathBuf>,
 
 	#[command(flatten)]
 	revision: RevisionArg,
@@ -426,10 +431,15 @@ enum DbAction {
 		#[arg(long, default_value = "scriptmark.db")]
 		db: PathBuf,
 	},
-	/// Import a roster CSV into the database
+	/// Import a roster CSV or XLSX into the database
 	ImportRoster {
-		/// Roster CSV file
-		roster: PathBuf,
+		/// Roster CSV or XLSX file
+		#[arg(required_unless_present = "assignment")]
+		roster: Option<PathBuf>,
+		/// Read the roster with this assignment's [input.roster] layout, and from its path
+		/// when no roster file is given
+		#[arg(long)]
+		assignment: Option<PathBuf>,
 		/// Database file path
 		#[arg(long, default_value = "scriptmark.db")]
 		db: PathBuf,
@@ -454,23 +464,18 @@ enum DbAction {
 fn build_local_input(
 	submissions: &[PathBuf],
 	declared: &Declared,
-	roster_path: Option<&PathBuf>,
+	resolved: &scriptmark_core::input::local::Resolved,
 	purpose: Purpose,
 ) -> Result<AssignmentInput> {
 	let (assignment, attempt_policy) = (declared.assignment.clone(), declared.attempt_policy);
-
-	let roster = match roster_path {
-		Some(path) => Some(load_roster(path).context("Failed to load roster")?),
-		None => None,
-	};
 
 	let input = load_local_input(
 		submissions,
 		LocalInputOptions {
 			assignment,
-			roster: roster.as_ref(),
+			roster: resolved.roster.as_ref(),
 			attempt_policy,
-			matching: Some(&declared.matching),
+			matching: Some(&resolved.matching),
 		},
 	)
 	.context("Failed to discover submissions")?;
@@ -492,11 +497,8 @@ fn build_local_input(
 	Ok(input)
 }
 
-/// Print the import summary and every anomaly the adapters recorded. Adapters never print
-/// themselves — this is the only place diagnostics reach a terminal.
+/// Print the import summary and every anomaly the adapters recorded.
 fn report_input(input: &AssignmentInput) {
-	use owo_colors::OwoColorize;
-
 	let counts = [
 		(SubmissionOutcome::Executable, "executable"),
 		(SubmissionOutcome::SubmittedEmpty, "submitted but empty"),
@@ -554,9 +556,25 @@ fn report_input(input: &AssignmentInput) {
 		}
 	}
 
-	let errors = input.diagnostics_of(DiagnosticSeverity::Error).count();
-	let warnings = input.diagnostics_of(DiagnosticSeverity::Warning).count();
-	for diagnostic in &input.diagnostics {
+	print_diagnostics(&input.diagnostics);
+}
+
+/// Print every diagnostic under its severity. Adapters never print themselves; diagnostics
+/// reach a terminal only through here.
+fn print_diagnostics(diagnostics: &[InputDiagnostic]) {
+	use owo_colors::OwoColorize;
+
+	let count = |severity| {
+		diagnostics
+			.iter()
+			.filter(|d| d.severity == severity)
+			.count()
+	};
+	let (errors, warnings) = (
+		count(DiagnosticSeverity::Error),
+		count(DiagnosticSeverity::Warning),
+	);
+	for diagnostic in diagnostics {
 		match diagnostic.severity {
 			DiagnosticSeverity::Error => println!("  {} {diagnostic}", "error:".red()),
 			DiagnosticSeverity::Warning => println!("  {} {diagnostic}", "warning:".yellow()),
@@ -566,6 +584,28 @@ fn report_input(input: &AssignmentInput) {
 	if errors + warnings > 0 {
 		println!("  ({errors} errors, {warnings} warnings)");
 	}
+}
+
+/// The roster a command names outside grading: `roster`, or `[input.roster].path` of
+/// `assignment`, read with that assignment's layout. Its errors refuse it, as in grading.
+fn roster_table(roster: Option<&Path>, assignment: Option<&Path>) -> Result<Roster> {
+	let input = match assignment {
+		Some(path) => {
+			scriptmark_core::spec_loader::load_assignment_config(path)
+				.with_context(|| format!("Failed to load {}", path.display()))?
+				.input
+		}
+		None => Default::default(),
+	};
+	let roster = input
+		.roster_table(assignment, roster)?
+		.context("give a roster file, or --assignment with an [input.roster] path")?;
+	print_diagnostics(&roster.diagnostics);
+	let errors = roster.errors().count();
+	if errors > 0 {
+		anyhow::bail!("refusing the roster: {errors} problem(s)");
+	}
+	Ok(roster)
 }
 
 #[tokio::main]
@@ -757,6 +797,16 @@ fn prepare_batch(
 
 	// Names, roster membership and submission state all come from the model, so there is
 	// no separate roster merge afterwards.
+	if canvas.is_some() && !declared.input.is_empty() {
+		anyhow::bail!(
+			"a Canvas bundle is the whole input, but {} also configures [input]; grade the bundle with an assignment file that has no [input]",
+			declared
+				.path
+				.as_deref()
+				.unwrap_or(Path::new("assignment.toml"))
+				.display()
+		);
+	}
 	let (input, source) = match &canvas {
 		Some(bundle) => (
 			build_canvas_input(bundle, &declared, purpose)?,
@@ -764,13 +814,23 @@ fn prepare_batch(
 				bundle: bundle.clone(),
 			},
 		),
-		None => (
-			build_local_input(&submissions, &declared, roster.as_ref(), purpose)?,
-			record::Source::Local {
-				dirs: submissions,
-				roster,
-			},
-		),
+		None => {
+			let resolved = declared.input.resolve(
+				declared.path.as_deref(),
+				&submissions,
+				roster.as_deref(),
+				&declared.matching,
+			)?;
+			let input = build_local_input(&resolved.paths, &declared, &resolved, purpose)?;
+			declared.matching = resolved.matching;
+			(
+				input,
+				record::Source::Local {
+					dirs: submissions,
+					roster,
+				},
+			)
+		}
 	};
 	Ok(Batch {
 		input,
@@ -930,26 +990,20 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 	}
 
 	if let Some(db_path) = &args.db {
-		save_to_db(db_path, &record, revision, input.roster.as_ref())?;
+		save_to_db(db_path, &record, revision)?;
 	}
 
 	Ok(())
 }
 
-/// Save a revision as a database session, importing the roster it was graded with first.
-/// Saving one revision twice finds the session it already has.
-fn save_to_db(
-	db_path: &Path,
-	record: &Record,
-	revision: u32,
-	roster: Option<&scriptmark_core::roster::Roster>,
-) -> Result<()> {
+/// Save a revision as a database session, importing the roster it was graded with first —
+/// as the record froze it, not a table that may have changed since. Saving one revision
+/// twice finds the session it already has.
+fn save_to_db(db_path: &Path, record: &Record, revision: u32) -> Result<()> {
 	let database = scriptmark::db::Database::open(db_path).context("Failed to open database")?;
-	if let Some(roster) = roster {
-		database
-			.import_roster(roster)
-			.context("Failed to import roster")?;
-	}
+	database
+		.import_roster(&record.roster())
+		.context("Failed to import roster")?;
 	let saved = database
 		.save_revision(record, revision)
 		.context("Failed to save session to database")?;
@@ -1103,7 +1157,7 @@ fn cmd_rescore(args: RescoreArgs) -> Result<()> {
 	println!("\nRevision {revision} added to {}", args.record.display());
 
 	if let Some(db_path) = &args.db {
-		save_to_db(db_path, &record, revision, input.roster.as_ref())?;
+		save_to_db(db_path, &record, revision)?;
 	}
 	Ok(())
 }
@@ -1111,8 +1165,8 @@ fn cmd_rescore(args: RescoreArgs) -> Result<()> {
 fn cmd_summarize(args: SummarizeArgs) -> Result<()> {
 	let (_, mut view) = load_view(&args.results, args.revision.revision)?;
 
-	if let Some(roster_path) = &args.roster {
-		let roster = load_roster(roster_path).context("Failed to load roster")?;
+	if args.roster.is_some() || args.assignment.is_some() {
+		let roster = roster_table(args.roster.as_deref(), args.assignment.as_deref())?;
 		for report in view.reports.iter_mut() {
 			// `student_id` is a rendered key, so it is parsed back rather than compared as
 			// text — otherwise a run made without --roster, whose ids carry a `local:`
@@ -1520,25 +1574,18 @@ fn cmd_db(cmd: DbCommand) -> Result<()> {
 		} => {
 			let (saved, view) = load_view(&record, revision.revision)?;
 			let revision = scored(&view, &record)?;
-			// The roster the record was graded with, when it had one, names its students.
-			let roster = match &saved.evidence.inputs.source {
-				record::Source::Local {
-					roster: Some(path), ..
-				} => Some(load_roster(path).context("Failed to load roster")?),
-				_ => None,
-			};
-			save_to_db(&db, &saved, revision, roster.as_ref())
+			save_to_db(&db, &saved, revision)
 		}
-		DbAction::ImportRoster { roster, db } => {
+		DbAction::ImportRoster {
+			roster,
+			assignment,
+			db,
+		} => {
+			let roster = roster_table(roster.as_deref(), assignment.as_deref())?;
 			let database =
 				scriptmark::db::Database::open(&db).context("Failed to open database")?;
-			let roster_csv = scriptmark_core::roster::load_roster(&roster)
-				.context("Failed to load roster CSV")?;
-			for diagnostic in &roster_csv.diagnostics {
-				println!("  warning: {diagnostic}");
-			}
 			let count = database
-				.import_roster(&roster_csv)
+				.import_roster(&roster)
 				.context("Failed to import roster")?;
 			println!("Imported {} students into {}", count, db.display());
 			Ok(())

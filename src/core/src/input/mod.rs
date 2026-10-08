@@ -10,3 +10,5 @@
 //! - Canvas payloads: [`canvas::normalize`]
 
 pub mod canvas;
+pub mod local;
+pub mod table;

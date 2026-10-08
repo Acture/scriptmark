@@ -16,6 +16,7 @@ pub struct Declared {
 	pub attempt_policy: AttemptPolicy,
 	pub grading: GradingConfig,
 	pub matching: crate::matching::Config,
+	pub input: crate::input::local::Config,
 	/// Where it was read from; `None` when there was no file.
 	pub path: Option<PathBuf>,
 }
@@ -46,6 +47,7 @@ pub fn load(explicit: Option<&Path>, tests_dir: &Path) -> Result<Declared> {
 			attempt_policy: AttemptPolicy::default(),
 			grading: GradingConfig::default(),
 			matching: crate::matching::Config::default(),
+			input: crate::input::local::Config::default(),
 			path: None,
 		});
 	};
@@ -62,6 +64,7 @@ pub fn load(explicit: Option<&Path>, tests_dir: &Path) -> Result<Declared> {
 		attempt_policy: config.assignment.attempt_policy,
 		grading: config.grading,
 		matching: config.matching,
+		input: config.input,
 		path: Some(path),
 	})
 }

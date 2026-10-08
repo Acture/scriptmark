@@ -66,6 +66,14 @@ fn extract_archives(
 	let extract_root = dir.join(EXTRACT_DIR);
 	let mut extracted = Vec::new();
 
+	if dir.is_file() {
+		let target = dir
+			.parent()
+			.unwrap_or(Path::new("."))
+			.join(EXTRACT_DIR)
+			.join(dir.file_name().expect("a file has a name"));
+		return crate::archive::expand(dir, &target, &crate::archive::is_gradeable, diagnostics);
+	}
 	let Ok(entries) = std::fs::read_dir(dir) else {
 		return extracted;
 	};
@@ -126,7 +134,7 @@ impl Default for LocalInputOptions<'_> {
 	}
 }
 
-/// Scan directories of student submissions and build the unified input.
+/// Scan submission directories or explicitly listed files/archives into the unified input.
 ///
 /// Local input has no notion of repeated attempts — inferring them from Canvas download
 /// filename tokens would be a matching rule, which is P-673 — so every student gets
@@ -149,14 +157,17 @@ pub fn load_local_input(
 
 	for path in paths {
 		let path = path.as_ref();
-		if !path.is_dir() {
-			return Err(DiscoveryError::NotADirectory(path.to_path_buf()));
+		if !path.is_dir() && !path.is_file() {
+			return Err(DiscoveryError::InvalidPath(path.to_path_buf()));
 		}
 	}
 
 	let mut origins: BTreeMap<PathBuf, FileOrigin> = BTreeMap::new();
 	let mut extra_dirs: Vec<PathBuf> = Vec::new();
 	for path in paths {
+		if path.as_ref().is_file() && crate::archive::format_of(path.as_ref()).is_none() {
+			continue;
+		}
 		for extracted in extract_archives(path.as_ref(), &mut diagnostics) {
 			if let Some(parent) = extracted.out_path.parent()
 				&& !extra_dirs.contains(&parent.to_path_buf())
@@ -175,6 +186,7 @@ pub fn load_local_input(
 
 	let mut all_paths: Vec<PathBuf> = paths
 		.iter()
+		.filter(|p| p.as_ref().is_dir())
 		.map(|p| p.as_ref().to_path_buf())
 		.chain(extra_dirs)
 		.collect();
@@ -222,11 +234,17 @@ pub fn load_local_input(
 		index += 1;
 	}
 
+	// Files named explicitly were chosen by the teacher, so they are never noise.
+	let explicit: std::collections::BTreeSet<PathBuf> = paths
+		.iter()
+		.filter(|p| p.as_ref().is_file())
+		.map(|p| p.as_ref().to_path_buf())
+		.collect();
+	let mut files = explicit.clone();
 	for dir_path in &all_paths {
 		let entries = std::fs::read_dir(dir_path)
 			.map_err(|e| DiscoveryError::IoError(dir_path.clone(), e))?;
 
-		let mut files: Vec<PathBuf> = Vec::new();
 		for entry in entries {
 			// Not `path().is_file()`: that turns a metadata failure into "not a file", so
 			// a submission we merely failed to stat would be read as 缺交. `fs::metadata`
@@ -235,7 +253,9 @@ pub fn load_local_input(
 			// would silently stop grading symlinked submissions.)
 			match entry.map(|entry| entry.path()) {
 				Ok(path) => match std::fs::metadata(&path) {
-					Ok(meta) if meta.is_file() => files.push(path),
+					Ok(meta) if meta.is_file() => {
+						files.insert(path);
+					}
 					Ok(_) => {}
 					Err(e) => diagnostics.push(InputDiagnostic::warning(
 						DiagnosticKind::UnreadableDirEntry {
@@ -252,91 +272,90 @@ pub fn load_local_input(
 				)),
 			}
 		}
-		files.sort();
+	}
+	for path in files {
+		let is_extracted = path.components().any(|c| c.as_os_str() == EXTRACT_DIR);
+		let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
+			continue;
+		};
+		if crate::archive::is_noise(filename) && !explicit.contains(&path) {
+			continue;
+		}
 
-		let is_extracted = dir_path.components().any(|c| c.as_os_str() == EXTRACT_DIR);
-
-		for path in files {
-			let Some(filename) = path.file_name().and_then(|n| n.to_str()) else {
-				continue;
-			};
-			if crate::archive::is_noise(filename) {
-				continue;
-			}
-
-			let ext = path
-				.extension()
-				.and_then(|e| e.to_str())
-				.unwrap_or("")
-				.to_lowercase();
-			// A file out of an archive takes its key from the archive's name; the files
-			// within it are named by the student.
-			let default_key = if let Some(FileOrigin::Archive { archive, .. }) = origins.get(&path)
-			{
-				archive
-					.file_name()
-					.and_then(|n| n.to_str())
-					.and_then(extract_sid)
-			} else {
-				extract_sid(filename)
-			};
-			let owner_path = match origins.get(&path) {
-				Some(FileOrigin::Archive { archive, .. }) => archive,
-				_ => &path,
-			};
-			let relative = paths
-				.iter()
-				.filter_map(|root| owner_path.strip_prefix(root.as_ref()).ok())
-				.min_by_key(|p| p.components().count())
-				.unwrap_or(owner_path);
-			let owner = matching
-				.owner(relative, owner_path, default_key)
-				.map_err(|e| DiscoveryError::Matching(e.to_string()))?;
-			if owner.state == crate::matching::State::Ambiguous {
-				diagnostics.push(InputDiagnostic::error(DiagnosticKind::AmbiguousOwner {
-					path: path.clone(),
-					decision: owner.clone(),
-				}));
-			}
-			let key = owner.selected.clone();
-			// Even an empty/unreadable archive records receipt under the teacher's owner rule.
-			if !is_extracted && crate::archive::format_of(&path).is_some() {
-				match key {
-					Some(key) => {
-						seen_keys.insert(key);
-					}
-					None => unmatched.push(UnmatchedArtifact {
-						path: path.clone(),
-						reason: UnmatchedReason::NoStudentKey,
-					}),
-				}
-				continue;
-			}
-
-			let language = detect_language(&ext);
-
-			match (key, language) {
-				(Some(key), Some(language)) => {
-					seen_keys.insert(key.clone());
-					let origin = origins.get(&path).cloned().unwrap_or(FileOrigin::Direct);
-					let mut file = StudentFile::direct(path.clone(), language).with_origin(origin);
-					file.owner = Some(owner);
-					by_key.entry(key).or_default().push(file);
-				}
-				(Some(key), None) => {
-					// Owner known, type unusable: the student submitted, just not code.
-					diagnostics.push(crate::archive::archive_or_ignored(&key, &path));
+		let ext = path
+			.extension()
+			.and_then(|e| e.to_str())
+			.unwrap_or("")
+			.to_lowercase();
+		// A file out of an archive takes its key from the archive's name; the files
+		// within it are named by the student.
+		let default_key = if let Some(FileOrigin::Archive { archive, .. }) = origins.get(&path) {
+			archive
+				.file_name()
+				.and_then(|n| n.to_str())
+				.and_then(extract_sid)
+		} else {
+			extract_sid(filename)
+		};
+		let owner_path = match origins.get(&path) {
+			Some(FileOrigin::Archive { archive, .. }) => archive,
+			_ => &path,
+		};
+		// Rules see a path below a scanned directory. An explicit file or archive has no such
+		// root, so they see its name alone, never the directories above it.
+		let relative = paths
+			.iter()
+			.filter(|root| root.as_ref().is_dir())
+			.filter_map(|root| owner_path.strip_prefix(root.as_ref()).ok())
+			.min_by_key(|p| p.components().count())
+			.unwrap_or_else(|| Path::new(owner_path.file_name().unwrap_or_default()));
+		let owner = matching
+			.owner(relative, owner_path, default_key)
+			.map_err(|e| DiscoveryError::Matching(e.to_string()))?;
+		if owner.state == crate::matching::State::Ambiguous {
+			diagnostics.push(InputDiagnostic::error(DiagnosticKind::AmbiguousOwner {
+				path: path.clone(),
+				decision: owner.clone(),
+			}));
+		}
+		let key = owner.selected.clone();
+		// Even an empty/unreadable archive records receipt under the teacher's owner rule.
+		if !is_extracted && crate::archive::format_of(&path).is_some() {
+			match key {
+				Some(key) => {
 					seen_keys.insert(key);
 				}
-				(None, language) => unmatched.push(UnmatchedArtifact {
+				None => unmatched.push(UnmatchedArtifact {
 					path: path.clone(),
-					reason: if language.is_some() {
-						UnmatchedReason::NoStudentKey
-					} else {
-						UnmatchedReason::UnsupportedType
-					},
+					reason: UnmatchedReason::NoStudentKey,
 				}),
 			}
+			continue;
+		}
+
+		let language = detect_language(&ext);
+
+		match (key, language) {
+			(Some(key), Some(language)) => {
+				seen_keys.insert(key.clone());
+				let origin = origins.get(&path).cloned().unwrap_or(FileOrigin::Direct);
+				let mut file = StudentFile::direct(path.clone(), language).with_origin(origin);
+				file.owner = Some(owner);
+				by_key.entry(key).or_default().push(file);
+			}
+			(Some(key), None) => {
+				// Owner known, type unusable: the student submitted, just not code.
+				diagnostics.push(crate::archive::archive_or_ignored(&key, &path));
+				seen_keys.insert(key);
+			}
+			(None, language) => unmatched.push(UnmatchedArtifact {
+				path: path.clone(),
+				reason: if language.is_some() {
+					UnmatchedReason::NoStudentKey
+				} else {
+					UnmatchedReason::UnsupportedType
+				},
+			}),
 		}
 	}
 
@@ -442,8 +461,8 @@ pub fn load_local_input(
 pub enum DiscoveryError {
 	#[error("invalid matching rules: {0}")]
 	Matching(String),
-	#[error("not a directory: {0}")]
-	NotADirectory(std::path::PathBuf),
+	#[error("not a submission file or directory: {0}")]
+	InvalidPath(std::path::PathBuf),
 	#[error("IO error reading {0}: {1}")]
 	IoError(std::path::PathBuf, std::io::Error),
 }
@@ -1056,12 +1075,15 @@ mod tests {
 	}
 
 	#[test]
-	fn test_not_a_directory_is_a_hard_error() {
+	fn test_explicit_files_are_accepted_but_missing_paths_are_an_error() {
 		let dir = tempfile::tempdir().unwrap();
 		let file = dir.path().join("a.py");
 		std::fs::write(&file, "pass").unwrap();
 
-		let err = load_local_input(&[&file], LocalInputOptions::default()).unwrap_err();
-		assert!(matches!(err, DiscoveryError::NotADirectory(_)));
+		let input = load_local_input(&[&file], LocalInputOptions::default()).unwrap();
+		assert_eq!(input.student_count(), 1);
+		let missing = dir.path().join("missing.py");
+		let err = load_local_input(&[&missing], LocalInputOptions::default()).unwrap_err();
+		assert!(matches!(err, DiscoveryError::InvalidPath(_)));
 	}
 }

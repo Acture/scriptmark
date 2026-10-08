@@ -19,9 +19,10 @@ impl Database {
 		let mut stmt = self.conn.prepare(
 			"INSERT INTO students (id, name, canvas_id) VALUES (?1, ?2, ?3)
 			 ON CONFLICT(id) DO UPDATE SET
-			     name = excluded.name,
-			     -- A CSV roster carries no Canvas id, so writing its NULL would erase one
-			     -- an earlier Canvas import had stored, and grade push would lose it.
+			     -- A roster that does not know a value must not erase one stored earlier:
+			     -- a CSV roster carries no Canvas id, which grade push needs, and a record
+			     -- graded without names would blank those an import had stored.
+			     name = COALESCE(excluded.name, students.name),
 			     canvas_id = COALESCE(excluded.canvas_id, students.canvas_id)",
 		)?;
 		let mut stored = std::collections::BTreeSet::new();

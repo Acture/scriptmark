@@ -1,0 +1,22 @@
+[assignment]
+name = "Local import example"
+
+[[input.students]]
+student_id = "001"
+name = "张三"
+files = ["submissions/001_work.py"]
+
+[[input.students]]
+student_id = "002"
+name = "李四"
+files = ["submissions/002_work.py"]
+
+[[input.students]]
+student_id = "003"
+name = "王五"
+files = []
+
+[[items]]
+id = "double"
+points = 10
+aggregation = "proportional"
