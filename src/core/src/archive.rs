@@ -337,14 +337,16 @@ pub(crate) fn expand(
 		Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
 		_ => std::fs::create_dir_all(target),
 	};
+	// Not the student's archive at fault but where it is expanded (a read-only directory, a
+	// file in the way): an error, so the run stops instead of grading the owner as empty.
 	if let Err(e) = fresh {
-		diagnostics.push(unreadable(
-			archive,
-			format!(
+		diagnostics.push(InputDiagnostic::error(DiagnosticKind::ArchiveUnreadable {
+			archive: archive.to_path_buf(),
+			reason: format!(
 				"cannot prepare extraction directory {}: {e}",
 				target.display()
 			),
-		));
+		}));
 		return Vec::new();
 	}
 
@@ -770,6 +772,30 @@ mod tests {
 			written, 65536,
 			"real RAR5 compressed data must round-trip, not just stored entries"
 		);
+	}
+
+	#[test]
+	fn test_an_extraction_directory_that_cannot_be_prepared_is_an_error() {
+		let dir = tempfile::tempdir().unwrap();
+		let archive = zip_with(dir.path(), "hw.zip", &[("lab5.py", b"x=1")]);
+		// A file where the extraction directory belongs.
+		let target = dir.path().join("out");
+		std::fs::write(&target, "in the way").unwrap();
+		let mut diagnostics = Vec::new();
+
+		let files = expand(&archive, &target, &is_gradeable, &mut diagnostics);
+
+		assert!(files.is_empty());
+		assert_eq!(diagnostics.len(), 1);
+		assert_eq!(
+			diagnostics[0].severity,
+			crate::models::DiagnosticSeverity::Error
+		);
+		assert!(matches!(
+			&diagnostics[0].kind,
+			DiagnosticKind::ArchiveUnreadable { reason, .. }
+				if reason.contains("cannot prepare extraction directory")
+		));
 	}
 
 	#[test]
