@@ -74,7 +74,7 @@ ALLOWED = frozenset(
 		"gzip", "bz2", "lzma", "zipfile", "tarfile", "xml", "html", "email",
 		"logging", "argparse", "getopt", "configparser", "tomllib", "threading", "concurrent",
 	}
-) | frozenset(INIT.get("allowed_imports", []))
+) | frozenset(name.split(".")[0] for name in INIT.get("allowed_imports", []))
 STUDENT_MARK = "__scriptmark_student__"
 _original_import = builtins.__import__
 

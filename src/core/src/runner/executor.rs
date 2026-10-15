@@ -274,10 +274,10 @@ pub enum Exit {
 	/// Killed by the grader at the unit's deadline.
 	Deadline,
 	/// Killed by the grader for holding more than the unit's `memory_mb` beyond what the
-	/// student side takes idle (`interpreter_mb`).
+	/// student side takes idle with its allowed imports loaded (`idle_mb`).
 	Memory {
 		limit_mb: u64,
-		interpreter_mb: u64,
+		idle_mb: u64,
 	},
 	/// Still running when the teacher side finished, and ended by the grader then.
 	Stopped,

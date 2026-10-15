@@ -465,14 +465,11 @@ fn death(exit: &Exit) -> (TestStatus, String) {
 			TestStatus::Timeout,
 			"the unit's deadline passed during".into(),
 		),
-		Exit::Memory {
-			limit_mb,
-			interpreter_mb,
-		} => (
+		Exit::Memory { limit_mb, idle_mb } => (
 			TestStatus::Error,
 			format!(
-				"the {limit_mb} MiB memory limit (`memory_mb`, beyond the interpreter's \
-				 {interpreter_mb} MiB) was exceeded during"
+				"the {limit_mb} MiB memory limit (`memory_mb`, on top of the {idle_mb} MiB \
+				 Python and the allowed imports take) was exceeded during"
 			),
 		),
 		Exit::Stopped => (
@@ -1316,7 +1313,7 @@ mod tests {
 
 		obs.exit = Exit::Memory {
 			limit_mb: 64,
-			interpreter_mb: 24,
+			idle_mb: 24,
 		};
 		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
@@ -1444,7 +1441,7 @@ mod tests {
 		});
 		hog.exit = Exit::Memory {
 			limit_mb: 64,
-			interpreter_mb: 24,
+			idle_mb: 24,
 		};
 		let r = one(&c, &p, &hog);
 		assert_eq!(
@@ -1486,7 +1483,7 @@ mod tests {
 		});
 		gone.exit = Exit::Memory {
 			limit_mb: 64,
-			interpreter_mb: 24,
+			idle_mb: 24,
 		};
 		let r = judge(&p, &scored, &gone, "python3", Isolation::Sandboxed);
 		assert_eq!(

@@ -247,6 +247,14 @@ impl<'a> Validator<'a> {
 			}
 		}
 		self.shared();
+		for name in &self.spec.meta.allowed_imports {
+			if !is_module_name(name) {
+				let message = format!(
+					"allowed import '{name}' must be a module name, such as 'numpy' or 'matplotlib.pyplot'"
+				);
+				self.problem("[meta]", message);
+			}
+		}
 		self.memory(self.spec.meta.memory_mb, "[meta]");
 		for (name, value) in &self.spec.vars {
 			if contains_null(value) {
@@ -1073,6 +1081,11 @@ fn is_contained(path: &str) -> bool {
 }
 
 /// A name a Rhai oracle can bind: letters, digits and `_`, not starting with a digit.
+/// A module Python can import by this name: `numpy`, `matplotlib.pyplot`.
+pub fn is_module_name(name: &str) -> bool {
+	name.split('.').all(is_identifier)
+}
+
 fn is_identifier(name: &str) -> bool {
 	let mut chars = name.chars();
 	chars
@@ -2003,6 +2016,29 @@ expect = 150
 		)
 		.unwrap();
 		assert!(!serde_json::to_string(&spec).unwrap().contains("memory_mb"));
+	}
+
+	#[test]
+	fn test_an_allowed_import_is_a_module_name() {
+		for bad in [
+			"os; import shutil",
+			"numpy.",
+			".numpy",
+			"matplotlib..pyplot",
+			"1abc",
+			"",
+		] {
+			refused(
+				&format!("allowed_imports = [{bad:?}]\n[[cases]]\nname = \"x\"\nexpect = 1\n"),
+				"must be a module name",
+			);
+		}
+		assert!(
+			problems(
+				"allowed_imports = [\"numpy\", \"matplotlib.pyplot\", \"_private\"]\n[[cases]]\nname = \"x\"\nexpect = 1\n"
+			)
+			.is_empty()
+		);
 	}
 
 	#[test]

@@ -1024,6 +1024,53 @@ async fn test_a_student_who_writes_into_the_pipe_only_breaks_their_own_unit() {
 	assert!(obs.done, "{obs:?}");
 }
 
+/// What the teacher allows is loaded when ScriptMark measures what the student side takes
+/// idle, so a student is not charged for importing it.
+#[tokio::test]
+async fn test_allowed_imports_count_as_what_a_unit_takes_idle() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import time\n\ndef hog():\n    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n",
+	);
+	let mut idle = Vec::new();
+	for allowed in [vec![], vec!["asyncio".to_string()]] {
+		let mut plan = unit(&student);
+		plan.allowed_imports = allowed;
+		plan.steps = vec![function("hog", vec![])];
+		plan.memory_mb = 16;
+		match run(&plan).await.exit {
+			Exit::Memory { idle_mb, .. } => idle.push(idle_mb),
+			other => panic!("{:?}: {other:?}", plan.allowed_imports),
+		}
+	}
+	let (bare, with_asyncio) = (idle[0], idle[1]);
+	// asyncio, which the harness does not load, takes 7 to 10 MiB to import.
+	assert!(
+		with_asyncio >= bare + 4,
+		"{bare} MiB, {with_asyncio} MiB with asyncio"
+	);
+}
+
+/// An entry names a module: a dotted one allows its whole package, and one that is not
+/// installed does not keep the unit from running.
+#[tokio::test]
+async fn test_a_dotted_allowed_import_allows_its_package() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import wsgiref.util\n\ndef scheme():\n    return wsgiref.util.guess_scheme({})\n",
+	);
+	let mut plan = unit(&student);
+	plan.allowed_imports = vec!["wsgiref.util".into(), "not_installed_anywhere".into()];
+	plan.steps = vec![function("scheme", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.done, "{obs:?}");
+	assert_eq!(returned(&obs.steps[0].outcome), &json!("http"));
+}
+
 #[tokio::test]
 async fn test_a_student_side_past_its_memory_limit_is_ended() {
 	let dir = tempfile::tempdir().unwrap();
@@ -1037,7 +1084,7 @@ async fn test_a_student_side_past_its_memory_limit_is_ended() {
 	plan.memory_mb = 96;
 	let obs = run(&plan).await;
 	assert!(
-		matches!(obs.exit, Exit::Memory { limit_mb: 96, interpreter_mb } if interpreter_mb > 0),
+		matches!(obs.exit, Exit::Memory { limit_mb: 96, idle_mb } if idle_mb > 0),
 		"{obs:?}"
 	);
 	assert!(obs.steps.is_empty());

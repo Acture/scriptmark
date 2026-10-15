@@ -589,7 +589,10 @@ pub struct TestMeta {
 	#[serde(default)]
 	pub copy_refs: Option<bool>,
 
-	/// Extra packages allowed in student code (beyond safe stdlib).
+	/// Extra packages allowed in student code (beyond safe stdlib). An entry allows its
+	/// top-level package; a dotted one (`matplotlib.pyplot`) also names the module loaded
+	/// when ScriptMark measures what the student side takes idle, which `memory_mb` is
+	/// counted beyond.
 	#[serde(default)]
 	pub allowed_imports: Vec<String>,
 }

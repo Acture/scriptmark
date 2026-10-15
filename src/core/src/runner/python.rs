@@ -439,16 +439,16 @@ impl Finished {
 	}
 }
 
-/// What the student side may hold: `limit_mb` beyond `interpreter`, the bytes it takes idle.
+/// What the student side may hold: `limit_mb` beyond `idle`, the bytes it takes idle.
 #[derive(Debug, Clone, Copy)]
 struct Memory {
 	limit_mb: u64,
-	interpreter: u64,
+	idle: u64,
 }
 
 impl Memory {
 	fn watched(self) -> u64 {
-		self.interpreter
+		self.idle
 			.saturating_add(self.limit_mb.saturating_mul(1 << 20))
 	}
 
@@ -459,27 +459,36 @@ impl Memory {
 	fn exceeded(self) -> Exit {
 		Exit::Memory {
 			limit_mb: self.limit_mb,
-			interpreter_mb: self.interpreter.div_ceil(1 << 20),
+			idle_mb: self.idle.div_ceil(1 << 20),
 		}
 	}
 }
 
-/// An interpreter, and whether it runs sandboxed.
+/// An interpreter, whether it runs sandboxed, and the allowed imports loaded idle.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-type IdleKey = (String, bool);
+type IdleKey = (String, bool, Vec<String>);
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 type Idle = tokio::sync::OnceCell<u64>;
 
-/// What the student side takes idle — Python, the harness and a loaded module — per
-/// interpreter and isolation, measured once by the instrument that enforces the limit.
-/// A failed measurement is not kept: the next unit measures again.
+/// What the student side takes idle — Python, the harness, the allowed imports and a loaded
+/// module — per interpreter, isolation and set of allowed imports, measured once by the
+/// instrument that enforces the limit. A failed measurement is not kept: the next unit
+/// measures again.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 static IDLE_MEMORY: LazyLock<Mutex<std::collections::HashMap<IdleKey, Arc<Idle>>>> =
 	LazyLock::new(Default::default);
 
-/// The student whose idle memory is measured: it waits while the watch samples it.
+/// The student whose idle memory is measured: it imports what the teacher allows, as a
+/// student would, and waits while the watch samples it. A library that cannot load is
+/// skipped: it costs a student nothing either.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-const IDLE_SUBJECT: &str = "import time\n\ndef idle():\n    time.sleep(0.3)\n";
+fn idle_subject(imports: &[String]) -> String {
+	let names = serde_json::to_string(imports).expect("module names serialise");
+	format!(
+		"import time\n\nfor _name in {names}:\n    try:\n        __import__(_name)\n    \
+		 except Exception:\n        pass\n\n\ndef idle():\n    time.sleep(0.3)\n"
+	)
+}
 
 impl PythonExecutor {
 	/// A command for one side: confined when sandboxed, with a cleared environment, the
@@ -1128,7 +1137,7 @@ impl Executor for PythonExecutor {
 							.meta
 							.memory_mb
 							.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
-						interpreter: 0,
+						idle: 0,
 					},
 					INSPECT_BOUNDS,
 					false,
@@ -1163,7 +1172,10 @@ impl Executor for PythonExecutor {
 	}
 
 	async fn run(&self, plan: &UnitPlan) -> UnitObservation {
-		let interpreter = match self.idle_memory().await {
+		let idle = match self
+			.idle_memory(&plan.allowed_imports, plan.load_timeout)
+			.await
+		{
 			Ok(bytes) => bytes,
 			Err(e) => {
 				let mut obs = UnitObservation::not_started(Exit::Spawn(e));
@@ -1175,7 +1187,7 @@ impl Executor for PythonExecutor {
 			plan,
 			Memory {
 				limit_mb: plan.memory_mb,
-				interpreter,
+				idle,
 			},
 		)
 		.await
@@ -1184,31 +1196,53 @@ impl Executor for PythonExecutor {
 }
 
 impl PythonExecutor {
-	/// What the student side takes idle, in bytes: what `memory_mb` is counted beyond.
+	/// What the student side takes idle with `allowed_imports` loaded, in bytes: what
+	/// `memory_mb` is counted beyond.
 	#[cfg(any(target_os = "macos", target_os = "linux"))]
-	async fn idle_memory(&self) -> Result<u64, String> {
+	async fn idle_memory(
+		&self,
+		allowed_imports: &[String],
+		load_timeout: u64,
+	) -> Result<u64, String> {
+		let mut imports = allowed_imports.to_vec();
+		imports.sort();
+		imports.dedup();
+		if let Some(name) = imports
+			.iter()
+			.find(|n| !crate::spec_loader::is_module_name(n))
+		{
+			return Err(format!("allowed import '{name}' is not a module name"));
+		}
 		let cell = IDLE_MEMORY
 			.lock()
 			.expect("idle memory cache poisoned")
-			.entry((self.python_cmd.clone(), self.isolation.is_sandboxed()))
+			.entry((
+				self.python_cmd.clone(),
+				self.isolation.is_sandboxed(),
+				imports.clone(),
+			))
 			.or_default()
 			.clone();
-		cell.get_or_try_init(|| self.measure_idle_memory())
+		cell.get_or_try_init(|| self.measure_idle_memory(imports, load_timeout))
 			.await
 			.copied()
 	}
 
 	/// Nothing to count it by where the student side's memory is not watched.
 	#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-	async fn idle_memory(&self) -> Result<u64, String> {
+	async fn idle_memory(&self, _: &[String], _: u64) -> Result<u64, String> {
 		Ok(0)
 	}
 
 	#[cfg(any(target_os = "macos", target_os = "linux"))]
-	async fn measure_idle_memory(&self) -> Result<u64, String> {
+	async fn measure_idle_memory(
+		&self,
+		imports: Vec<String>,
+		load_timeout: u64,
+	) -> Result<u64, String> {
 		let dir = tempfile::tempdir().map_err(|e| format!("could not stage the idle unit: {e}"))?;
 		let file = dir.path().join("idle.py");
-		std::fs::write(&file, IDLE_SUBJECT)
+		std::fs::write(&file, idle_subject(&imports))
 			.map_err(|e| format!("could not stage the idle unit: {e}"))?;
 		let plan = UnitPlan {
 			subject: Subject::Student,
@@ -1221,8 +1255,8 @@ impl PythonExecutor {
 			bundle: dir.path().to_path_buf(),
 			shared: Vec::new(),
 			memory_mb: *crate::spec_loader::MEMORY_MB.end(),
-			allowed_imports: Vec::new(),
-			load_timeout: STARTUP_SECS,
+			allowed_imports: imports.clone(),
+			load_timeout: load_timeout.max(STARTUP_SECS),
 			setup: Vec::new(),
 			steps: vec![crate::runner::executor::CallPlan {
 				target: crate::models::Target::Function {
@@ -1238,7 +1272,7 @@ impl PythonExecutor {
 		};
 		let memory = Memory {
 			limit_mb: plan.memory_mb,
-			interpreter: 0,
+			idle: 0,
 		};
 		let (obs, peak) = self.observe(&plan, memory).await;
 		if let Exit::Spawn(e) = &obs.exit {
@@ -1250,7 +1284,7 @@ impl PythonExecutor {
 			});
 		if !idled || peak == 0 {
 			return Err(format!(
-				"could not measure what Python takes idle ({:?}): {}",
+				"could not measure what Python takes idle with {imports:?} ({:?}): {}",
 				obs.exit,
 				obs.stderr.trim()
 			));
@@ -1372,6 +1406,17 @@ impl Default for PythonExecutor {
 mod tests {
 	use super::*;
 	use crate::runner::executor::CallPlan;
+
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
+	#[test]
+	fn test_the_idle_student_imports_each_allowed_module_by_name() {
+		assert_eq!(
+			idle_subject(&["matplotlib.pyplot".into(), "numpy".into()]),
+			"import time\n\nfor _name in [\"matplotlib.pyplot\",\"numpy\"]:\n    try:\n        \
+			 __import__(_name)\n    except Exception:\n        pass\n\n\ndef idle():\n    \
+			 time.sleep(0.3)\n"
+		);
+	}
 
 	/// The CPU limit is derived from the unit's own deadline — never the fixed 30 s it used
 	/// to be, which a scenario of several long steps would outrun and be killed by.
