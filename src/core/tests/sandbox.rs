@@ -83,6 +83,14 @@ def run_program():
     # In place of this process: no fork, so no process limit stands in for the sandbox.
     return attempt(lambda: os.execv('/bin/echo', ['/bin/echo', 'escaped']))
 
+def link_native():
+    # The native-call module under a name of the student's own: its directory can be
+    # listed, though the module itself cannot be read.
+    sysconfig = importlib.import_module('sysconfig')
+    where = os.path.join(sysconfig.get_paths()['platstdlib'], 'lib-dynload')
+    name = next(n for n in os.listdir(where) if n.startswith('_ctypes'))
+    return attempt(lambda: os.link(os.path.join(where, name), 'mine.so'))
+
 def signal_grader():
     return attempt(lambda: os.kill(os.getppid(), 0))
 
@@ -142,6 +150,7 @@ impl Bench {
 			vars: Arc::new(BTreeMap::new()),
 			data_files: Vec::new(),
 			bundle: self.bundle.clone(),
+			shared: Vec::new(),
 			allowed_imports: Vec::new(),
 			load_timeout: 5,
 			setup: Vec::new(),
@@ -190,8 +199,9 @@ fn denied(probes: &[(String, String, String)], name: &str) {
 		assert!(!sandboxed.starts_with("ok"), "{name}: {sandboxed}");
 		return;
 	}
-	if name == "run program" {
-		// Unsandboxed, it replaces the process and never answers: no control to compare.
+	if name == "run program" || name == "native by another name" {
+		// Unsandboxed, the first replaces the process and never answers, and the second
+		// depends on where the interpreter lives: no control to compare.
 		assert_eq!(sandboxed, "PermissionError", "{name}: {sandboxed}");
 		return;
 	}
@@ -245,6 +255,9 @@ async fn test_the_student_side_reaches_only_its_own_directory() {
 	];
 	let mut sandboxed_only = vec![("run program", function("run_program", vec![]))];
 	if cfg!(target_os = "macos") {
+		sandboxed_only.push(("native by another name", function("link_native", vec![])));
+	}
+	if cfg!(target_os = "macos") {
 		// Seatbelt does not mediate reading another process's arguments and environment;
 		// refusing native calls is what keeps the grader's out of reach.
 		probes.push(("native calls", function("native", vec![])));
@@ -264,9 +277,10 @@ async fn test_the_student_side_reaches_only_its_own_directory() {
 	}
 	allowed(&results, "own directory");
 
-	let (name, probe) = sandboxed_only.remove(0);
-	let obs = PythonExecutor::new().run(&bench.plan(vec![probe])).await;
-	denied(&[(name.to_string(), said(&obs, 0), String::new())], name);
+	for (name, probe) in sandboxed_only {
+		let obs = PythonExecutor::new().run(&bench.plan(vec![probe])).await;
+		denied(&[(name.to_string(), said(&obs, 0), String::new())], name);
+	}
 }
 
 #[tokio::test]
@@ -318,4 +332,69 @@ async fn test_neither_side_sees_the_graders_environment() {
 			"step {index} saw {seen}"
 		);
 	}
+}
+
+/// A lint tool runs in the teacher's sandbox: it reads the submission's copy and the bundle,
+/// and not another student's work.
+#[test]
+fn test_a_lint_tool_reads_the_bundle_and_the_copy_and_nothing_else() {
+	use scriptmark_core::models::LintConfig;
+	use scriptmark_core::runner::linter::run_lint;
+	let bench = Bench::new();
+	let reading = |path: &Path| LintConfig {
+		// One finding line, if both reads succeed; a failed read exits 1, outside [0].
+		command: format!(
+			"sh -c 'cat \"$1\" > /dev/null && cat \"$2\" > /dev/null && echo finding' sh {{file}} {}",
+			path.display()
+		),
+		max_warnings: 10,
+		ok_exit_codes: vec![0],
+	};
+	let lint =
+		|config: &LintConfig, isolation| run_lint(config, &bench.student, &bench.bundle, isolation);
+	assert_eq!(
+		lint(&reading(&bench.answers), Isolation::Sandboxed),
+		Ok(90.0)
+	);
+	assert_eq!(
+		lint(&reading(&bench.other), Isolation::Unisolated),
+		Ok(90.0)
+	);
+	let refused = lint(&reading(&bench.other), Isolation::Sandboxed).unwrap_err();
+	assert!(refused.contains("exited with"), "{refused}");
+}
+
+/// A Python checker script runs in the teacher's sandbox too, with a cleared environment.
+#[test]
+fn test_a_python_checker_script_reads_the_bundle_and_nothing_else() {
+	use scriptmark_core::checker::python_checker::PythonChecker;
+	use scriptmark_core::checker::{CheckInput, Checker};
+	let bench = Bench::new();
+	let script = write(
+		&bench.bundle,
+		"verify.py",
+		&format!(
+			"import json, os, sys\njson.load(sys.stdin)\ndef can(path):\n    try:\n        open(path).read()\n        return 'yes'\n    except OSError:\n        return 'no'\nbundle, other = can({:?}), can({:?})\nprint(json.dumps({{'pass': True, 'message': f'bundle={{bundle}} other={{other}} env={{sorted(os.environ)}}'}}))\n",
+			bench.answers, bench.other
+		),
+	);
+	let input = CheckInput {
+		result: json!(1),
+		expected: json!(1),
+		context: json!({}),
+	};
+	let message = |checker: PythonChecker| checker.check(&input).unwrap().message;
+	let python = PythonExecutor::new().python_cmd().to_string();
+	let open = message(PythonChecker::new(&script).with_python_cmd(&python));
+	let confined = message(
+		PythonChecker::new(&script)
+			.with_python_cmd(&python)
+			.confined(vec![bench.bundle.clone()]),
+	);
+	assert!(open.starts_with("bundle=yes other=yes"), "{open}");
+	assert!(confined.starts_with("bundle=yes other=no"), "{confined}");
+	assert!(
+		!confined.contains("CARGO"),
+		"the environment is cleared: {confined}"
+	);
 }

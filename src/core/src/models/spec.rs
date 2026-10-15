@@ -568,6 +568,13 @@ pub struct TestMeta {
 	#[serde(default)]
 	pub data_files: Vec<String>,
 
+	/// Teacher modules whose classes cross between the two sides of a unit by value. Each
+	/// is copied beside the student's file, where student code imports it without an
+	/// `allowed_imports` entry, and the teacher side imports its own copy from the bundle:
+	/// an instance one side sends is rebuilt from the other side's copy of its class.
+	#[serde(default)]
+	pub shared: Vec<String>,
+
 	/// Refused: every case now has its own process.
 	#[serde(default)]
 	pub copy_refs: Option<bool>,

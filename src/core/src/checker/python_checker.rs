@@ -1,5 +1,5 @@
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -13,10 +13,16 @@ use super::{CheckError, CheckInput, CheckOutput, Checker};
 ///
 /// The script's existence is checked when the spec loads, so a script that then times out,
 /// crashes or prints no verdict did so on this student's value: the answer is rejected.
+///
+/// It runs with a cleared environment and a private directory for its working directory,
+/// `HOME` and `TMPDIR`; confined, in the teacher's sandbox, it reads only its interpreter
+/// and the places it is given — the test bundle — and writes only that directory.
 pub struct PythonChecker {
 	pub script_path: PathBuf,
 	pub python_cmd: String,
 	pub timeout_secs: u64,
+	/// What it may read besides its interpreter, when it runs in the teacher's sandbox.
+	pub confined: Option<Vec<PathBuf>>,
 }
 
 impl PythonChecker {
@@ -25,12 +31,48 @@ impl PythonChecker {
 			script_path: script_path.into(),
 			python_cmd: "python3".to_string(),
 			timeout_secs: 10,
+			confined: None,
 		}
 	}
 
 	pub fn with_python_cmd(mut self, cmd: impl Into<String>) -> Self {
 		self.python_cmd = cmd.into();
 		self
+	}
+
+	/// Run in the teacher's sandbox, reading `read` besides the interpreter.
+	pub fn confined(mut self, read: Vec<PathBuf>) -> Self {
+		self.confined = Some(read);
+		self
+	}
+
+	fn command(&self, scratch: &Path) -> Result<Command, String> {
+		let mut cmd = match &self.confined {
+			Some(read) => {
+				let confinement = crate::runner::python::teacher_confinement(
+					&self.python_cmd,
+					read.clone(),
+					vec![scratch.to_path_buf()],
+					false,
+				)?;
+				crate::runner::sandbox::confined(Path::new(&self.python_cmd), &confinement)?
+			}
+			None => Command::new(&self.python_cmd),
+		};
+		cmd.env_clear()
+			.env("PATH", "/usr/bin:/usr/local/bin:/opt/homebrew/bin")
+			.env("HOME", scratch)
+			.env("TMPDIR", scratch)
+			.current_dir(scratch)
+			// No user site-packages and no bytecode beside the script; the script's own
+			// directory stays on sys.path, for the helpers beside it.
+			.args(["-s", "-B"])
+			.arg(&self.script_path);
+		#[cfg(windows)]
+		if let Some(root) = std::env::var_os("SYSTEMROOT") {
+			cmd.env("SYSTEMROOT", root);
+		}
+		Ok(cmd)
 	}
 }
 
@@ -40,61 +82,34 @@ impl Checker for PythonChecker {
 		let input_json = serde_json::to_string(input)
 			.map_err(|e| CheckError::environment(format!("could not encode checker input: {e}")))?;
 
-		let mut child = Command::new(&self.python_cmd)
-			.arg(&self.script_path)
-			.stdin(Stdio::piped())
-			.stdout(Stdio::piped())
-			.stderr(Stdio::piped())
-			.spawn()
+		let scratch = tempfile::Builder::new()
+			.prefix("scriptmark-check-")
+			.tempdir()
+			.and_then(|dir| std::fs::canonicalize(dir.path()).map(|path| (dir, path)))
 			.map_err(|e| {
-				CheckError::environment(format!("could not start checker '{script}': {e}"))
+				CheckError::environment(format!("could not stage checker '{script}': {e}"))
 			})?;
-
-		// Write and read on their own threads: a checker that ignores its input, or prints
-		// more than a pipe holds, must not wedge the grader until the timeout.
-		if let Some(mut stdin) = child.stdin.take() {
-			std::thread::spawn(move || {
-				// A checker that exits without reading its input closes the pipe; its output decides.
-				let _ = stdin.write_all(input_json.as_bytes());
-			});
-		}
-		let drain = |pipe: Option<Box<dyn Read + Send>>| {
-			std::thread::spawn(move || {
-				let mut buf = String::new();
-				if let Some(mut pipe) = pipe {
-					let _ = pipe.read_to_string(&mut buf);
-				}
-				buf
-			})
-		};
-		let stdout = drain(
-			child
-				.stdout
-				.take()
-				.map(|p| Box::new(p) as Box<dyn Read + Send>),
-		);
-		let stderr = drain(
-			child
-				.stderr
-				.take()
-				.map(|p| Box::new(p) as Box<dyn Read + Send>),
-		);
-
-		let status = child
-			.wait_timeout(Duration::from_secs(self.timeout_secs))
-			.map_err(|e| CheckError::environment(format!("lost checker '{script}': {e}")))?;
-		let Some(status) = status else {
-			let _ = child.kill();
-			let _ = child.wait();
+		let cmd = self.command(&scratch.1).map_err(|e| {
+			CheckError::environment(format!("cannot sandbox checker '{script}': {e}"))
+		})?;
+		let ran = run_with_timeout(
+			cmd,
+			Some(input_json),
+			Duration::from_secs(self.timeout_secs),
+		)
+		.map_err(|e| CheckError::environment(format!("could not start checker '{script}': {e}")))?;
+		let Some(Ran {
+			status,
+			stdout,
+			stderr,
+		}) = ran
+		else {
 			return Err(CheckError::student(format!(
 				"checker '{script}' timed out after {}s",
 				self.timeout_secs
 			)));
 		};
-
-		let stdout = stdout.join().unwrap_or_default();
 		if !status.success() && stdout.trim().is_empty() {
-			let stderr = stderr.join().unwrap_or_default();
 			return Err(CheckError::student(format!(
 				"checker '{script}' exited with {status}: {}",
 				stderr.trim()
@@ -107,6 +122,69 @@ impl Checker for PythonChecker {
 			))
 		})
 	}
+}
+
+/// What a finished tool left: how it ended, and what it printed.
+pub(crate) struct Ran {
+	pub status: std::process::ExitStatus,
+	pub stdout: String,
+	pub stderr: String,
+}
+
+/// Run `cmd` with `stdin` written to it, killing it at `timeout`: `None` then. Its input is
+/// written and its output read on their own threads, so a tool that ignores its input, or
+/// prints more than a pipe holds, cannot wedge the grader until the timeout.
+pub(crate) fn run_with_timeout(
+	mut cmd: Command,
+	stdin: Option<String>,
+	timeout: Duration,
+) -> std::io::Result<Option<Ran>> {
+	let mut child = cmd
+		.stdin(if stdin.is_some() {
+			Stdio::piped()
+		} else {
+			Stdio::null()
+		})
+		.stdout(Stdio::piped())
+		.stderr(Stdio::piped())
+		.spawn()?;
+	if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+		std::thread::spawn(move || {
+			// A tool that exits without reading its input closes the pipe; its output decides.
+			let _ = pipe.write_all(text.as_bytes());
+		});
+	}
+	let drain = |pipe: Option<Box<dyn Read + Send>>| {
+		std::thread::spawn(move || {
+			let mut buf = String::new();
+			if let Some(mut pipe) = pipe {
+				let _ = pipe.read_to_string(&mut buf);
+			}
+			buf
+		})
+	};
+	let stdout = drain(
+		child
+			.stdout
+			.take()
+			.map(|p| Box::new(p) as Box<dyn Read + Send>),
+	);
+	let stderr = drain(
+		child
+			.stderr
+			.take()
+			.map(|p| Box::new(p) as Box<dyn Read + Send>),
+	);
+	let Some(status) = child.wait_timeout(timeout)? else {
+		let _ = child.kill();
+		let _ = child.wait();
+		return Ok(None);
+	};
+	Ok(Some(Ran {
+		status,
+		stdout: stdout.join().unwrap_or_default(),
+		stderr: stderr.join().unwrap_or_default(),
+	}))
 }
 
 // wait_timeout is not in std — implement using a thread

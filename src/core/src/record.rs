@@ -619,6 +619,7 @@ fn sources(spec: &TestSpec) -> Result<BTreeMap<String, String>, String> {
 		.map(|p| spec.dir.join(p))
 		.collect();
 	let mut python: BTreeSet<PathBuf> = spec.meta.imports.iter().map(PathBuf::from).collect();
+	python.extend(spec.meta.shared.iter().map(|p| spec.dir.join(p)));
 	for case in spec
 		.cases
 		.iter()

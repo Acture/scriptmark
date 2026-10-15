@@ -72,6 +72,12 @@ impl Contract {
 		let mut paths: BTreeSet<String> = spec.meta.imports.iter().cloned().collect();
 		paths.extend(
 			spec.meta
+				.shared
+				.iter()
+				.map(|p| spec.dir.join(p).to_string_lossy().into_owned()),
+		);
+		paths.extend(
+			spec.meta
 				.data_files
 				.iter()
 				.map(|p| spec.dir.join(p).to_string_lossy().into_owned()),

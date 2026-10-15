@@ -56,6 +56,9 @@ pub struct UnitPlan {
 	pub data_files: Vec<(PathBuf, String)>,
 	/// The test bundle's directory: what teacher code may read, besides its own modules.
 	pub bundle: PathBuf,
+	/// Shared modules, as `(source in the bundle, relative destination)`: staged beside the
+	/// student's file, and imported by the teacher side from the bundle.
+	pub shared: Vec<(PathBuf, String)>,
 	pub allowed_imports: Vec<String>,
 	pub load_timeout: u64,
 	pub setup: Vec<CallPlan>,
@@ -140,6 +143,9 @@ pub struct Export {
 	/// The parameters, when the export is callable and introspectable.
 	#[serde(default)]
 	pub params: Option<Vec<Param>>,
+	/// A path into the test bundle: teacher code may open it, student code cannot.
+	#[serde(default)]
+	pub bundle_path: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

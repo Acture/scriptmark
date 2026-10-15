@@ -652,8 +652,10 @@ expect = 2
 #[tokio::test]
 async fn test_setup_runs_once_per_unit_and_once_per_scenario() {
 	let bench = Bench::new();
-	let unit_log = bench.path().join("unit.log");
-	let scenario_log = bench.path().join("scenario.log");
+	// Outside the bundle: a path into it is refused before it reaches student code.
+	let logs = tempfile::tempdir().unwrap();
+	let unit_log = logs.path().join("unit.log");
+	let scenario_log = logs.path().join("scenario.log");
 	let spec = bench.spec(&format!(
 		r#"
 [meta]
@@ -1406,4 +1408,60 @@ impl TapImports for TestSpec {
 			.push(bench.path().join(path).to_string_lossy().into_owned());
 		self
 	}
+}
+
+/// OSS-10: student code cannot read the bundle, so a path into it handed to student code
+/// is refused before anyone is graded — whether a [vars] entry, an argument, or a teacher
+/// module's constant — and `data_files` is the way to give the student a file.
+#[tokio::test]
+async fn test_a_path_into_the_bundle_is_never_handed_to_student_code() {
+	let bench = Bench::new();
+	let data = bench.write("data/numbers.txt", "1 2 3\n");
+	bench.write(
+		"helpers/paths.py",
+		"from pathlib import Path\nDATA = Path(__file__).parent.parent / 'data' / 'numbers.txt'\nNAME = 'numbers.txt'\n",
+	);
+	let spec = |body: &str| {
+		bench.spec(&format!(
+			"[meta]\nname = \"t\"\nfile = \"lab.py\"\nfunction = \"f\"\nlanguage = \"python\"\nimports = [\"helpers/paths.py\"]\ndata_files = [\"data\"]\n{body}"
+		))
+	};
+	let path = data.to_string_lossy().into_owned();
+	// A file the student would write, which does not exist yet, through the same links
+	// (`/var` is `/private/var` on macOS).
+	let unborn = bench.path().join("out.log").to_string_lossy().into_owned();
+	for (body, wanted) in [
+		(
+			format!("[vars]\nOUT = {unborn:?}\n[[cases]]\nname = \"x\"\nexpect = 1\n"),
+			"[vars] 'OUT'",
+		),
+		(
+			format!("[vars]\nINPUT = {path:?}\n[[cases]]\nname = \"x\"\nexpect = 1\n"),
+			"[vars] 'INPUT'",
+		),
+		(
+			format!("[[cases]]\nname = \"x\"\nargs = [{path:?}]\nexpect = 1\n"),
+			"case 'x'",
+		),
+		(
+			"[[cases]]\nname = \"x\"\nargs = [\"$DATA\"]\nexpect = 1\n".to_string(),
+			"case 'x': '$DATA' is a path into the test bundle",
+		),
+	] {
+		let refused = refusal(spec(&body)).await;
+		assert!(refused.contains(wanted), "{refused}");
+		assert!(refused.contains("data_files"), "{refused}");
+	}
+
+	// Staged by data_files and named relatively, the same file is the student's to read.
+	let spec = spec(
+		"[vars]\nINPUT = \"data/numbers.txt\"\n[[cases]]\nname = \"x\"\nargs = [\"$NAME\"]\nexpect = 6\n",
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def f(name):\n    with open(INPUT) as fh:\n        return sum(int(n) for n in fh.read().split())\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	assert_eq!(results[0].total_passed(), 1, "{:#?}", results[0]);
 }

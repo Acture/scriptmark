@@ -18,6 +18,7 @@ use crate::runner::executor::{
 	CallObservation, CheckObservation, Exit, Outcome, Phase, ProtocolError, StopReason, Stopped,
 	UnitObservation, UnitPlan,
 };
+use crate::runner::sandbox::Isolation;
 
 /// A scored call: the name its result is reported under, and what it expects.
 #[derive(Debug, Clone, Copy)]
@@ -36,12 +37,26 @@ struct Blanket {
 }
 
 /// Judge one unit. `scored[i]` is `plan.steps[i]` — or, in script mode, the script run.
+/// How the teacher's Python checker scripts run.
+#[derive(Debug, Clone, Copy)]
+struct Scripts<'a> {
+	python: &'a str,
+	isolation: Isolation,
+	bundle: &'a std::path::Path,
+}
+
 pub fn judge(
 	plan: &UnitPlan,
 	scored: &[Scored],
 	obs: &UnitObservation,
 	python_cmd: &str,
+	isolation: Isolation,
 ) -> Vec<CaseResult> {
+	let scripts = Scripts {
+		python: python_cmd,
+		isolation,
+		bundle: &plan.bundle,
+	};
 	let target = |index: usize| plan.steps.get(index).map(|c| target_name(&c.target));
 	if let Some(blanket) = unit_failure(plan, obs) {
 		return scored
@@ -94,7 +109,7 @@ pub fn judge(
 					record,
 					check,
 					plan.script.is_some(),
-					python_cmd,
+					scripts,
 				));
 			}
 			None => {
@@ -589,7 +604,7 @@ fn judge_call(
 	record: &CallObservation,
 	check: Option<&CheckObservation>,
 	script: bool,
-	python_cmd: &str,
+	scripts: Scripts,
 ) -> CaseResult {
 	let case = s.case;
 	let mut verdict = Verdict {
@@ -671,7 +686,7 @@ fn judge_call(
 							case.expected_stdout.clone().map(Value::String),
 							record,
 							check,
-							python_cmd,
+							scripts,
 						) {
 						return failed;
 					}
@@ -714,15 +729,9 @@ fn judge_call(
 			} else {
 				(value.clone(), case.expect.clone())
 			};
-			if let Some(failed) = check_value(
-				&mut verdict,
-				case,
-				&value,
-				expected,
-				record,
-				check,
-				python_cmd,
-			) {
+			if let Some(failed) =
+				check_value(&mut verdict, case, &value, expected, record, check, scripts)
+			{
 				return failed;
 			}
 		}
@@ -779,7 +788,7 @@ fn check_value(
 	expected: Option<Value>,
 	record: &CallObservation,
 	check: Option<&CheckObservation>,
-	python_cmd: &str,
+	scripts: Scripts,
 ) -> Option<CaseResult> {
 	let take = |verdict: &mut Verdict| {
 		std::mem::replace(
@@ -852,7 +861,17 @@ fn check_value(
 				}
 				Check::Rhai(expr) => Box::new(RhaiChecker::new(expr)),
 				Check::Python(script) => {
-					Box::new(PythonChecker::new(script).with_python_cmd(python_cmd))
+					let checker = PythonChecker::new(script).with_python_cmd(scripts.python);
+					Box::new(if scripts.isolation.is_sandboxed() {
+						let beside = std::path::Path::new(script).parent().map(Into::into);
+						checker.confined(
+							std::iter::once(scripts.bundle.to_path_buf())
+								.chain(beside)
+								.collect(),
+						)
+					} else {
+						checker
+					})
 				}
 				Check::Function(_) => unreachable!("handled above"),
 			};
@@ -913,6 +932,7 @@ mod tests {
 			vars: Arc::new(BTreeMap::new()),
 			data_files: Vec::new(),
 			bundle: std::path::PathBuf::new(),
+			shared: Vec::new(),
 			allowed_imports: Vec::new(),
 			load_timeout: 10,
 			setup: Vec::new(),
@@ -982,7 +1002,14 @@ mod tests {
 	}
 
 	fn one(case: &TestCase, plan: &UnitPlan, obs: &UnitObservation) -> CaseResult {
-		judge(plan, &[Scored { name: "c", case }], obs, "python3").remove(0)
+		judge(
+			plan,
+			&[Scored { name: "c", case }],
+			obs,
+			"python3",
+			Isolation::Sandboxed,
+		)
+		.remove(0)
 	}
 
 	fn verdict(r: &CaseResult) -> (TestStatus, Option<Fault>, Option<Cause>) {
@@ -1227,7 +1254,7 @@ mod tests {
 			message: "the student side ended".into(),
 		});
 		obs.exit = Exit::Signal(libc::SIGXCPU);
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(r[0].status, TestStatus::Passed);
 		assert_eq!(
 			verdict(&r[1]),
@@ -1243,14 +1270,14 @@ mod tests {
 		);
 
 		obs.exit = Exit::Signal(libc::SIGSEGV);
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::Killed))
 		);
 
 		obs.exit = Exit::Memory;
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory))
@@ -1262,7 +1289,7 @@ mod tests {
 
 		// A step that answered too much, or nonsense, is the student's.
 		obs.stopped.as_mut().unwrap().reason = StopReason::Flooded;
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(
@@ -1285,7 +1312,7 @@ mod tests {
 			message: String::new(),
 		});
 		late.exit = Exit::Stopped;
-		let r = judge(&p, &scored, &late, "python3");
+		let r = judge(&p, &scored, &late, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(
@@ -1309,7 +1336,7 @@ mod tests {
 		let mut lost = finished(vec![record(0, returned(json!(1)))]);
 		lost.done = false;
 		lost.teacher_exit = Exit::Signal(libc::SIGKILL);
-		let r = judge(&p, &scored, &lost, "python3");
+		let r = judge(&p, &scored, &lost, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(
@@ -1320,7 +1347,7 @@ mod tests {
 		);
 		// ...but unsandboxed, student code could have signalled it.
 		lost.sandboxed = false;
-		let r = judge(&p, &scored, &lost, "python3");
+		let r = judge(&p, &scored, &lost, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(
@@ -1531,7 +1558,7 @@ mod tests {
 			let mut obs = finished(vec![record(0, returned(json!(1)))]);
 			obs.done = false;
 			broke(&mut obs);
-			let r = judge(&p, &scored, &obs, "python3");
+			let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 			assert_eq!(r[0].status, TestStatus::Passed, "an earlier pass stands");
 			assert_eq!(
 				verdict(&r[1]),
@@ -1691,7 +1718,7 @@ mod tests {
 		let mut obs = finished(vec![record(0, returned(json!(1)))]);
 		obs.done = false;
 		obs.protocol_error = Some(ProtocolError::Flooded("a record of 64 MiB".into()));
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(r[0].status, TestStatus::Passed);
 		assert_eq!(
 			verdict(&r[1]),

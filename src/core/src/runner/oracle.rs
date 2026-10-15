@@ -37,6 +37,12 @@ pub async fn resolve_oracle<E: Executor>(
 				.map(|rel| (spec.dir.join(rel), rel.clone()))
 				.collect(),
 			bundle: spec.dir.clone(),
+			shared: spec
+				.meta
+				.shared
+				.iter()
+				.map(|rel| (spec.dir.join(rel), rel.clone()))
+				.collect(),
 			allowed_imports: spec.meta.allowed_imports.clone(),
 			load_timeout: timeout_secs,
 			setup: Vec::new(),

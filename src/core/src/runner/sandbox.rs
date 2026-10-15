@@ -10,7 +10,6 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
 /// Resource limits for student code execution.
 ///
@@ -28,11 +27,16 @@ pub struct SandboxConfig {
 	/// Max open file descriptors (RLIMIT_NOFILE). Default: 64.
 	pub nofile: u64,
 	/// Max processes for this UID (RLIMIT_NPROC). Default: 64.
-	/// It counts every process of the user — and on Linux every thread — so on a busy
-	/// machine it refuses even a thread. A sandboxed unit cannot start processes at all,
-	/// and leaves it unset (`None`).
+	/// It counts every process of the user — and on Linux every thread — so a low cap
+	/// refuses even a thread on a busy machine. A sandboxed unit cannot start processes at
+	/// all, so its cap only stops a runaway of threads, and sits far higher
+	/// (`CONFINED_NPROC`); the harness itself starts none.
 	pub nproc: Option<u64>,
 }
+
+/// The per-user process cap of a confined unit: room for a busy desktop's own threads, and
+/// a stop to a student's thread bomb.
+pub const CONFINED_NPROC: u64 = 4096;
 
 impl Default for SandboxConfig {
 	fn default() -> Self {
@@ -52,7 +56,7 @@ impl Default for SandboxConfig {
 /// in the forked child process before exec, so it only affects the
 /// student Python process.
 #[cfg(unix)]
-pub fn apply_sandbox(cmd: &mut Command, config: &SandboxConfig) {
+pub fn apply_sandbox(cmd: &mut tokio::process::Command, config: &SandboxConfig) {
 	let cpu = config.cpu_secs;
 	#[cfg(not(target_os = "macos"))]
 	let mem = config.mem_mb * 1024 * 1024;
@@ -151,8 +155,33 @@ pub fn available() -> Result<(), String> {
 }
 
 /// A command that runs `program` held to `confinement`. Its arguments are the caller's to add.
-pub fn confined(program: &Path, confinement: &Confinement) -> Result<Command, String> {
+pub fn confined(
+	program: &Path,
+	confinement: &Confinement,
+) -> Result<std::process::Command, String> {
 	platform::command(program, confinement)
+}
+
+/// Where the operating system keeps the programs a teacher's tool may run, and what they
+/// read: never a home directory.
+pub fn system_programs() -> Vec<PathBuf> {
+	#[cfg(target_os = "macos")]
+	let places = [
+		"/usr",
+		"/bin",
+		"/sbin",
+		"/System",
+		"/Library/Frameworks",
+		"/private/etc",
+		"/private/var/db/timezone",
+	]
+	.as_slice();
+	#[cfg(not(target_os = "macos"))]
+	let places = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"].as_slice();
+	places
+		.iter()
+		.filter_map(|p| std::fs::canonicalize(p).ok())
+		.collect()
 }
 
 /// The program the kernel loads to start `executable`: its ELF interpreter, which a
@@ -222,8 +251,8 @@ mod platform {
 		))
 	}
 
-	pub fn command(program: &Path, c: &Confinement) -> Result<Command, String> {
-		let mut cmd = Command::new(SANDBOX_EXEC);
+	pub fn command(program: &Path, c: &Confinement) -> Result<std::process::Command, String> {
+		let mut cmd = std::process::Command::new(SANDBOX_EXEC);
 		cmd.arg("-p").arg(profile(c)?).arg(program);
 		Ok(cmd)
 	}
@@ -288,6 +317,15 @@ mod platform {
 				r#"(deny file-read* (regex #"/_ctypes[^/]*\.so$") (regex #"/_cffi_backend[^/]*\.so$"))"#
 					.into(),
 			);
+			// Nor by another name: no hard link to the library, and no native code loaded
+			// from anywhere it can write.
+			rules.push("(deny file-link)".into());
+			if !c.write.is_empty() {
+				rules.push(format!(
+					"(deny file-map-executable {})",
+					subpaths(&c.write)?
+				));
+			}
 		}
 		Ok(rules.join("\n"))
 	}
@@ -344,12 +382,13 @@ mod platform {
 		abi().map(|_| ())
 	}
 
-	pub fn command(program: &Path, c: &Confinement) -> Result<Command, String> {
+	pub fn command(program: &Path, c: &Confinement) -> Result<std::process::Command, String> {
+		use std::os::unix::process::CommandExt;
 		let abi = abi()?;
 		let ruleset = landlock_ruleset(abi, c).map_err(|e| format!("Landlock: {e}"))?;
 		// Signals and abstract sockets are Landlock's from ABI 6; before it, seccomp's.
 		let filters = filters(c, abi < ABI::V6)?;
-		let mut cmd = Command::new(program);
+		let mut cmd = std::process::Command::new(program);
 		let mut ruleset = Some(ruleset);
 		// SAFETY: between fork and exec this only makes the syscalls that apply a prepared
 		// ruleset and prepared filters; nothing is allocated unless one fails.
@@ -553,10 +592,30 @@ mod platform {
 		// `clone3` takes its flags by pointer, where a filter cannot look: refuse it as
 		// unknown, and the C library falls back to `clone`.
 		let clone3 = BTreeMap::from([(libc::SYS_clone3, Vec::new())]);
-		Ok(vec![
-			build(denied, libc::EPERM)?,
-			build(clone3, libc::ENOSYS)?,
-		])
+		let mut filters = vec![build(denied, libc::EPERM)?, build(clone3, libc::ENOSYS)?];
+		#[cfg(target_arch = "x86_64")]
+		filters.push(no_x32());
+		Ok(filters)
+	}
+
+	/// The x32 calling convention numbers every syscall again, past `0x40000000`: a filter
+	/// keyed on the x86-64 numbers would let them through, so they are refused outright.
+	#[cfg(target_arch = "x86_64")]
+	fn no_x32() -> BpfProgram {
+		use seccompiler::sock_filter;
+		const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+		const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+		const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+		const LOAD_NR: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS, at seccomp_data.nr
+		const JUMP_GE: u16 = 0x35; // BPF_JMP | BPF_JGE | BPF_K
+		const RETURN: u16 = 0x06; // BPF_RET | BPF_K
+		let op = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+		vec![
+			op(LOAD_NR, 0, 0, 0),
+			op(JUMP_GE, 0, 1, X32_SYSCALL_BIT),
+			op(RETURN, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+			op(RETURN, 0, 0, SECCOMP_RET_ALLOW),
+		]
 	}
 }
 
@@ -568,7 +627,7 @@ mod platform {
 		Err("ScriptMark cannot sandbox student code on this platform yet".into())
 	}
 
-	pub fn command(_program: &Path, _c: &Confinement) -> Result<Command, String> {
+	pub fn command(_program: &Path, _c: &Confinement) -> Result<std::process::Command, String> {
 		Err(available().unwrap_err())
 	}
 }

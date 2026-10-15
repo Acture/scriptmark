@@ -341,6 +341,22 @@ def load_teacher_modules():
 	return exports, duplicates
 
 
+def into_bundle(value):
+	"""Whether `value` is an absolute path into the test bundle, which only teacher code can
+	open: student code gets data through `data_files`, by a path relative to it."""
+	bundle = PAYLOAD.get("bundle")
+	if not bundle or not isinstance(value, (str, os.PathLike)):
+		return False
+	try:
+		path = os.fspath(value)
+		if not isinstance(path, str) or not os.path.isabs(path):
+			return False
+		path, bundle = os.path.realpath(path), os.path.realpath(bundle)
+	except (TypeError, ValueError, OSError):
+		return False
+	return path == bundle or path.startswith(bundle.rstrip(os.sep) + os.sep)
+
+
 def _same(a, b):
 	"""One object, or two equal ones: two modules that both define `TOL = 1e-6` agree."""
 	if a is b:
@@ -469,7 +485,7 @@ def run_check(check, value, stdout, timeout, student):
 			continue
 		if name == "stdout":
 			deps[name] = stdout
-		elif name == "source" and SOURCE is not None and name not in context and name not in held:
+		elif name == "source":
 			deps[name] = SOURCE
 		elif name in context:
 			deps[name] = context[name]
@@ -719,7 +735,11 @@ def main():
 		finish()
 	if PAYLOAD["mode"] == "inspect":
 		emit({"kind": "inspect", "duplicates": duplicates, "exports": {
-			name: {"callable": callable(value), "params": params_of(value) if callable(value) else None}
+			name: {
+				"callable": callable(value),
+				"params": params_of(value) if callable(value) else None,
+				"bundle_path": not callable(value) and into_bundle(value),
+			}
 			for name, value in exports.items()
 		}})
 		finish()

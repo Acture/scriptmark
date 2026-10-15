@@ -53,6 +53,7 @@ fn unit(file: &Path) -> UnitPlan {
 		vars: Arc::new(BTreeMap::new()),
 		data_files: Vec::new(),
 		bundle: file.parent().unwrap().to_path_buf(),
+		shared: Vec::new(),
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
 		setup: Vec::new(),
@@ -1134,4 +1135,148 @@ async fn test_teacher_values_cross_by_value_and_student_values_are_read_when_che
 	assert_eq!(returned(&obs.steps[0].outcome), &json!(2), "{obs:?}");
 	assert_eq!(obs.checks[&0], pass("the teacher still holds ['teacher']"));
 	assert_eq!(obs.checks[&2], pass("balance 30"));
+}
+
+const COMMON: &str = "class ListNode:\n    def __init__(self, value, next=None):\n        self.value = value\n        self.next = next\n\n    def length(self):\n        n, node, seen = 0, self, set()\n        while node is not None and id(node) not in seen:\n            seen.add(id(node))\n            n += 1\n            node = node.next\n        return n\n";
+
+/// A shared class crosses by value both ways, rebuilt from the receiving side's own copy:
+/// the teacher's checker gets the teacher's class, cycles and all, and what a student does
+/// to their copy stays on their side.
+#[tokio::test]
+async fn test_shared_classes_cross_by_value_into_each_sides_own_copy() {
+	let dir = tempfile::tempdir().unwrap();
+	let common = write(dir.path(), "common.py", COMMON);
+	let teacher = write(
+		dir.path(),
+		"teacher.py",
+		"from common import ListNode\n\ndef is_ring(result, expected):\n    assert type(result) is ListNode, type(result)\n    assert result.next.next is result, 'the cycle survives'\n    return result.length() == 2\n\ndef make():\n    return ListNode(1, ListNode(2))\n\ndef base(result, expected):\n    return type(result) is ListNode and result.length() == 1, f'{type(result)} {result.length()}'\n",
+	);
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"from common import ListNode\n\nclass Mine(ListNode):\n    def length(self):\n        return -1\n\ndef ring():\n    a, b = ListNode(1), ListNode(2)\n    a.next, b.next = b, a\n    return a\n\ndef sub():\n    return Mine(9)\n\ndef walk(head):\n    return [isinstance(head, ListNode), head.value, head.next.value, head.length()]\n\ndef tamper():\n    ListNode.length = lambda self: 42\n    return ListNode(5)\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.shared = vec![(common, "common.py".into())];
+	let checked = |name: &str, check: &str| {
+		let mut c = function(name, vec![]);
+		c.check = Some(InProcessCheck {
+			function: check.into(),
+			expected: None,
+		});
+		c
+	};
+	let mut made = call(
+		Target::Teacher {
+			name: "make".into(),
+		},
+		vec![],
+	);
+	made.id = Some("made".into());
+	plan.setup = vec![made];
+	plan.steps = vec![
+		checked("ring", "is_ring"),
+		checked("sub", "base"),
+		function("walk", vec![json!("$made")]),
+		checked("tamper", "base"),
+	];
+	let obs = run(&plan).await;
+	let pass = CheckObservation::Verdict {
+		pass: true,
+		message: String::new(),
+	};
+	assert_eq!(obs.checks[&0], pass, "{obs:?}");
+	assert!(
+		matches!(
+			&obs.checks[&1],
+			CheckObservation::Verdict { pass: true, .. }
+		),
+		"a student subclass arrives as the shared base: {:?}",
+		obs.checks[&1]
+	);
+	assert_eq!(
+		returned(&obs.steps[2].outcome),
+		&json!([true, 1, 2, 2]),
+		"the teacher's list arrives as the student's own class"
+	);
+	assert!(
+		matches!(
+			&obs.checks[&3],
+			CheckObservation::Verdict { pass: true, .. }
+		),
+		"the student's patch stays on the student's side: {:?}",
+		obs.checks[&3]
+	);
+}
+
+/// A shared module imports without an `allowed_imports` entry, and a student file that
+/// shares its name with a teacher module never stands in for it.
+#[tokio::test]
+async fn test_a_shared_module_is_allowed_and_namespaces_stay_apart() {
+	let dir = tempfile::tempdir().unwrap();
+	let common = write(dir.path(), "bundle/common.py", COMMON);
+	write(dir.path(), "bundle/helper.py", "WHO = 'teacher'\n");
+	let teacher = write(
+		dir.path(),
+		"bundle/teacher.py",
+		"import helper\n\ndef who(result, expected):\n    return helper.WHO == 'teacher', helper.WHO\n",
+	);
+	let student = write(
+		dir.path(),
+		"submission/helper.py",
+		"import common\nWHO = 'student'\n\ndef f():\n    return common.ListNode(1).length()\n",
+	);
+	let mut plan = unit(&student);
+	plan.bundle = dir.path().join("bundle");
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.shared = vec![(common, "common.py".into())];
+	let mut f = function("f", vec![]);
+	f.check = Some(InProcessCheck {
+		function: "who".into(),
+		expected: None,
+	});
+	plan.steps = vec![f];
+	let obs = run(&plan).await;
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(1), "{obs:?}");
+	assert_eq!(
+		obs.checks[&0],
+		CheckObservation::Verdict {
+			pass: true,
+			message: "teacher".into()
+		}
+	);
+}
+
+/// A checker may take the student's source, to judge it with `ast`.
+#[tokio::test]
+async fn test_a_checker_can_read_the_students_source() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def f(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"import ast\n\ndef no_sum(result, expected, source):\n    calls = [n.func.id for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]\n    return 'sum' not in calls and result == expected, f'calls {calls}'\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut f = function("f", vec![json!([1, 2, 3])]);
+	f.check = Some(InProcessCheck {
+		function: "no_sum".into(),
+		expected: Some(json!(6)),
+	});
+	plan.steps = vec![f];
+	let obs = run(&plan).await;
+	assert_eq!(
+		obs.checks[&0],
+		CheckObservation::Verdict {
+			pass: true,
+			message: "calls []".into()
+		},
+		"{obs:?}"
+	);
 }
