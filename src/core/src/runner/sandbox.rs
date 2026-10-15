@@ -446,7 +446,7 @@ mod platform {
 		let readable = if c.spawn {
 			read | AccessFs::Execute
 		} else {
-			read.into()
+			read
 		};
 		let mut ruleset = Ruleset::default()
 			.set_compatibility(CompatLevel::HardRequirement)
@@ -475,9 +475,9 @@ mod platform {
 		};
 		let devices = [
 			("/dev/null", read | AccessFs::WriteFile),
-			("/dev/zero", read.into()),
-			("/dev/urandom", read.into()),
-			("/dev/random", read.into()),
+			("/dev/zero", read),
+			("/dev/urandom", read),
+			("/dev/random", read),
 		]
 		.into_iter()
 		.filter_map(|(path, access)| rule(&PathBuf::from(path), access));
