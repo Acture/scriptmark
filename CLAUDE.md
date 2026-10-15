@@ -82,8 +82,9 @@ revisions) → Display/DB/HTML/Canvas. `rescore` adds a revision from saved evid
 ```
 core/src/models/     Data models, TOML spec parsing, grading policies
 core/src/discovery   Student file discovery + archive extraction
-core/src/runner/     PythonExecutor (subprocess), orchestrator, sandbox (setrlimit),
-                parametrize, expander, oracle, linter
+core/src/runner/     PythonExecutor (teacher + student processes), harness/*.py,
+                orchestrator, sandbox (Seatbelt / Landlock + seccomp, setrlimit),
+                records (framed), parametrize, expander, oracle, linter
 core/src/checker/    Checker trait + Rhai + Python checkers
 core/src/record      Versioned evidence, score revisions, rescore reuse checks
 cli/src/db/          SQLite: students, sessions (= revisions), results, similarity
@@ -93,11 +94,11 @@ cli/src/tui/         ratatui terminal UI: students/sessions/similarity tabs
 
 ## Key Design Decisions
 
-**No pytest.** ScriptMark is its own test engine. Student code runs in subprocess via embedded Python helper script (`python.rs::HELPER_SCRIPT`). The helper: syntax-checks with py_compile, suppresses input()/print() during module load, calls target function, returns JSON on stdout.
+**No pytest.** ScriptMark is its own test engine. A unit (a case or a scenario) runs as two Python processes from embedded scripts (`runner/harness/`): the teacher side (`teacher.py`: teacher modules, function checkers, the plan, per-request deadlines, the records) and the student side (`student.py`: the student module only, one call per request, under its timer and import guard). They share `common.py` (framing, the record and transfer value encodings, `call()`). ScriptMark joins the two with a pair of pipes and reads length-prefixed JSON records from the teacher side; values cross by value (shared-class instances rebuilt from the receiver's copy, other objects as snapshots).
 
-**Sandboxed execution.** Student subprocess runs with: (1) `env_clear()` — no access to host env vars, (2) import allowlist — only safe stdlib + teacher-specified `allowed_imports`, (3) `setrlimit` — kernel-enforced CPU/file size/fd/process limits, (4) `tokio::join!` pipe reading + explicit `child.kill()` on timeout. Python interpreter resolved to absolute path at construction time so `env_clear()` doesn't change which interpreter runs.
+**Sandboxed execution.** Each side runs confined by default (`runner/sandbox.rs`): macOS Seatbelt via `sandbox-exec` with a generated profile, Linux Landlock + seccomp applied in `pre_exec`. The student side reads its interpreter and its own directory only; the teacher side also reads the bundle and a read-only source copy. Fail closed: no sandbox, no grading, unless `--no-sandbox` (recorded as `isolation: unisolated`). Both also get `env_clear()`, `setrlimit`, a memory watch on the student side, and an absolute interpreter path. The import allowlist is a teaching rule, not a boundary. Sandbox tests need a real sandbox: run `cargo test` outside any other Seatbelt sandbox (Claude Code's included), and on Linux from a filesystem with stable inodes (not a Docker Desktop bind mount).
 
-**TOML test specs** have three sections: `[vars]` (constants injected as Python globals), `[[setup]]` (function calls storing results for `$ref`), `[[cases]]` (scored test cases). Cases support `expect`, `expect_error`, checkers (`check = "sorted"` / `{ rhai = "..." }` / `{ python = "verifiers/check.py" }`), and `[cases.parametrize]` with oracle. `[meta]` supports `allowed_imports` for teacher-controlled package access.
+**TOML test specs** have three sections: `[vars]` (constants injected as Python globals), `[[setup]]` (function calls storing results for `$ref`), `[[cases]]` (scored test cases). Cases support `expect`, `expect_error`, checkers (`check = "sorted"` / `{ rhai = "..." }` / `{ python = "verifiers/check.py" }` / `{ function = "..." }`, which may take the reserved `stdout` and `source`), and `[cases.parametrize]` with oracle. `[meta]` supports `allowed_imports` (a teaching rule) and `shared` (modules whose classes cross between the two sides by value). Prepare refuses a path into the bundle handed to student code: `data_files` stages it instead.
 
 **Grading** uses declared per-item points and aggregation in `assignment.toml`. The
 default grade is the raw score scaled to the configured total; curves are opt-in.
@@ -109,8 +110,10 @@ Zero and withheld grades stay distinct. See the notes' teacher contract for poli
 
 ## Critical Files
 
-- `src/core/src/runner/python.rs` — PythonExecutor and embedded harness. Starts the isolated Python subprocess and checks its output.
-- `src/core/src/runner/sandbox.rs` — SandboxConfig + setrlimit application. Platform-conditional: RLIMIT_AS skipped on macOS, RLIMIT_* constants differ between Linux (c_uint) and macOS (c_int).
+- `src/core/src/runner/python.rs` — PythonExecutor: stages a unit, starts and joins both sides, reads the records, watches memory, probes the interpreter's read roots.
+- `src/core/src/runner/harness/{common,teacher,student}.py` — the two sides of a unit and what they share.
+- `src/core/src/runner/sandbox.rs` — `Isolation`, `Confinement`, the Seatbelt profile and Landlock/seccomp rules, plus setrlimit. Platform-conditional: RLIMIT_AS skipped on macOS, RLIMIT_* constants differ between Linux (c_uint) and macOS (c_int).
+- `src/core/src/runner/records.rs` — framed record reader with plan-derived bounds.
 - `src/core/src/runner/orchestrator.rs` — Runs prepared bundles per student, tokio parallel.
 - `src/core/src/models/spec.rs` — TOML test specification types.
 - `src/core/src/discovery.rs` — File discovery and archive extraction with size/count limits.
