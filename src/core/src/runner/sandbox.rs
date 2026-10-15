@@ -589,16 +589,27 @@ mod platform {
 				denied.insert(call, Vec::new());
 			}
 		}
-		// Its own limits and priority stay its own (pid 0, who 0); another process's are not.
-		for (call, arg) in [
-			(libc::SYS_prlimit64, 0),
-			(libc::SYS_setpriority, 1),
-			(libc::SYS_sched_setaffinity, 0),
-			(libc::SYS_sched_setscheduler, 0),
-			(libc::SYS_sched_setparam, 0),
-			(libc::SYS_sched_setattr, 0),
+		// Its own limits, priority, scheduling and memory stay its own — pid 0, or the
+		// calling process by kind and id — and another process's are not. Rules for one call
+		// refuse it when any of them matches.
+		const PRIO_PROCESS: u64 = 0;
+		const IOPRIO_WHO_PROCESS: u64 = 1;
+		for (call, rules) in [
+			(libc::SYS_prlimit64, vec![(0, 0)]),
+			(libc::SYS_setpriority, vec![(0, PRIO_PROCESS), (1, 0)]),
+			(libc::SYS_ioprio_set, vec![(0, IOPRIO_WHO_PROCESS), (1, 0)]),
+			(libc::SYS_sched_setaffinity, vec![(0, 0)]),
+			(libc::SYS_sched_setscheduler, vec![(0, 0)]),
+			(libc::SYS_sched_setparam, vec![(0, 0)]),
+			(libc::SYS_sched_setattr, vec![(0, 0)]),
+			(libc::SYS_migrate_pages, vec![(0, 0)]),
+			(libc::SYS_move_pages, vec![(0, 0)]),
 		] {
-			denied.insert(call, vec![condition(arg, SeccompCmpOp::Ne, 0)?]);
+			let rules = rules
+				.into_iter()
+				.map(|(arg, own)| condition(arg, SeccompCmpOp::Ne, own))
+				.collect::<Result<Vec<_>, _>>()?;
+			denied.insert(call, rules);
 		}
 		// Landlock has no right for mode, owner or extended attributes: a student could
 		// otherwise lock another file of the user's away, even one it cannot read.
@@ -651,18 +662,22 @@ mod platform {
 		// `clone3` takes its flags by pointer, where a filter cannot look: refuse it as
 		// unknown, and the C library falls back to `clone`.
 		let clone3 = BTreeMap::from([(libc::SYS_clone3, Vec::new())]);
-		let mut filters = vec![build(denied, libc::EPERM)?, build(clone3, libc::ENOSYS)?];
-		#[cfg(target_arch = "x86_64")]
-		filters.push(no_x32());
+		let filters = vec![
+			build(denied, libc::EPERM)?,
+			build(clone3, libc::ENOSYS)?,
+			unknown_calls(),
+		];
 		Ok(filters)
 	}
 
-	/// The x32 calling convention numbers every syscall again, past `0x40000000`: a filter
-	/// keyed on the x86-64 numbers would let them through, so they are refused outright.
-	#[cfg(target_arch = "x86_64")]
-	fn no_x32() -> BpfProgram {
+	/// A list of what to refuse lets through whatever the kernel adds after it was written
+	/// — `setxattrat` and `removexattrat` came in 6.13. Every syscall numbered from the
+	/// first this list does not know is refused as unknown (`ENOSYS`), which the C library
+	/// and Python treat as an older kernel. They share one numbering on every architecture;
+	/// x32's numbering on x86-64, which starts at `0x40000000`, is refused with them.
+	fn unknown_calls() -> BpfProgram {
 		use seccompiler::sock_filter;
-		const X32_SYSCALL_BIT: u32 = 0x4000_0000;
+		const FIRST_UNKNOWN: u32 = 463; // setxattrat
 		const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 		const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 		const LOAD_NR: u16 = 0x20; // BPF_LD | BPF_W | BPF_ABS, at seccomp_data.nr
@@ -671,8 +686,8 @@ mod platform {
 		let op = |code, jt, jf, k| sock_filter { code, jt, jf, k };
 		vec![
 			op(LOAD_NR, 0, 0, 0),
-			op(JUMP_GE, 0, 1, X32_SYSCALL_BIT),
-			op(RETURN, 0, 0, SECCOMP_RET_ERRNO | libc::EPERM as u32),
+			op(JUMP_GE, 0, 1, FIRST_UNKNOWN),
+			op(RETURN, 0, 0, SECCOMP_RET_ERRNO | libc::ENOSYS as u32),
 			op(RETURN, 0, 0, SECCOMP_RET_ALLOW),
 		]
 	}
