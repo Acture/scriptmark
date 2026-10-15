@@ -1051,6 +1051,30 @@ async fn test_what_a_submission_imports_counts_as_idle() {
 	assert!(idle[1] >= idle[0] + 4, "{idle:?} MiB");
 }
 
+/// Reading a submission's imports takes memory its source decides — about 140 MiB for the
+/// 120,000 constants here — and none of it is part of what its unit takes idle.
+#[tokio::test]
+async fn test_what_reading_a_submission_takes_is_not_idle() {
+	let dir = tempfile::tempdir().unwrap();
+	let hog = "import time\n\ndef hog():\n    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n";
+	let mut idle = Vec::new();
+	for (name, extra) in [
+		("plain.py", String::new()),
+		("padded.py", format!("PAD = [{}]\n", "1,".repeat(120_000))),
+	] {
+		let student = write(dir.path(), name, &format!("{extra}{hog}"));
+		let mut plan = unit(&student);
+		plan.steps = vec![function("hog", vec![])];
+		plan.memory_mb = 16;
+		plan.load_timeout = 30;
+		match run(&plan).await.exit {
+			Exit::Memory { idle_mb, .. } => idle.push(idle_mb),
+			other => panic!("{name}: {other:?}"),
+		}
+	}
+	assert!(idle[1] <= idle[0] + 3, "{idle:?} MiB");
+}
+
 /// An entry names a module: a dotted one allows its whole package, and one that is not
 /// installed does not keep the unit from running.
 #[tokio::test]

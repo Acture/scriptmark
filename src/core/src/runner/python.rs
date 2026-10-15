@@ -469,20 +469,52 @@ impl Memory {
 	}
 }
 
-/// What the student side takes idle, by a digest of everything it is measured from. A
-/// failed measurement is not kept: the next unit measures again.
+/// Values worked out once per key, by a digest of everything they depend on. A failure is
+/// not kept: the next caller works it out again.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-static IDLE_MEMORY: LazyLock<
-	Mutex<std::collections::HashMap<String, Arc<tokio::sync::OnceCell<u64>>>>,
-> = LazyLock::new(Default::default);
+type Once<T> = LazyLock<Mutex<std::collections::HashMap<String, Arc<tokio::sync::OnceCell<T>>>>>;
+
+/// The modules each submission imports, by its source.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static SOURCE_IMPORTS: Once<Imports> = LazyLock::new(Default::default);
+
+/// What the student side takes idle, by what it imports and what the teacher gives it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static IDLE_MEMORY: Once<u64> = LazyLock::new(Default::default);
+
+/// Modules, each with what `from … import` takes from it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+type Imports = Vec<(String, Vec<String>)>;
 
 /// The student whose idle memory is measured (`harness/idle.py`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const IDLE: &str = include_str!("harness/idle.py");
 
-/// Where the idle unit finds the submission's source, which it reads and never runs.
+/// Reads a source's imports without running it (`harness/imports.py`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-const IDLE_SOURCE: &str = ".scriptmark-source";
+const IMPORTS: &str = include_str!("harness/imports.py");
+
+/// The largest source whose imports are read beforehand: a larger one's count. Parsing
+/// takes several hundred times the source (500 KB of constants: about 290 MiB), and the
+/// reader is not watched; a submission is a few kilobytes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const IMPORTS_SOURCE_LIMIT: usize = 256 << 10;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn digest(given: &serde_json::Value) -> String {
+	use sha2::{Digest, Sha256};
+	format!("{:x}", Sha256::digest(given.to_string()))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn once<T>(cache: &Once<T>, key: String) -> Arc<tokio::sync::OnceCell<T>> {
+	cache
+		.lock()
+		.expect("once cache poisoned")
+		.entry(key)
+		.or_default()
+		.clone()
+}
 
 impl PythonExecutor {
 	/// A command for one side: confined when sandboxed, with a cleared environment, the
@@ -1194,20 +1226,48 @@ impl PythonExecutor {
 	/// What the student side of `plan` takes idle, in bytes: Python, the harness, the
 	/// teacher's values and modules, and every module the submission imports — the most a
 	/// unit whose student is ScriptMark's own was seen holding, sampled every 2 ms.
-	/// `memory_mb` counts beyond it. Once per submission and what the teacher gives it.
+	/// `memory_mb` counts beyond it. Once per set of imports and what the teacher gives.
 	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	async fn idle_memory(&self, plan: &UnitPlan) -> Result<u64, String> {
 		let source = tokio::fs::read(&plan.file)
 			.await
 			.map_err(|e| format!("could not read {}: {e}", plan.file.display()))?;
-		let key = self.idle_key(plan, &source)?;
-		let cell = IDLE_MEMORY
-			.lock()
-			.expect("idle memory cache poisoned")
-			.entry(key)
-			.or_default()
+		let sandboxed = self.isolation.is_sandboxed();
+		let read = once(
+			&SOURCE_IMPORTS,
+			digest(&serde_json::json!({
+				"python": self.python_cmd,
+				"sandboxed": sandboxed,
+				"source": String::from_utf8_lossy(&source),
+			})),
+		);
+		let imports = read
+			.get_or_try_init(|| async {
+				let reader = Self {
+					python_cmd: self.python_cmd.clone(),
+					isolation: self.isolation,
+				};
+				tokio::task::spawn_blocking(move || reader.source_imports(&source))
+					.await
+					.map_err(|e| format!("reading the submission's imports panicked: {e}"))?
+			})
+			.await?
 			.clone();
-		cell.get_or_try_init(|| self.measure_idle_memory(plan))
+		let measured = once(
+			&IDLE_MEMORY,
+			digest(&serde_json::json!({
+				"python": self.python_cmd,
+				"sandboxed": sandboxed,
+				"subject": plan.subject,
+				"allowed_imports": plan.allowed_imports,
+				"vars": &*plan.vars,
+				"shared": plan.shared,
+				"data_files": plan.data_files,
+				"imports": imports,
+			})),
+		);
+		measured
+			.get_or_try_init(|| self.measure_idle_memory(plan, &imports))
 			.await
 			.copied()
 	}
@@ -1218,34 +1278,71 @@ impl PythonExecutor {
 		Ok(0)
 	}
 
-	/// Everything the idle measurement of `plan` depends on.
+	/// The modules `source` imports, wherever in it: read by Python's own parser in a process
+	/// of its own, confined and not watched — what parsing takes is the source's to decide,
+	/// and must never be part of what a unit takes idle. Nothing in the source runs. One
+	/// that does not parse, is past `IMPORTS_SOURCE_LIMIT` or takes too long imports nothing
+	/// beforehand: its imports count.
 	#[cfg(any(target_os = "macos", target_os = "linux"))]
-	fn idle_key(&self, plan: &UnitPlan, source: &[u8]) -> Result<String, String> {
-		use sha2::{Digest, Sha256};
-		let given = serde_json::to_vec(&serde_json::json!({
-			"python": self.python_cmd,
-			"sandboxed": self.isolation.is_sandboxed(),
-			"subject": plan.subject,
-			"allowed_imports": plan.allowed_imports,
-			"vars": &*plan.vars,
-			"shared": plan.shared,
-			"data_files": plan.data_files,
-		}))
-		.map_err(|e| format!("could not key the idle unit: {e}"))?;
-		let mut digest = Sha256::new();
-		digest.update((given.len() as u64).to_le_bytes());
-		digest.update(&given);
-		digest.update(source);
-		Ok(format!("{:x}", digest.finalize()))
+	fn source_imports(&self, source: &[u8]) -> Result<Imports, String> {
+		if source.len() > IMPORTS_SOURCE_LIMIT {
+			return Ok(Vec::new());
+		}
+		let (_dir, scratch) = tempfile::Builder::new()
+			.prefix("scriptmark-imports-")
+			.tempdir()
+			.and_then(|dir| std::fs::canonicalize(dir.path()).map(|path| (dir, path)))
+			.map_err(|e| format!("could not stage the import reader: {e}"))?;
+		let mut cmd = if self.isolation.is_sandboxed() {
+			let confinement =
+				teacher_confinement(&self.python_cmd, Vec::new(), vec![scratch.clone()], false)?;
+			crate::runner::sandbox::confined(Path::new(&self.python_cmd), &confinement)?
+		} else {
+			std::process::Command::new(&self.python_cmd)
+		};
+		cmd.env_clear()
+			.env("HOME", &scratch)
+			.env("TMPDIR", &scratch)
+			.current_dir(&scratch)
+			.args(["-I", "-B", "-c", IMPORTS]);
+		let ran = crate::checker::python_checker::run_with_timeout(
+			cmd,
+			Some(String::from_utf8_lossy(source).into_owned()),
+			Duration::from_secs(STARTUP_SECS),
+		)
+		.map_err(|e| format!("could not start the import reader: {e}"))?;
+		let Some(ran) = ran else {
+			return Ok(Vec::new());
+		};
+		let found: Vec<(String, Vec<String>)> =
+			serde_json::from_str(ran.stdout.trim()).map_err(|e| {
+				format!(
+					"the import reader printed no imports ({e}, {}): {}",
+					ran.status,
+					ran.stderr.trim()
+				)
+			})?;
+		let mut imports: Imports = found
+			.into_iter()
+			.filter(|(name, names)| {
+				crate::spec_loader::is_module_name(name)
+					&& names.iter().all(|n| crate::spec_loader::is_module_name(n))
+			})
+			.collect();
+		imports.sort();
+		imports.dedup();
+		Ok(imports)
 	}
 
 	#[cfg(any(target_os = "macos", target_os = "linux"))]
-	async fn measure_idle_memory(&self, given: &UnitPlan) -> Result<u64, String> {
+	async fn measure_idle_memory(
+		&self,
+		given: &UnitPlan,
+		imports: &Imports,
+	) -> Result<u64, String> {
 		let dir = tempfile::tempdir().map_err(|e| format!("could not stage the idle unit: {e}"))?;
 		let file = dir.path().join("idle.py");
 		std::fs::write(&file, IDLE).map_err(|e| format!("could not stage the idle unit: {e}"))?;
-		let mut data_files = given.data_files.clone();
-		data_files.push((given.file.clone(), IDLE_SOURCE.into()));
 		let plan = UnitPlan {
 			subject: given.subject,
 			functions: crate::matching::Functions::default(),
@@ -1253,7 +1350,7 @@ impl PythonExecutor {
 			script: None,
 			imports: Vec::new(),
 			vars: given.vars.clone(),
-			data_files,
+			data_files: given.data_files.clone(),
 			bundle: given.bundle.clone(),
 			shared: given.shared.clone(),
 			memory_mb: *crate::spec_loader::MEMORY_MB.end(),
@@ -1264,7 +1361,7 @@ impl PythonExecutor {
 				target: crate::models::Target::Function {
 					name: "idle".into(),
 				},
-				args: Vec::new(),
+				args: vec![serde_json::json!(imports)],
 				stdin: None,
 				timeout: STARTUP_SECS,
 				id: None,
