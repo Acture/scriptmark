@@ -62,6 +62,9 @@ pub struct UnitPlan {
 	/// The most memory the student side may hold beyond what it takes idle with the
 	/// submission's imports loaded, in MiB, before it is ended.
 	pub memory_mb: u64,
+	/// How `memory_mb` was estimated, where the spec does not declare it:
+	/// `O(n^2) over 1000 elements`.
+	pub memory_basis: Option<String>,
 	pub allowed_imports: Vec<String>,
 	pub load_timeout: u64,
 	pub setup: Vec<CallPlan>,
@@ -274,10 +277,12 @@ pub enum Exit {
 	/// Killed by the grader at the unit's deadline.
 	Deadline,
 	/// Killed by the grader for holding more than the unit's `memory_mb` beyond what the
-	/// student side takes idle with the submission's imports loaded (`idle_mb`).
+	/// student side takes idle with the submission's imports loaded (`idle_mb`); `basis`
+	/// says how an undeclared limit was estimated.
 	Memory {
 		limit_mb: u64,
 		idle_mb: u64,
+		basis: Option<String>,
 	},
 	/// Still running when the teacher side finished, and ended by the grader then.
 	Stopped,

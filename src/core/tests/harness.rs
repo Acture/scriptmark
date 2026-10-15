@@ -54,7 +54,8 @@ fn unit(file: &Path) -> UnitPlan {
 		data_files: Vec::new(),
 		bundle: file.parent().unwrap().to_path_buf(),
 		shared: Vec::new(),
-		memory_mb: scriptmark_core::spec_loader::DEFAULT_MEMORY_MB,
+		memory_mb: 64,
+		memory_basis: None,
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
 		setup: Vec::new(),
@@ -1106,7 +1107,7 @@ async fn test_a_student_side_past_its_memory_limit_is_ended() {
 	plan.memory_mb = 96;
 	let obs = run(&plan).await;
 	assert!(
-		matches!(obs.exit, Exit::Memory { limit_mb: 96, idle_mb } if idle_mb > 0),
+		matches!(obs.exit, Exit::Memory { limit_mb: 96, idle_mb, basis: None } if idle_mb > 0),
 		"{obs:?}"
 	);
 	assert!(obs.steps.is_empty());

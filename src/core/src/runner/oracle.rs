@@ -44,10 +44,9 @@ pub async fn resolve_oracle<E: Executor>(
 				.map(|rel| (spec.dir.join(rel), rel.clone()))
 				.collect(),
 			allowed_imports: spec.meta.allowed_imports.clone(),
-			memory_mb: case
-				.memory_mb
-				.or(spec.meta.memory_mb)
-				.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
+			// From the case's declarations and arguments, below: its answer is what this finds.
+			memory_mb: 0,
+			memory_basis: None,
 			load_timeout: timeout_secs,
 			setup: Vec::new(),
 			steps: vec![CallPlan {
@@ -60,6 +59,14 @@ pub async fn resolve_oracle<E: Executor>(
 				check: None,
 			}],
 		};
+		let mut plan = plan;
+		(plan.memory_mb, plan.memory_basis) = crate::runner::memory::resolve(
+			[
+				(case.memory_mb, case.space.as_deref()),
+				(spec.meta.memory_mb, spec.meta.space.as_deref()),
+			],
+			crate::runner::memory::unit_size(spec, &plan, []),
+		);
 		let obs = executor.run(&plan).await;
 		if !obs.ready
 			|| !obs.done

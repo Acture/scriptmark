@@ -25,10 +25,9 @@ use crate::runner::executor::{
 use crate::runner::frozen::{Generation, replay_entry};
 use crate::runner::generation::{DrawSeed, Generated, generate, seed_for};
 use crate::runner::judge::Scored;
+use crate::runner::memory;
 use crate::runner::oracle::{resolve_oracle, validate_references};
-use crate::spec_loader::{
-	DEFAULT_MEMORY_MB, MAX_TIMEOUT_SECS, refs, reserved, validate, validate_expanded,
-};
+use crate::spec_loader::{MAX_TIMEOUT_SECS, refs, reserved, validate, validate_expanded};
 
 /// A prepared test bundle: one spec, ready to run against any student.
 #[derive(Debug, Serialize)]
@@ -655,7 +654,9 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 			.map(|rel| (spec.dir.join(rel), rel.clone()))
 			.collect(),
 		allowed_imports: spec.meta.allowed_imports.clone(),
-		memory_mb: spec.meta.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
+		// Each unit's, from its own declarations and data: below.
+		memory_mb: 0,
+		memory_basis: None,
 		load_timeout: timeout_secs,
 		setup: Vec::new(),
 		steps: Vec::new(),
@@ -667,11 +668,15 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 		.map(|s| setup_call(s, timeout_secs))
 		.collect();
 
-	let cases = spec.cases.iter().map(|case| {
-		let base = UnitPlan {
-			memory_mb: case.memory_mb.unwrap_or(base.memory_mb),
-			..base.clone()
+	let meta = (spec.meta.memory_mb, spec.meta.space.as_deref());
+	let held =
+		|mut plan: UnitPlan, narrow: (Option<u64>, Option<&str>), scored: &[(String, TestCase)]| {
+			let size = memory::unit_size(spec, &plan, scored.iter().map(|(_, c)| c));
+			(plan.memory_mb, plan.memory_basis) = memory::resolve([narrow, meta], size);
+			plan
 		};
+
+	let cases = spec.cases.iter().map(|case| {
 		let plan = if case.script {
 			UnitPlan {
 				script: Some(ScriptRun {
@@ -688,33 +693,39 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 				..base.clone()
 			}
 		};
+		let scored = vec![(case.name.clone(), case.clone())];
 		Unit {
-			plan,
-			scored: vec![(case.name.clone(), case.clone())],
+			plan: held(plan, (case.memory_mb, case.space.as_deref()), &scored),
+			scored,
 		}
 	});
 	let scenarios = spec.scenarios.iter().map(|scenario| {
 		let timeout = scenario.timeout.unwrap_or(timeout_secs);
-		Unit {
-			plan: UnitPlan {
-				memory_mb: scenario.memory_mb.unwrap_or(base.memory_mb),
-				setup: top_setup
-					.iter()
-					.cloned()
-					.chain(scenario.setup.iter().map(|s| setup_call(s, timeout)))
-					.collect(),
-				steps: scenario
-					.steps
-					.iter()
-					.map(|s| call_of(s, default_function, timeout))
-					.collect(),
-				..base.clone()
-			},
-			scored: scenario
+		let scored: Vec<(String, TestCase)> = scenario
+			.steps
+			.iter()
+			.map(|s| (scenario.step_name(s), s.clone()))
+			.collect();
+		let plan = UnitPlan {
+			setup: top_setup
+				.iter()
+				.cloned()
+				.chain(scenario.setup.iter().map(|s| setup_call(s, timeout)))
+				.collect(),
+			steps: scenario
 				.steps
 				.iter()
-				.map(|s| (scenario.step_name(s), s.clone()))
+				.map(|s| call_of(s, default_function, timeout))
 				.collect(),
+			..base.clone()
+		};
+		Unit {
+			plan: held(
+				plan,
+				(scenario.memory_mb, scenario.space.as_deref()),
+				&scored,
+			),
+			scored,
 		}
 	});
 	cases.chain(scenarios).collect()

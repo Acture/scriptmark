@@ -440,31 +440,33 @@ impl Finished {
 }
 
 /// What the student side may hold: `limit_mb` beyond `idle`, the bytes it takes idle,
-/// sampled `every` so often.
-#[derive(Debug, Clone, Copy)]
+/// sampled `every` so often; `basis` says how an undeclared limit was estimated.
+#[derive(Debug, Clone)]
 struct Memory {
 	limit_mb: u64,
 	idle: u64,
 	every: Duration,
+	basis: Option<String>,
 }
 
 /// How often a unit's student side is sampled.
 const SAMPLE_EVERY: Duration = Duration::from_millis(50);
 
 impl Memory {
-	fn watched(self) -> u64 {
+	fn watched(&self) -> u64 {
 		self.idle
 			.saturating_add(self.limit_mb.saturating_mul(1 << 20))
 	}
 
-	fn total_mb(self) -> u64 {
+	fn total_mb(&self) -> u64 {
 		self.watched().div_ceil(1 << 20)
 	}
 
-	fn exceeded(self) -> Exit {
+	fn exceeded(&self) -> Exit {
 		Exit::Memory {
 			limit_mb: self.limit_mb,
 			idle_mb: self.idle.div_ceil(1 << 20),
+			basis: self.basis.clone(),
 		}
 	}
 }
@@ -1164,9 +1166,10 @@ impl Executor for PythonExecutor {
 						limit_mb: spec
 							.meta
 							.memory_mb
-							.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
+							.unwrap_or(crate::runner::memory::ESTIMATE_CAP_MB),
 						idle: 0,
 						every: SAMPLE_EVERY,
+						basis: None,
 					},
 					INSPECT_BOUNDS,
 					false,
@@ -1215,6 +1218,7 @@ impl Executor for PythonExecutor {
 				limit_mb: plan.memory_mb,
 				idle,
 				every: SAMPLE_EVERY,
+				basis: plan.memory_basis.clone(),
 			},
 		)
 		.await
@@ -1354,6 +1358,7 @@ impl PythonExecutor {
 			bundle: given.bundle.clone(),
 			shared: given.shared.clone(),
 			memory_mb: *crate::spec_loader::MEMORY_MB.end(),
+			memory_basis: None,
 			allowed_imports: given.allowed_imports.clone(),
 			load_timeout: given.load_timeout.max(STARTUP_SECS),
 			setup: Vec::new(),
@@ -1373,6 +1378,7 @@ impl PythonExecutor {
 			limit_mb: plan.memory_mb,
 			idle: 0,
 			every: Duration::from_millis(2),
+			basis: None,
 		};
 		let (obs, peak) = self.observe(&plan, memory).await;
 		if let Exit::Spawn(e) = &obs.exit {
@@ -1550,7 +1556,8 @@ mod tests {
 			data_files: Vec::new(),
 			bundle: PathBuf::new(),
 			shared: Vec::new(),
-			memory_mb: crate::spec_loader::DEFAULT_MEMORY_MB,
+			memory_mb: 64,
+			memory_basis: None,
 			allowed_imports: Vec::new(),
 			load_timeout: 1,
 			setup: Vec::new(),

@@ -465,13 +465,23 @@ fn death(exit: &Exit) -> (TestStatus, String) {
 			TestStatus::Timeout,
 			"the unit's deadline passed during".into(),
 		),
-		Exit::Memory { limit_mb, idle_mb } => (
-			TestStatus::Error,
-			format!(
-				"the {limit_mb} MiB memory limit (`memory_mb`, on top of the {idle_mb} MiB \
-				 Python and the submission's imports take) was exceeded during"
-			),
-		),
+		Exit::Memory {
+			limit_mb,
+			idle_mb,
+			basis,
+		} => {
+			let how = match basis {
+				Some(basis) => format!("estimated from {basis}"),
+				None => "`memory_mb`".into(),
+			};
+			(
+				TestStatus::Error,
+				format!(
+					"the {limit_mb} MiB memory limit ({how}, on top of the {idle_mb} MiB Python \
+					 and the submission's imports take) was exceeded during"
+				),
+			)
+		}
 		Exit::Stopped => (
 			TestStatus::Error,
 			"the process was ended with its unit during".into(),
@@ -967,7 +977,8 @@ mod tests {
 			data_files: Vec::new(),
 			bundle: std::path::PathBuf::new(),
 			shared: Vec::new(),
-			memory_mb: crate::spec_loader::DEFAULT_MEMORY_MB,
+			memory_mb: 64,
+			memory_basis: None,
 			allowed_imports: Vec::new(),
 			load_timeout: 10,
 			setup: Vec::new(),
@@ -1314,6 +1325,7 @@ mod tests {
 		obs.exit = Exit::Memory {
 			limit_mb: 64,
 			idle_mb: 24,
+			basis: None,
 		};
 		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
@@ -1442,6 +1454,7 @@ mod tests {
 		hog.exit = Exit::Memory {
 			limit_mb: 64,
 			idle_mb: 24,
+			basis: None,
 		};
 		let r = one(&c, &p, &hog);
 		assert_eq!(
@@ -1484,6 +1497,7 @@ mod tests {
 		gone.exit = Exit::Memory {
 			limit_mb: 64,
 			idle_mb: 24,
+			basis: None,
 		};
 		let r = judge(&p, &scored, &gone, "python3", Isolation::Sandboxed);
 		assert_eq!(

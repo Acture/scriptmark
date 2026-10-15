@@ -1468,38 +1468,52 @@ async fn test_a_path_into_the_bundle_is_never_handed_to_student_code() {
 	assert_eq!(results[0].total_passed(), 1, "{:#?}", results[0]);
 }
 
-/// A unit's student process is held to `memory_mb` beyond what it takes idle: 64 MiB unless
-/// the spec, the case or the scenario says otherwise, and a case that needs more declares it.
+/// A unit's student process is held to `memory_mb` beyond what it takes idle. Undeclared,
+/// it is estimated from `space` — O(n^2) unless declared — and the size of the test data,
+/// an integer argument counting as its value; the narrowest declaration applies.
 #[tokio::test]
-async fn test_memory_is_the_default_unless_declared() {
+async fn test_memory_is_estimated_from_space_and_data_unless_declared() {
 	let bench = Bench::new();
 	let spec = |meta: &str, case: &str| {
 		bench.spec(&format!(
-			"[meta]\nname = \"m\"\nfile = \"lab.py\"\nfunction = \"big\"\nlanguage = \"python\"\n{meta}\n[[cases]]\nname = \"big\"\nexpect = 8000000\n{case}\n"
+			"[meta]\nname = \"m\"\nfile = \"lab.py\"\nfunction = \"big\"\nlanguage = \"python\"\n{meta}\n[[cases]]\nname = \"big\"\nargs = [8000000]\nexpect = 8000000\n{case}\n"
 		))
 	};
 	let student = bench.student(
 		"alice",
 		"lab.py",
-		"def big():\n    return len(list(range(8_000_000)))\n",
+		"def big(n):\n    return len(list(range(n)))\n",
 	);
-	let tight = grade(vec![spec("", "")], std::slice::from_ref(&student)).await;
-	let c = &tight[0].test_results[0].cases[0];
-	assert_eq!(
-		(c.status, c.fault, c.cause),
-		(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory)),
-		"{c:?}"
-	);
+	let failure = |meta: &str, case: &str| {
+		let spec = spec(meta, case);
+		let student = student.clone();
+		async move {
+			let r = grade(vec![spec], &[student]).await;
+			let c = r[0].test_results[0].cases[0].clone();
+			assert_eq!(
+				(c.status, c.fault, c.cause),
+				(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory)),
+				"{c:?}"
+			);
+			c.failure.unwrap().message
+		}
+	};
+	let estimated = failure("", "space = \"O(1)\"").await;
 	assert!(
-		c.failure
-			.as_ref()
-			.unwrap()
-			.message
-			.contains("64 MiB memory limit"),
-		"{:?}",
-		c.failure
+		estimated.contains("16 MiB memory limit (estimated from O(1) over 8000001 elements"),
+		"{estimated}"
 	);
-	for (meta, case) in [("memory_mb = 1024", ""), ("", "memory_mb = 1024")] {
+	let declared = failure("memory_mb = 16", "").await;
+	assert!(
+		declared.contains("16 MiB memory limit (`memory_mb`"),
+		"{declared}"
+	);
+	for (meta, case) in [
+		// O(n^2) over eight million elements: the 1 GiB cap.
+		("", ""),
+		("space = \"O(1)\"", "memory_mb = 1024"),
+		("memory_mb = 16", "space = \"O(n)\""),
+	] {
 		let roomy = grade(vec![spec(meta, case)], std::slice::from_ref(&student)).await;
 		assert_eq!(roomy[0].total_passed(), 1, "{meta}{case}: {:#?}", roomy[0]);
 	}

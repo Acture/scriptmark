@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::checker::rhai_checker;
 use crate::runner::generation::{MAX_COUNT, MAX_GENERATED, concrete_name, origins};
 use crate::runner::generator::Rule;
+use crate::runner::memory::Space;
 
 use crate::models::{
 	AssignmentConfig, Check, CourseConfig, Scenario, SetupStep, Target, TestCase, TestSpec,
@@ -132,12 +133,6 @@ pub fn reserved(name: &str) -> Option<&'static str> {
 /// The longest timeout a spec or the command line may ask for.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
 
-/// The memory a unit's student process may hold beyond what it takes idle, when its spec
-/// does not say, in MiB: what the student's code holds, and the harness's copies of what
-/// it returns while encoding them — a few times the value's own size. What Python and the
-/// harness take idle is measured, and added.
-pub const DEFAULT_MEMORY_MB: u64 = 64;
-
 /// The memory a spec may give a unit beyond what it takes idle, in MiB: from what a small
 /// exercise holds, above the noise of loading a module, to 64 GiB.
 pub const MEMORY_MB: std::ops::RangeInclusive<u64> = 16..=65_536;
@@ -255,7 +250,11 @@ impl<'a> Validator<'a> {
 				self.problem("[meta]", message);
 			}
 		}
-		self.memory(self.spec.meta.memory_mb, "[meta]");
+		self.memory(
+			self.spec.meta.memory_mb,
+			self.spec.meta.space.as_deref(),
+			"[meta]",
+		);
 		for (name, value) in &self.spec.vars {
 			if contains_null(value) {
 				self.problem(
@@ -377,7 +376,21 @@ impl<'a> Validator<'a> {
 		}
 	}
 
-	fn memory(&mut self, memory: Option<u64>, at: &str) {
+	fn memory(&mut self, memory: Option<u64>, space: Option<&str>, at: &str) {
+		if let Some(space) = space {
+			if memory.is_some() {
+				self.problem(
+					at,
+					"memory_mb and space both say what it may hold: keep one",
+				);
+			}
+			if Space::parse(space).is_none() {
+				self.problem(
+					at,
+					format!("space '{space}' must be O(1), O(log n), O(n), O(n log n) or O(n^2)"),
+				);
+			}
+		}
 		if memory.is_some_and(|m| !MEMORY_MB.contains(&m)) {
 			self.problem(
 				at,
@@ -408,7 +421,7 @@ impl<'a> Validator<'a> {
 			self.problem(&at, "has no steps");
 		}
 		self.timeout(scenario.timeout, &at);
-		self.memory(scenario.memory_mb, &at);
+		self.memory(scenario.memory_mb, scenario.space.as_deref(), &at);
 		let mut bound = top.clone();
 		for step in &scenario.setup {
 			self.setup(step, &mut bound, &format!("{at} setup '{}'", step.id));
@@ -508,13 +521,13 @@ impl<'a> Validator<'a> {
 			);
 		}
 		self.timeout(case.timeout, at);
-		if is_step && case.memory_mb.is_some() {
+		if is_step && (case.memory_mb.is_some() || case.space.is_some()) {
 			self.problem(
 				at,
-				"memory_mb belongs to the scenario: its steps share one process",
+				"memory_mb and space belong to the scenario: its steps share one process",
 			);
 		} else {
-			self.memory(case.memory_mb, at);
+			self.memory(case.memory_mb, case.space.as_deref(), at);
 		}
 		if case.args.iter().any(contains_null) {
 			self.problem(
@@ -2001,7 +2014,7 @@ expect = 150
 		);
 		refused(
 			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\nmemory_mb = 512\n",
-			"memory_mb belongs to the scenario",
+			"memory_mb and space belong to the scenario",
 		);
 		assert!(
 			problems(
@@ -2016,6 +2029,28 @@ expect = 150
 		)
 		.unwrap();
 		assert!(!serde_json::to_string(&spec).unwrap().contains("memory_mb"));
+	}
+
+	#[test]
+	fn test_space_is_big_o_and_not_beside_memory_mb() {
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = 1\nspace = \"O(n^3)\"\n",
+			"space 'O(n^3)' must be O(1), O(log n), O(n), O(n log n) or O(n^2)",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = 1\nspace = \"O(n)\"\nmemory_mb = 64\n",
+			"memory_mb and space both say what it may hold",
+		);
+		refused(
+			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\nspace = \"O(n)\"\n",
+			"memory_mb and space belong to the scenario",
+		);
+		assert!(
+			problems(
+				"space = \"O(n log n)\"\n[[scenarios]]\nname = \"s\"\nspace = \"O(1)\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\n[[cases]]\nname = \"x\"\nexpect = 1\nmemory_mb = 32\n"
+			)
+			.is_empty()
+		);
 	}
 
 	#[test]

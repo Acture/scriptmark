@@ -500,6 +500,11 @@ pub struct TestCase {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub memory_mb: Option<u64>,
 
+	/// The space the algorithm may use, as `O(n)` and the like: the memory is then estimated
+	/// from it and the size of the test data. Not beside `memory_mb`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
+
 	/// Generate concrete cases from this one.
 	#[serde(default)]
 	pub parametrize: Option<Parametrize>,
@@ -581,9 +586,15 @@ pub struct TestMeta {
 	pub shared: Vec<String>,
 
 	/// The most memory a unit's student process may hold beyond what it takes idle, in MiB,
-	/// where a case or scenario does not say: `DEFAULT_MEMORY_MB` when neither does.
+	/// where a case or scenario does not say. Where nothing does, it is estimated from
+	/// `space`, or `DEFAULT_SPACE`, and the size of the unit's test data.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub memory_mb: Option<u64>,
+
+	/// The space the algorithm may use, as `O(n)` and the like: the memory is then estimated
+	/// from it and the size of the test data. Not beside `memory_mb`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
 
 	/// Refused: every case now has its own process.
 	#[serde(default)]
@@ -664,6 +675,11 @@ pub struct Scenario {
 	/// in MiB.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub memory_mb: Option<u64>,
+
+	/// The space the algorithm may use, as `O(n)` and the like: the memory is then estimated
+	/// from it and the size of the test data. Not beside `memory_mb`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
 
 	/// Runs once, at the start of the scenario, after the top-level setup.
 	#[serde(default)]
