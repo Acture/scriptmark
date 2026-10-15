@@ -53,6 +53,8 @@ pub enum Cause {
 	Timeout,
 	/// The process died, or was killed at its deadline, during this call.
 	Killed,
+	/// The student side went past its memory limit during this call, and was ended.
+	Memory,
 	/// Not run: an earlier call in the unit hung or killed the process.
 	NotRun,
 	/// Not run: a value it needs was never produced.

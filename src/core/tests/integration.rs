@@ -1340,8 +1340,10 @@ expect = 2
 	}
 }
 
+/// A step that defeats its own timer is given up on: it timed out, and the steps after it
+/// never ran, on the student's account.
 #[tokio::test]
-async fn test_a_scenario_killed_at_its_deadline_blames_the_call_that_hung() {
+async fn test_a_scenario_given_up_on_at_its_deadline_blames_the_call_that_hung() {
 	let bench = Bench::new();
 	let spec = bench.spec(
 		r#"
@@ -1379,7 +1381,7 @@ expect = 1
 		(
 			TestStatus::Timeout,
 			Some(Fault::Student),
-			Some(Cause::Killed)
+			Some(Cause::Timeout)
 		)
 	);
 	assert_eq!(

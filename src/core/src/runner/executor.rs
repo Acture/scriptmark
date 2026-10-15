@@ -61,21 +61,30 @@ pub struct UnitPlan {
 }
 
 impl UnitPlan {
-	/// Seconds the unit may run in total: every call's own timeout, plus slack. The
+	/// Seconds the unit may run in total: every request the teacher side makes with the
+	/// grace it allows each, plus the time both sides have to start. The teacher side gives
+	/// up on a request well before this; it is the backstop for the teacher side itself. The
 	/// kernel's CPU limit sits just above it as a backstop for a single busy core.
 	pub fn deadline_secs(&self) -> u64 {
+		let grace = |timeout: u64| timeout.saturating_add(GRACE_SECS);
 		let calls = match &self.script {
-			Some(script) => script.timeout,
+			Some(script) => grace(script.timeout),
 			None => self
 				.setup
 				.iter()
 				.chain(&self.steps)
-				.map(CallPlan::budget)
-				.fold(self.load_timeout, u64::saturating_add),
+				.map(|c| c.budget(grace))
+				.fold(grace(self.load_timeout), u64::saturating_add),
 		};
-		calls.saturating_add(2)
+		calls.saturating_add(2 * STARTUP_SECS)
 	}
 }
+
+/// Seconds the teacher side waits past a request's own timeout before it gives up on the
+/// student side: the student's own timer has fired by then, and its answer is late.
+pub const GRACE_SECS: u64 = 2;
+/// Seconds each side has to start: an interpreter under load, and the teacher modules.
+pub const STARTUP_SECS: u64 = 10;
 
 /// A script run: the unit's only call.
 #[derive(Debug, Clone, Serialize)]
@@ -101,9 +110,9 @@ pub struct CallPlan {
 }
 
 impl CallPlan {
-	fn budget(&self) -> u64 {
-		self.timeout
-			.saturating_add(self.check.as_ref().map_or(0, |_| self.timeout))
+	/// The call's time, and its checker's, each with `grace` applied.
+	fn budget(&self, grace: impl Fn(u64) -> u64) -> u64 {
+		grace(self.timeout).saturating_add(self.check.as_ref().map_or(0, |_| grace(self.timeout)))
 	}
 }
 
@@ -245,7 +254,7 @@ pub enum CheckObservation {
 	Error(ErrorInfo),
 }
 
-/// How the unit's process ended.
+/// How one side's process ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Exit {
@@ -253,25 +262,41 @@ pub enum Exit {
 	Signal(i32),
 	/// Killed by the grader at the unit's deadline.
 	Deadline,
+	/// Killed by the grader for going past the unit's memory limit.
+	Memory,
+	/// Still running when the teacher side finished, and ended by the grader then.
+	Stopped,
 	/// Never started.
 	Spawn(String),
+}
+
+impl Exit {
+	/// Ended by itself, without an error.
+	pub fn is_clean(&self) -> bool {
+		*self == Exit::Code(0)
+	}
 }
 
 /// Everything a unit reported, in plan order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnitObservation {
-	/// Teacher modules imported and the harness running.
+	/// Teacher modules imported, and the student side started and ready.
 	pub ready: bool,
 	pub load: Option<CallObservation>,
 	pub setup: Vec<CallObservation>,
 	pub steps: Vec<CallObservation>,
 	pub checks: BTreeMap<usize, CheckObservation>,
 	pub fatal: Option<Fatal>,
+	/// The teacher side gave up on the student side: nothing after this call ran.
+	pub stopped: Option<Stopped>,
 	pub done: bool,
+	/// How the student side ended.
 	pub exit: Exit,
-	/// The record stream broke: the unit's records cannot be trusted past this point.
+	/// How the teacher side ended.
+	pub teacher_exit: Exit,
+	/// The teacher side's record stream broke: its records cannot be trusted past here.
 	pub protocol_error: Option<ProtocolError>,
-	/// The tail of stderr, for diagnosing a crash.
+	/// The tail of each side's stderr, for diagnosing a crash.
 	pub stderr: String,
 }
 
@@ -285,7 +310,9 @@ impl UnitObservation {
 			steps: Vec::new(),
 			checks: BTreeMap::new(),
 			fatal: None,
+			stopped: None,
 			done: false,
+			teacher_exit: exit.clone(),
 			exit,
 			protocol_error: None,
 			stderr: String::new(),
@@ -293,16 +320,39 @@ impl UnitObservation {
 	}
 }
 
-/// How the record stream broke.
+/// Where and why the teacher side stopped asking the student side anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Stopped {
+	pub phase: Phase,
+	pub index: usize,
+	pub reason: StopReason,
+	#[serde(default)]
+	pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+	/// A request ran past its timeout and grace: the student's timer did not stop it.
+	Deadline,
+	/// The student side went away mid-request.
+	Exited,
+	/// The student side sent more than the request allows.
+	Flooded,
+	/// The student side sent something no request allows.
+	Garbled,
+}
+
+/// How the teacher side's record stream broke. Student code cannot reach it, so each is
+/// the harness's or the teacher code's doing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtocolError {
-	/// A framed record did not parse — the harness wrote something it should not have.
+	/// A framed record did not parse.
 	Unreadable(String),
-	/// A record repeated or came out of order — somebody else wrote it.
+	/// A record repeated or came out of order.
 	Tampered(String),
-	/// More reached the record channel than the harness ever writes: something other than
-	/// the harness wrote to it.
+	/// A record longer than any this unit can produce, or more records than it has.
 	Flooded(String),
 }
 

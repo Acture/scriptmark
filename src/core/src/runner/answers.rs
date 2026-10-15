@@ -98,11 +98,14 @@ impl Contract {
 			runtime: executor.identity()?,
 			sources,
 			protocol: digest(
-				concat!(
+				[
 					include_str!("oracle.rs"),
-					include_str!("harness.py"),
-					include_str!("../checker/rhai_checker.rs")
-				)
+					include_str!("../checker/rhai_checker.rs"),
+				]
+				.iter()
+				.chain(&crate::runner::python::PROTOCOL)
+				.copied()
+				.collect::<String>()
 				.as_bytes(),
 			),
 		})

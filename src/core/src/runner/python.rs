@@ -1,12 +1,22 @@
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+//! The Python backend. A unit runs as two processes joined by a pair of pipes: the teacher
+//! side (`harness/teacher.py`) holds the teacher's modules and checkers, drives the plan
+//! and writes the records; the student side (`harness/student.py`) holds only the
+//! student's module. ScriptMark starts both, connects them to each other, and reads the
+//! teacher side's records; it never relays what passes between them.
 
-use tokio::process::Command;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+
+use serde::Serialize;
+use tokio::process::{Child, Command};
 
 use crate::models::TestSpec;
 use crate::runner::executor::{
-	Executor, Exit, ProtocolError, Subject, TeacherRuntime, UnitObservation, UnitPlan,
+	Executor, Exit, GRACE_SECS, STARTUP_SECS, Subject, TeacherRuntime, UnitObservation, UnitPlan,
 };
+use crate::runner::records::{Bounds, Reader, Records};
 #[cfg(unix)]
 use crate::runner::sandbox::apply_sandbox;
 
@@ -31,6 +41,8 @@ fn resolve_python_path(cmd: &str) -> String {
 /// Executor for Python student code.
 pub struct PythonExecutor {
 	python_cmd: String,
+	/// The most memory the student side may hold before it is ended, in MiB.
+	memory_mb: u64,
 }
 
 impl PythonExecutor {
@@ -41,7 +53,14 @@ impl PythonExecutor {
 	pub fn with_python_cmd(python_cmd: impl Into<String>) -> Self {
 		Self {
 			python_cmd: resolve_python_path(&python_cmd.into()),
+			memory_mb: crate::runner::sandbox::SandboxConfig::default().mem_mb,
 		}
+	}
+
+	/// End the student side once it holds more than `mb` MiB.
+	pub fn with_memory_limit(mut self, mb: u64) -> Self {
+		self.memory_mb = mb;
+		self
 	}
 
 	pub fn python_cmd(&self) -> &str {
@@ -49,53 +68,108 @@ impl PythonExecutor {
 	}
 }
 
-/// The one harness every unit runs under. See `harness.py`.
-const HARNESS: &str = include_str!("harness.py");
+const COMMON: &str = include_str!("harness/common.py");
+const TEACHER: &str = include_str!("harness/teacher.py");
+const STUDENT: &str = include_str!("harness/student.py");
+const MATCHING: &str = include_str!("../matching.py");
+
+/// Every line either side runs, for the frozen contract: a change to any of it can change
+/// what a reference implementation is observed to do.
+pub(crate) const PROTOCOL: [&str; 4] = [COMMON, TEACHER, STUDENT, MATCHING];
+
+/// `python -c` puts the working directory first on `sys.path`: it goes before any import.
+const PRELUDE: &str = "import sys; sys.path[:] = [p for p in sys.path if p]\n";
+static TEACHER_SCRIPT: LazyLock<String> = LazyLock::new(|| format!("{PRELUDE}{COMMON}\n{TEACHER}"));
+static STUDENT_SCRIPT: LazyLock<String> =
+	LazyLock::new(|| format!("{PRELUDE}{MATCHING}\n{COMMON}\n{STUDENT}"));
+
+/// What one call's record may carry, which both sides are given rather than assume.
+#[derive(Debug, Clone, Copy, Serialize)]
+struct Limits {
+	stdout: usize,
+	file: usize,
+	value: usize,
+	message: usize,
+	/// The most a value handed to the other side's code may take, as JSON.
+	transfer: usize,
+	depth: usize,
+}
+
+const LIMITS: Limits = Limits {
+	stdout: 64 << 10,
+	file: 1 << 20,
+	value: 4 << 20,
+	message: 64 << 10,
+	transfer: 32 << 20,
+	depth: 100,
+};
+
+/// The most a record carries besides its value, stdout, message and files: its target,
+/// the matching evidence, and the keys around them.
+const SLACK: usize = 1 << 20;
 
 /// The tail of stderr kept for diagnosing a crash.
 const STDERR_TAIL: usize = 4096;
 
-/// The descriptor the harness writes records to. On unix it is a pipe of its own, so
-/// nothing a student does to stdout — rewrapping it, writing to `sys.__stdout__`, printing
-/// from a thread — can reach the records. Elsewhere it is stdout, framed by the nonce.
+/// How long the student side has to finish by itself once the teacher side has: it was
+/// told to, and only a hung or stopped student side takes longer.
+const LINGER: Duration = Duration::from_millis(500);
+
+/// The descriptor the teacher side writes records to. On unix it is a pipe of its own;
+/// elsewhere stderr, since stdin and stdout are its pipe to the student side.
 #[cfg(unix)]
 const RECORD_FD: i32 = 3;
 #[cfg(not(unix))]
-const RECORD_FD: i32 = 1;
+const RECORD_FD: i32 = 2;
 
-/// What a unit's records may total before the channel counts as flooded, which is also
-/// what the grader buffers for it at most: this floor, plus the most each call carries.
-const BASE_CAP: usize = 64 << 20;
-/// The most one call's records carry, measured: a 4 MiB value, plus 64 KiB each of
-/// stdout and checker message, which JSON escaping can grow sixfold (`harness.py`'s
-/// `VALUE_LIMIT`, `STDOUT_LIMIT` and `MESSAGE_LIMIT`).
-const CALL_BOUND: usize = 6 << 20;
-/// The most one observed file adds: `FILE_LIMIT` characters, escaped.
-const FILE_BOUND: usize = 7 << 20;
-
-/// The record channel's cap for `plan`: a correct submission never reaches it, however
-/// many calls the unit makes.
-fn record_cap(plan: &UnitPlan) -> usize {
-	let files = |n: usize| n.saturating_mul(FILE_BOUND);
-	let script = plan.script.as_ref().map_or(0, |s| files(s.files.len()));
-	plan.setup
+/// What the teacher side's record stream may hold for `plan`: its largest record — a call
+/// with its value, stdout, an error message and every file it observes, each of which JSON
+/// escaping can grow sixfold — and one record per call and check, plus the frame around
+/// them.
+fn record_bounds(plan: &UnitPlan) -> Bounds {
+	let files = plan
+		.setup
 		.iter()
 		.chain(&plan.steps)
-		.map(|c| CALL_BOUND.saturating_add(files(c.files.len())))
-		.fold(BASE_CAP.saturating_add(script), usize::saturating_add)
+		.map(|c| c.files.len())
+		.chain(plan.script.as_ref().map(|s| s.files.len()))
+		.max()
+		.unwrap_or(0);
+	let per_file = 6 * LIMITS.file + 4096;
+	Bounds {
+		frame: (SLACK + LIMITS.value + 6 * (LIMITS.stdout + LIMITS.message))
+			.saturating_add(files.saturating_mul(per_file)),
+		// ready, load, done, and a fatal or a stop, besides the calls and checks.
+		count: 5 + plan.setup.len() + 2 * plan.steps.len().max(1),
+	}
 }
 
-/// A unit's private directory: the payload beside a working directory the student runs in.
+/// What an inspection may report: every export and its parameters.
+const INSPECT_BOUNDS: Bounds = Bounds {
+	frame: 64 << 20,
+	count: 4,
+};
+
+/// One side's private directories.
+struct Side {
+	work: PathBuf,
+	/// Its own `HOME` and `TMPDIR`, so nothing one unit leaves there reaches another.
+	home: PathBuf,
+	tmp: PathBuf,
+}
+
+/// A unit's private directory: one working directory per side, the teacher side's
+/// payload, and a read-only copy of the subject's source.
 struct Staged {
 	/// Removed on drop.
 	root: tempfile::TempDir,
-	work: PathBuf,
-	/// The unit's own `HOME` and `TMPDIR`, so nothing one unit leaves there reaches another.
-	home: PathBuf,
-	tmp: PathBuf,
+	teacher: Side,
+	student: Side,
 	payload: PathBuf,
-	/// The subject file's copy inside `work`.
-	subject: PathBuf,
+	/// The subject file's copy in the student side's working directory.
+	subject: Option<PathBuf>,
+	/// The subject's source, for teacher code to read.
+	source: Option<PathBuf>,
 }
 
 /// Copy `src` (a file or a directory) to `dest`, creating parents.
@@ -115,171 +189,265 @@ fn copy_into(src: &Path, dest: &Path) -> std::io::Result<()> {
 	}
 }
 
+fn side(root: &Path, name: &str) -> std::io::Result<Side> {
+	let side = Side {
+		work: root.join(name),
+		home: root.join(format!("{name}-home")),
+		tmp: root.join(format!("{name}-tmp")),
+	};
+	for dir in [&side.work, &side.home, &side.tmp] {
+		std::fs::create_dir(dir)?;
+	}
+	Ok(side)
+}
+
 fn stage(
 	subject: Option<&Path>,
 	data_files: &[(PathBuf, String)],
-	payload: impl FnOnce(Option<&Path>) -> serde_json::Value,
+	payload: impl FnOnce(&Staged) -> serde_json::Value,
 ) -> std::io::Result<Staged> {
 	let root = tempfile::Builder::new()
 		.prefix("scriptmark-unit-")
 		.tempdir()?;
-	let work = root.path().join("work");
-	let home = root.path().join("home");
-	let tmp = root.path().join("tmp");
-	for dir in [&work, &home, &tmp] {
-		std::fs::create_dir(dir)?;
-	}
+	let teacher = side(root.path(), "teacher")?;
+	let student = side(root.path(), "student")?;
+	// Teacher code that opens a data file by its relative path finds it, as student code does.
 	for (src, rel) in data_files {
-		copy_into(src, &work.join(rel))?;
+		copy_into(src, &student.work.join(rel))?;
+		copy_into(src, &teacher.work.join(rel))?;
 	}
-	let copied = match subject {
+	let (copied, source) = match subject {
 		Some(file) => {
 			let name = file
 				.file_name()
 				.unwrap_or(std::ffi::OsStr::new("subject.py"));
-			let dest = work.join(name);
+			let dest = student.work.join(name);
 			std::fs::copy(file, &dest)?;
-			Some(dest)
+			let sources = root.path().join("source");
+			std::fs::create_dir(&sources)?;
+			let source = sources.join(name);
+			std::fs::copy(file, &source)?;
+			let mut readonly = std::fs::metadata(&source)?.permissions();
+			readonly.set_readonly(true);
+			std::fs::set_permissions(&source, readonly)?;
+			(Some(dest), Some(source))
 		}
-		None => None,
+		None => (None, None),
 	};
-	let payload_path = root.path().join("payload.json");
-	std::fs::write(&payload_path, payload(copied.as_deref()).to_string())?;
-	Ok(Staged {
-		work,
-		home,
-		tmp,
-		payload: payload_path,
-		subject: copied.unwrap_or_default(),
+	let staged = Staged {
+		// The teacher side's argument: it reads the payload and removes it.
+		payload: teacher.work.join("payload.json"),
+		teacher,
+		student,
+		subject: copied,
+		source,
 		root,
-	})
+	};
+	std::fs::write(&staged.payload, payload(&staged).to_string())?;
+	Ok(staged)
 }
 
-fn nonce() -> String {
-	use rand::Rng;
-	let bytes: [u8; 16] = rand::rng().random();
-	bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// What a finished harness process left behind.
+/// What a finished unit left behind.
 struct Finished {
-	stdout: String,
-	/// The process wrote more than its cap to the record channel.
-	stdout_overflow: bool,
-	stderr: String,
+	records: Records,
 	exit: Exit,
+	teacher_exit: Exit,
+	stderr: String,
+}
+
+impl Finished {
+	fn spawn_failed(message: String) -> Self {
+		Self {
+			records: Records::default(),
+			exit: Exit::Spawn(message.clone()),
+			teacher_exit: Exit::Spawn(message),
+			stderr: String::new(),
+		}
+	}
 }
 
 impl PythonExecutor {
-	/// Run the harness on a staged unit, killing it at `deadline_secs`.
-	async fn run_harness(
-		&self,
-		staged: &Staged,
-		deadline_secs: u64,
-		stdin: Option<String>,
-		cap: usize,
-	) -> Finished {
-		use tokio::io::AsyncWriteExt;
-
+	/// A command for one side: a cleared environment, the side's own `HOME` and `TMPDIR`,
+	/// and the kernel's limits.
+	fn command(&self, script: &str, side: &Side, deadline_secs: u64) -> Command {
 		let mut cmd = Command::new(&self.python_cmd);
 		cmd.env_clear()
 			.env("PATH", "/usr/bin:/usr/local/bin:/opt/homebrew/bin")
-			.env("HOME", &staged.home)
-			.env("TMPDIR", &staged.tmp)
+			.env("HOME", &side.home)
+			.env("TMPDIR", &side.tmp)
 			// Isolated: no user site-packages, whose `.pth` files run before the harness, no
-			// PYTHON* variables, and the unit's directory, which holds the student's file,
-			// off sys.path. What those variables used to set is spelled as flags.
-			.args(["-I", "-B", "-X", "utf8"])
-			.arg("-c")
-			.arg(format!(
-				"import sys; sys.path[:] = [p for p in sys.path if p]\n{}\n{}",
-				include_str!("../matching.py"),
-				HARNESS
-			))
-			.arg(&staged.payload)
-			.current_dir(&staged.work)
-			.stdin(if stdin.is_some() {
-				std::process::Stdio::piped()
-			} else {
-				std::process::Stdio::null()
-			})
-			.stderr(std::process::Stdio::piped())
+			// PYTHON* variables, and the working directory off sys.path. What those variables
+			// used to set is spelled as flags.
+			.args(["-I", "-B", "-X", "utf8", "-c", script])
+			.current_dir(&side.work)
 			.kill_on_drop(true);
-		let spawn_failed = |message: String| Finished {
-			stdout: String::new(),
-			stdout_overflow: false,
-			stderr: String::new(),
-			exit: Exit::Spawn(message),
-		};
+		#[cfg(windows)]
+		if let Some(root) = std::env::var_os("SYSTEMROOT") {
+			// Python cannot seed its hash randomisation on Windows without it.
+			cmd.env("SYSTEMROOT", root);
+		}
 		#[cfg(unix)]
-		let records = {
+		{
 			// Its own process group, so anything it spawns dies with it.
 			cmd.process_group(0);
 			apply_sandbox(&mut cmd, &sandbox_for(deadline_secs));
-			// The student's stdout goes nowhere: what they print during a call is captured
-			// in-process, and the records have a pipe of their own.
-			cmd.stdout(std::process::Stdio::null());
-			match record_pipe(&mut cmd) {
+		}
+		#[cfg(not(unix))]
+		let _ = deadline_secs;
+		cmd
+	}
+
+	/// Run a staged unit — the teacher side, and the student side when `with_student` —
+	/// and end both at `deadline_secs`.
+	async fn run_unit(
+		&self,
+		staged: &Staged,
+		deadline_secs: u64,
+		bounds: Bounds,
+		with_student: bool,
+	) -> Finished {
+		let mut teacher_cmd = self.command(&TEACHER_SCRIPT, &staged.teacher, deadline_secs);
+		teacher_cmd.arg(&staged.payload);
+		let mut student = None;
+		if with_student {
+			// teacher → student, and student → teacher.
+			let pipes = std::io::pipe().and_then(|a| Ok((a, std::io::pipe()?)));
+			let ((to_student, from_teacher), (to_teacher, from_student)) = match pipes {
+				Ok(pipes) => pipes,
+				Err(e) => {
+					return Finished::spawn_failed(format!("could not join the two sides: {e}"));
+				}
+			};
+			let mut cmd = self.command(&STUDENT_SCRIPT, &staged.student, deadline_secs);
+			cmd.stdin(std::process::Stdio::from(to_student))
+				.stdout(std::process::Stdio::from(from_student))
+				.stderr(std::process::Stdio::piped());
+			// The command holds the parent's copies of the student's ends: they go with it.
+			match cmd.spawn() {
+				Ok(child) => student = Some(child),
+				Err(e) => {
+					return Finished::spawn_failed(format!(
+						"could not start {}: {e}",
+						self.python_cmd
+					));
+				}
+			}
+			drop(cmd);
+			teacher_cmd
+				.stdin(std::process::Stdio::from(to_teacher))
+				.stdout(std::process::Stdio::from(from_teacher));
+		} else {
+			teacher_cmd
+				.stdin(std::process::Stdio::null())
+				.stdout(std::process::Stdio::null());
+		}
+		#[cfg(unix)]
+		let records = {
+			teacher_cmd.stderr(std::process::Stdio::piped());
+			match record_pipe(&mut teacher_cmd) {
 				Ok(pipe) => pipe,
-				Err(e) => return spawn_failed(format!("could not open the record channel: {e}")),
+				Err(e) => {
+					return Finished::spawn_failed(format!(
+						"could not open the record channel: {e}"
+					));
+				}
 			}
 		};
 		#[cfg(not(unix))]
-		cmd.stdout(std::process::Stdio::piped());
+		teacher_cmd.stderr(std::process::Stdio::piped());
 
-		let mut child = match cmd.spawn() {
+		let mut teacher = match teacher_cmd.spawn() {
 			Ok(child) => child,
-			Err(e) => return spawn_failed(format!("could not start {}: {e}", self.python_cmd)),
+			Err(e) => {
+				return Finished::spawn_failed(format!("could not start {}: {e}", self.python_cmd));
+			}
 		};
-		// The parent's copy of the write end goes, so the channel ends when the unit does.
+		// The parent's copies of every pipe end go, so each pipe ends when its side does.
+		drop(teacher_cmd);
 		#[cfg(unix)]
 		let records = {
 			let (reader, writer) = records;
 			drop(writer);
 			match tokio::net::unix::pipe::Receiver::from_owned_fd(reader.into()) {
 				Ok(receiver) => receiver,
-				Err(e) => return spawn_failed(format!("could not read the record channel: {e}")),
+				Err(e) => {
+					return Finished::spawn_failed(format!(
+						"could not read the record channel: {e}"
+					));
+				}
 			}
 		};
 		#[cfg(not(unix))]
-		let records = child.stdout.take();
-		// Killed however this future ends: finished, timed out, or dropped by a caller.
-		let _group = GroupGuard::new(child.id());
+		let records = teacher.stderr.take();
 
-		if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
-			tokio::spawn(async move {
-				// A script that never reads its stdin closes the pipe; that is not an error.
-				let _ = pipe.write_all(text.as_bytes()).await;
-			});
-		}
-		let stdout = Arc::new(Mutex::new(Sink::head(cap)));
-		let stderr = Arc::new(Mutex::new(Sink::tail(STDERR_TAIL)));
+		// Killed however this future ends: finished, timed out, or dropped by a caller.
+		let _teacher_group = GroupGuard::new(teacher.id());
+		let student_group = GroupGuard::new(student.as_ref().and_then(Child::id));
+
+		let reader = Arc::new(Mutex::new(Reader::new(bounds)));
+		let teacher_tail = Arc::new(Mutex::new(Sink::tail(STDERR_TAIL)));
+		let student_tail = Arc::new(Mutex::new(Sink::tail(STDERR_TAIL)));
 		let mut pumps = tokio::task::JoinSet::new();
 		#[cfg(unix)]
-		pumps.spawn(pump(records, stdout.clone()));
+		pumps.spawn(pump_records(records, reader.clone()));
 		#[cfg(not(unix))]
 		if let Some(pipe) = records {
-			pumps.spawn(pump(pipe, stdout.clone()));
+			pumps.spawn(pump_records(pipe, reader.clone()));
 		}
-		if let Some(pipe) = child.stderr.take() {
-			pumps.spawn(pump(pipe, stderr.clone()));
+		#[cfg(unix)]
+		if let Some(pipe) = teacher.stderr.take() {
+			pumps.spawn(pump(pipe, teacher_tail.clone()));
+		}
+		let over_memory = Arc::new(AtomicBool::new(false));
+		if let Some(child) = student.as_mut() {
+			if let Some(pipe) = child.stderr.take() {
+				pumps.spawn(pump(pipe, student_tail.clone()));
+			}
+			if let Some(pid) = child.id() {
+				let limit = self.memory_mb.saturating_mul(1 << 20);
+				let over = over_memory.clone();
+				let group = student_group.0;
+				pumps.spawn(async move { watch_memory(pid, group, limit, over).await });
+			}
 		}
 
-		let exit =
-			match tokio::time::timeout(std::time::Duration::from_secs(deadline_secs), child.wait())
-				.await
-			{
-				Ok(Ok(status)) => exit_of(status),
-				Ok(Err(e)) => Exit::Spawn(format!("lost the process: {e}")),
-				Err(_) => Exit::Deadline,
-			};
-		// Whatever is left of the group — the harness at its deadline, or a process a student
-		// left behind holding the pipes — goes now.
-		_group.kill();
-		let _ = child.kill().await;
+		let deadline = Duration::from_secs(deadline_secs);
+		let teacher_exit = match tokio::time::timeout(deadline, teacher.wait()).await {
+			Ok(Ok(status)) => exit_of(status),
+			Ok(Err(e)) => Exit::Spawn(format!("lost the teacher side: {e}")),
+			Err(_) => Exit::Deadline,
+		};
+		let exit = match student.as_mut() {
+			None => Exit::Code(0),
+			Some(child) => {
+				let linger = if teacher_exit == Exit::Deadline {
+					Duration::ZERO
+				} else {
+					LINGER
+				};
+				let ended = tokio::time::timeout(linger, child.wait()).await;
+				let over = || over_memory.load(Ordering::SeqCst);
+				match ended {
+					Ok(Ok(_)) if over() => Exit::Memory,
+					Ok(Ok(status)) => exit_of(status),
+					Ok(Err(e)) => Exit::Spawn(format!("lost the student side: {e}")),
+					Err(_) if over() => Exit::Memory,
+					Err(_) if teacher_exit == Exit::Deadline => Exit::Deadline,
+					Err(_) => Exit::Stopped,
+				}
+			}
+		};
+		// Whatever is left of either side — a hung student side, or a process either left
+		// behind holding a pipe — goes now.
+		drop(_teacher_group);
+		drop(student_group);
+		let _ = teacher.kill().await;
+		if let Some(child) = student.as_mut() {
+			let _ = child.kill().await;
+		}
 
 		// What was read stays read: a pipe held open past this only loses what comes after.
-		let drain = tokio::time::sleep(std::time::Duration::from_secs(1));
+		let drain = tokio::time::sleep(Duration::from_secs(1));
 		tokio::pin!(drain);
 		loop {
 			tokio::select! {
@@ -290,20 +458,27 @@ impl PythonExecutor {
 				}
 			}
 		}
-		let (stdout, stdout_overflow) = {
-			let sink = stdout.lock().expect("stdout sink poisoned");
-			(
-				String::from_utf8_lossy(&sink.bytes).into_owned(),
-				sink.overflow,
-			)
+		let records = std::mem::replace(
+			&mut *reader.lock().expect("record reader poisoned"),
+			Reader::new(bounds),
+		)
+		.finish();
+		let tail = |sink: &Arc<Mutex<Sink>>| {
+			String::from_utf8_lossy(&sink.lock().expect("stderr sink poisoned").bytes)
+				.trim()
+				.to_string()
 		};
-		let stderr = String::from_utf8_lossy(&stderr.lock().expect("stderr sink poisoned").bytes)
-			.into_owned();
+		let (teacher_err, student_err) = (tail(&teacher_tail), tail(&student_tail));
+		let stderr = match (teacher_err.is_empty(), student_err.is_empty()) {
+			(_, true) => teacher_err,
+			(true, false) => format!("student side: {student_err}"),
+			(false, false) => format!("{teacher_err}\nstudent side: {student_err}"),
+		};
 		Finished {
-			stdout,
-			stdout_overflow,
-			stderr,
+			records,
 			exit,
+			teacher_exit,
+			stderr,
 		}
 	}
 }
@@ -334,6 +509,78 @@ fn record_pipe(cmd: &mut Command) -> std::io::Result<(std::io::PipeReader, std::
 	Ok((reader, writer))
 }
 
+/// Read frames as they arrive. Past a frame the stream may not hold, keep reading and
+/// drop what comes, so a teacher side still writing can finish.
+async fn pump_records<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, reader: Arc<Mutex<Reader>>) {
+	use tokio::io::AsyncReadExt;
+	let mut header = [0u8; 4];
+	loop {
+		if pipe.read_exact(&mut header).await.is_err() {
+			break;
+		}
+		let size = u32::from_be_bytes(header) as usize;
+		if !reader.lock().expect("record reader poisoned").admits(size) {
+			let mut sink = tokio::io::sink();
+			let _ = tokio::io::copy(&mut pipe, &mut sink).await;
+			break;
+		}
+		let mut body = vec![0u8; size];
+		// A frame cut off by a kill is the end of the stream, not a forgery.
+		if pipe.read_exact(&mut body).await.is_err() {
+			break;
+		}
+		reader.lock().expect("record reader poisoned").frame(&body);
+	}
+}
+
+/// End the student side once it holds more than `limit` bytes: the operating system's
+/// sandbox cannot bound its memory everywhere, so the grader watches it.
+async fn watch_memory(pid: u32, group: Option<i32>, limit: u64, over: Arc<AtomicBool>) {
+	let mut tick = tokio::time::interval(Duration::from_millis(50));
+	while let Some(held) = resident_bytes(pid) {
+		if held > limit {
+			over.store(true, Ordering::SeqCst);
+			if let Some(group) = group {
+				kill_group(group);
+			}
+			return;
+		}
+		tick.tick().await;
+	}
+}
+
+/// The memory `pid` holds, or None once it is gone.
+#[cfg(target_os = "macos")]
+fn resident_bytes(pid: u32) -> Option<u64> {
+	let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+	let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+	// SAFETY: `info` is a properly sized, writable proc_taskinfo.
+	let written = unsafe {
+		libc::proc_pidinfo(
+			i32::try_from(pid).ok()?,
+			libc::PROC_PIDTASKINFO,
+			0,
+			(&mut info as *mut libc::proc_taskinfo).cast(),
+			size,
+		)
+	};
+	(written == size).then_some(info.pti_resident_size)
+}
+
+#[cfg(target_os = "linux")]
+fn resident_bytes(pid: u32) -> Option<u64> {
+	let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+	let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+	// SAFETY: sysconf only reads a constant.
+	let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+	Some(pages.saturating_mul(u64::try_from(page).ok()?))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn resident_bytes(_pid: u32) -> Option<u64> {
+	None
+}
+
 /// The sandbox for a unit: its CPU limit sits above its deadline, a backstop for one busy
 /// core rather than a second, shorter timeout.
 fn sandbox_for(deadline_secs: u64) -> crate::runner::sandbox::SandboxConfig {
@@ -355,7 +602,7 @@ pub fn kill_all_units() {
 	}
 }
 
-/// A unit's process group: registered while it lives, killed when the guard drops.
+/// A side's process group: registered while it lives, killed when the guard drops.
 struct GroupGuard(Option<i32>);
 
 impl GroupGuard {
@@ -368,12 +615,6 @@ impl GroupGuard {
 				.push(group);
 		}
 		Self(group)
-	}
-
-	fn kill(&self) {
-		if let Some(group) = self.0 {
-			kill_group(group);
-		}
 	}
 }
 
@@ -400,43 +641,25 @@ fn kill_group(group: i32) {
 #[cfg(not(unix))]
 fn kill_group(_group: i32) {}
 
-/// A pipe's contents, bounded: the first `cap` bytes, or only the last.
+/// A pipe's contents, bounded: the last `cap` bytes.
 struct Sink {
 	bytes: Vec<u8>,
 	cap: usize,
-	keep_tail: bool,
-	overflow: bool,
 }
 
 impl Sink {
-	fn head(cap: usize) -> Self {
+	fn tail(cap: usize) -> Self {
 		Self {
 			bytes: Vec::new(),
 			cap,
-			keep_tail: false,
-			overflow: false,
-		}
-	}
-
-	fn tail(cap: usize) -> Self {
-		Self {
-			keep_tail: true,
-			..Self::head(cap)
 		}
 	}
 
 	fn push(&mut self, chunk: &[u8]) {
-		if self.keep_tail {
-			self.bytes.extend_from_slice(chunk);
-			if self.bytes.len() > self.cap {
-				let excess = self.bytes.len() - self.cap;
-				self.bytes.drain(..excess);
-			}
-		} else {
-			let room = self.cap.saturating_sub(self.bytes.len());
-			self.bytes
-				.extend_from_slice(&chunk[..room.min(chunk.len())]);
-			self.overflow |= chunk.len() > room;
+		self.bytes.extend_from_slice(chunk);
+		if self.bytes.len() > self.cap {
+			let excess = self.bytes.len() - self.cap;
+			self.bytes.drain(..excess);
 		}
 	}
 }
@@ -471,6 +694,24 @@ async fn discard(staged: Staged) {
 	let _ = tokio::task::spawn_blocking(move || drop(staged.root)).await;
 }
 
+/// The teacher side's payload, common to every unit of a spec.
+fn base_payload(mode: &str) -> serde_json::Value {
+	serde_json::json!({
+		"mode": mode,
+		"records": RECORD_FD,
+		"limits": LIMITS,
+		"grace": GRACE_SECS,
+		"startup": STARTUP_SECS,
+	})
+}
+
+fn extend(mut base: serde_json::Value, more: serde_json::Value) -> serde_json::Value {
+	if let (Some(base), serde_json::Value::Object(more)) = (base.as_object_mut(), more) {
+		base.extend(more);
+	}
+	base
+}
+
 impl Executor for PythonExecutor {
 	fn language(&self) -> &str {
 		"python"
@@ -490,29 +731,27 @@ impl Executor for PythonExecutor {
 		if spec.meta.imports.is_empty() {
 			return Ok(TeacherRuntime::default());
 		}
-		let nonce = nonce();
 		let data = spec
 			.meta
 			.data_files
 			.iter()
 			.map(|rel| (spec.dir.join(rel), rel.clone()))
 			.collect::<Vec<_>>();
-		let payload = serde_json::json!({
-			"nonce": nonce,
-			"channel": RECORD_FD,
-			"mode": "inspect",
-			"imports": spec.meta.imports,
-		});
+		let payload = extend(
+			base_payload("inspect"),
+			serde_json::json!({ "imports": spec.meta.imports }),
+		);
 		let staged = tokio::task::spawn_blocking(move || stage(None, &data, |_| payload))
 			.await
 			.map_err(|e| e.to_string())?
 			.map_err(|e| format!("could not stage the teacher modules: {e}"))?;
+		let deadline = timeout_secs.saturating_add(STARTUP_SECS);
 		let finished = self
-			.run_harness(&staged, timeout_secs + 2, None, BASE_CAP)
+			.run_unit(&staged, deadline, INSPECT_BOUNDS, false)
 			.await;
 		discard(staged).await;
 
-		let records = crate::runner::records::parse(&finished.stdout, &nonce);
+		let records = finished.records;
 		if let Some(fatal) = records.fatal {
 			return Err(format!(
 				"teacher module failed to import: {}: {}",
@@ -521,7 +760,7 @@ impl Executor for PythonExecutor {
 		}
 		match records.inspect {
 			Some(runtime) => Ok(runtime),
-			None => Err(match finished.exit {
+			None => Err(match finished.teacher_exit {
 				Exit::Deadline => {
 					format!("importing the teacher modules took longer than {timeout_secs}s")
 				}
@@ -535,35 +774,38 @@ impl Executor for PythonExecutor {
 	}
 
 	async fn run(&self, plan: &UnitPlan) -> UnitObservation {
-		let nonce = nonce();
 		let data = plan.data_files.clone();
 		let file = plan.file.clone();
 		let payload = {
-			let nonce = nonce.clone();
 			let plan = plan.clone();
-			move |subject: Option<&Path>| {
-				serde_json::json!({
-					"nonce": nonce,
-					"channel": RECORD_FD,
-					"mode": "unit",
-					"student": subject,
-					"script": plan.script.as_ref().map(|s| serde_json::json!({
-						"timeout": s.timeout,
-						"files": s.files,
-					})),
-					"imports": plan.imports,
-					"vars": &*plan.vars,
-					"allowed_imports": plan.allowed_imports,
-					"load_timeout": plan.load_timeout,
-					"subject": plan.subject,
-					"functions": plan.functions,
-					"lookup": match plan.subject {
-						Subject::Student => "fuzzy",
-						Subject::Reference => "exact",
-					},
-					"setup": plan.setup,
-					"steps": plan.steps,
-				})
+			move |staged: &Staged| {
+				extend(
+					base_payload("unit"),
+					serde_json::json!({
+						"role": match plan.subject {
+							Subject::Student => "student",
+							Subject::Reference => "reference",
+						},
+						"subject": staged
+							.subject
+							.as_deref()
+							.and_then(Path::file_name)
+							.map(|n| n.to_string_lossy().into_owned()),
+						"source": staged.source,
+						"script": plan.script.as_ref().map(|s| serde_json::json!({
+							"timeout": s.timeout,
+							"stdin": s.stdin,
+							"files": s.files,
+						})),
+						"imports": plan.imports,
+						"vars": &*plan.vars,
+						"allowed_imports": plan.allowed_imports,
+						"load_timeout": plan.load_timeout,
+						"functions": plan.functions,
+						"setup": plan.setup,
+						"steps": plan.steps,
+					}),
+				)
 			}
 		};
 		let staged = match tokio::task::spawn_blocking(move || stage(Some(&file), &data, payload))
@@ -579,25 +821,14 @@ impl Executor for PythonExecutor {
 				return UnitObservation::not_started(Exit::Spawn(format!("staging panicked: {e}")));
 			}
 		};
-		debug_assert!(staged.subject.is_file());
+		debug_assert!(staged.subject.as_ref().is_some_and(|s| s.is_file()));
 
-		let stdin = plan
-			.script
-			.as_ref()
-			.map(|s| s.stdin.clone().unwrap_or_default());
-		let cap = record_cap(plan);
 		let finished = self
-			.run_harness(&staged, plan.deadline_secs(), stdin, cap)
+			.run_unit(&staged, plan.deadline_secs(), record_bounds(plan), true)
 			.await;
 		discard(staged).await;
 
-		let mut records = crate::runner::records::parse(&finished.stdout, &nonce);
-		if finished.stdout_overflow && records.protocol_error.is_none() {
-			records.protocol_error = Some(ProtocolError::Flooded(format!(
-				"more than {} MiB was written to the record channel",
-				cap >> 20
-			)));
-		}
+		let records = finished.records;
 		UnitObservation {
 			ready: records.ready,
 			load: records.load,
@@ -605,8 +836,10 @@ impl Executor for PythonExecutor {
 			steps: records.steps,
 			checks: records.checks,
 			fatal: records.fatal,
+			stopped: records.stopped,
 			done: records.done,
 			exit: finished.exit,
+			teacher_exit: finished.teacher_exit,
 			protocol_error: records.protocol_error,
 			stderr: finished.stderr,
 		}
@@ -634,10 +867,11 @@ mod tests {
 		assert_eq!(sandbox_for(u64::MAX).cpu_secs, u64::MAX, "saturates");
 	}
 
-	/// The cap grows with every call and observed file, so a long scenario of large but
-	/// legal values is never taken for a flood.
+	/// Each record is bounded by the largest a call can make, and the stream by the number
+	/// of records the plan can produce: a long scenario of large but legal values is never
+	/// taken for a flood, and nothing is buffered on a guess.
 	#[test]
-	fn test_the_record_cap_grows_with_the_units_calls_and_files() {
+	fn test_record_bounds_follow_the_plan() {
 		let step = |files: usize| CallPlan {
 			target: crate::models::Target::Function { name: "f".into() },
 			args: Vec::new(),
@@ -660,10 +894,13 @@ mod tests {
 			setup: Vec::new(),
 			steps,
 		};
-		assert_eq!(record_cap(&plan(Vec::new())), BASE_CAP);
-		let wide = record_cap(&plan(vec![step(1); 20]));
+		let plain = record_bounds(&plan(vec![step(0); 20]));
+		let filed = record_bounds(&plan(vec![step(2); 20]));
 		// Measured: one call with a 4 MiB value, 64 KiB of escaped stdout, a failing check's
 		// 64 KiB message and one 1 Mi-character file came to 10.75 MiB.
-		assert!(wide >= BASE_CAP + 20 * (43 << 18), "{wide}");
+		assert!(filed.frame >= 43 << 18, "{}", filed.frame);
+		assert!(filed.frame > plain.frame);
+		assert_eq!(plain.count, filed.count);
+		assert!(plain.count >= 2 * 20 + 3);
 	}
 }

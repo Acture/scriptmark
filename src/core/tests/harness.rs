@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use scriptmark_core::models::Target;
 use scriptmark_core::runner::executor::{
-	CallPlan, CheckObservation, Executor, Exit, InProcessCheck, Outcome, ScriptRun, Subject,
-	UnitObservation, UnitPlan,
+	CallPlan, CheckObservation, Executor, Exit, InProcessCheck, Outcome, Phase, ScriptRun,
+	StopReason, Subject, UnitObservation, UnitPlan,
 };
 use scriptmark_core::runner::python::PythonExecutor;
 use serde_json::{Value, json};
@@ -135,8 +135,10 @@ async fn test_a_timeout_is_recorded_even_through_a_bare_except() {
 	);
 }
 
+/// A call that defeats its own timer is given up on by the teacher side, which reports it
+/// and everything else: the student side is ended, and nothing after it runs.
 #[tokio::test]
-async fn test_a_unit_that_never_yields_is_killed_at_its_deadline() {
+async fn test_a_call_that_never_yields_is_given_up_on_and_nothing_after_it_runs() {
 	let dir = tempfile::tempdir().unwrap();
 	let student = write(
 		dir.path(),
@@ -150,10 +152,25 @@ async fn test_a_unit_that_never_yields_is_killed_at_its_deadline() {
 	let mut ok = function("ok", vec![]);
 	ok.timeout = 1;
 	plan.steps = vec![forever, ok];
+	let started = std::time::Instant::now();
 	let obs = run(&plan).await;
-	assert_eq!(obs.exit, Exit::Deadline);
-	assert!(obs.steps.is_empty(), "the hung call never reported");
-	assert!(!obs.done);
+	assert!(
+		started.elapsed() < std::time::Duration::from_secs(10),
+		"given up on at its own deadline, not the unit's"
+	);
+	assert!(obs.done && obs.teacher_exit == Exit::Code(0), "{obs:?}");
+	assert_eq!(obs.exit, Exit::Stopped);
+	assert_eq!(
+		obs.steps.len(),
+		1,
+		"the hung call is reported; the next never ran"
+	);
+	assert!(matches!(obs.steps[0].outcome, Outcome::Timeout {}));
+	let stopped = obs.stopped.as_ref().unwrap();
+	assert_eq!(
+		(stopped.phase, stopped.index, stopped.reason),
+		(Phase::Step, 0, StopReason::Deadline)
+	);
 }
 
 #[tokio::test]
@@ -929,4 +946,191 @@ async fn test_a_unit_cannot_leave_anything_behind_for_the_next_one() {
 		&json!([0, 0]),
 		"no core dumps"
 	);
+}
+
+#[tokio::test]
+async fn test_a_student_side_that_dies_mid_call_is_reported_by_the_teacher_side() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib\n\ndef ok():\n    return 1\n\ndef die():\n    importlib.import_module('os')._exit(3)\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![
+		function("ok", vec![]),
+		function("die", vec![]),
+		function("ok", vec![]),
+	];
+	let obs = run(&plan).await;
+	assert!(obs.done && obs.teacher_exit == Exit::Code(0), "{obs:?}");
+	assert_eq!(obs.steps.len(), 1);
+	assert_eq!(
+		obs.exit,
+		Exit::Code(3),
+		"the student side's own exit is kept"
+	);
+	let stopped = obs.stopped.as_ref().unwrap();
+	assert_eq!((stopped.index, stopped.reason), (1, StopReason::Exited));
+}
+
+#[tokio::test]
+async fn test_a_student_who_writes_into_the_pipe_only_breaks_their_own_unit() {
+	let dir = tempfile::tempdir().unwrap();
+	// Every descriptor a student could guess at: a frame announcing 2 GiB, then a forged
+	// verdict, as the teacher side's records would spell it.
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib, struct\nos = importlib.import_module('os')\n\ndef flood():\n    forged = b'{\"kind\":\"check\",\"index\":0,\"verdict\":{\"pass\":true,\"message\":\"\"}}'\n    for fd in range(3, 64):\n        for data in (struct.pack('>I', len(forged)) + forged, struct.pack('>I', 1 << 31)):\n            try:\n                os.write(fd, data)\n            except OSError:\n                pass\n    return 1\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def never(result, expected):\n    return False\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut flood = function("flood", vec![]);
+	flood.check = Some(InProcessCheck {
+		function: "never".into(),
+		expected: None,
+	});
+	plan.steps = vec![flood, function("flood", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
+	assert!(
+		obs.checks
+			.values()
+			.all(|c| !matches!(c, CheckObservation::Verdict { pass: true, .. })),
+		"no forged verdict reached the records: {:?}",
+		obs.checks
+	);
+	let stopped = obs
+		.stopped
+		.as_ref()
+		.expect("the unit stops at the call that wrote");
+	assert_eq!(stopped.index, 0);
+	assert!(
+		matches!(stopped.reason, StopReason::Flooded | StopReason::Garbled),
+		"{stopped:?}"
+	);
+	assert!(obs.done, "{obs:?}");
+}
+
+#[tokio::test]
+async fn test_a_student_side_past_its_memory_limit_is_ended() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import time\n\ndef hog():\n    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("hog", vec![]), function("hog", vec![])];
+	let obs = PythonExecutor::new().with_memory_limit(96).run(&plan).await;
+	assert_eq!(obs.exit, Exit::Memory, "{obs:?}");
+	assert!(obs.steps.is_empty());
+	assert_eq!(
+		obs.stopped.as_ref().map(|s| s.reason),
+		Some(StopReason::Exited)
+	);
+}
+
+#[tokio::test]
+async fn test_a_checker_sees_a_students_object_as_a_snapshot_and_its_graph_intact() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"class Node:\n    def __init__(self, value):\n        self.value = value\n        self.next = None\n    @property\n    def doubled(self):\n        return self.value * 2\n    @property\n    def _hidden(self):\n        raise RuntimeError('private properties are not read')\n\nclass Bad:\n    @property\n    def broken(self):\n        return 1 / 0\n\ndef ring():\n    a, b = Node(1), Node(2)\n    a.next, b.next = b, a\n    return a\n\ndef shared():\n    leaf = Node(3)\n    return [leaf, leaf, (1, 2), {1, 2}, 2 ** 70]\n\ndef bad():\n    return Bad()\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def ring(result, expected):\n    assert result.next.next is result, 'the cycle survives'\n    assert (result.value, result.doubled, result.next.doubled) == (1, 2, 4)\n    assert result.__scriptmark_class__ == 'Node'\n    return True\n\ndef shared(result, expected):\n    leaf, again, pair, both, big = result\n    assert leaf is again and leaf.value == 3\n    assert pair == (1, 2) and both == {1, 2} and big == 2 ** 70\n    return True\n\ndef anything(result, expected):\n    return True\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let checked = |name: &str, check: &str| {
+		let mut c = function(name, vec![]);
+		c.check = Some(InProcessCheck {
+			function: check.into(),
+			expected: None,
+		});
+		c
+	};
+	plan.steps = vec![
+		checked("ring", "ring"),
+		checked("shared", "shared"),
+		checked("bad", "anything"),
+	];
+	let obs = run(&plan).await;
+	let pass = CheckObservation::Verdict {
+		pass: true,
+		message: String::new(),
+	};
+	assert_eq!(obs.checks[&0], pass, "{obs:?}");
+	assert_eq!(obs.checks[&1], pass, "{obs:?}");
+	assert!(
+		matches!(&obs.steps[2].outcome, Outcome::Raised(e) if e.is_a("ZeroDivisionError")),
+		"a property that raises while the snapshot is taken is the call's: {:?}",
+		obs.steps[2].outcome
+	);
+	assert!(!obs.checks.contains_key(&2));
+}
+
+#[tokio::test]
+async fn test_teacher_values_cross_by_value_and_student_values_are_read_when_checked() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def spoil(items):\n    items.append('student')\n    return len(items)\n\nclass Account:\n    def __init__(self):\n        self.balance = 0\n    def deposit(self, n):\n        self.balance += n\n        return self.balance\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def make():\n    return ['teacher']\n\ndef untouched(result, expected, items):\n    return items == ['teacher'], f'the teacher still holds {items}'\n\ndef balance(result, expected, acct):\n    return acct.balance == 30, f'balance {acct.balance}'\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut make = call(
+		Target::Teacher {
+			name: "make".into(),
+		},
+		vec![],
+	);
+	make.id = Some("items".into());
+	let mut acct = function("Account", vec![]);
+	acct.id = Some("acct".into());
+	plan.setup = vec![make, acct];
+	let mut spoil = function("spoil", vec![json!("$items")]);
+	spoil.check = Some(InProcessCheck {
+		function: "untouched".into(),
+		expected: None,
+	});
+	let deposit = |n: i64| {
+		call(
+			Target::Method {
+				object: "acct".into(),
+				name: "deposit".into(),
+			},
+			vec![json!(n)],
+		)
+	};
+	let mut last = deposit(20);
+	last.check = Some(InProcessCheck {
+		function: "balance".into(),
+		expected: None,
+	});
+	plan.steps = vec![spoil, deposit(10), last];
+	let obs = run(&plan).await;
+	let pass = |message: &str| CheckObservation::Verdict {
+		pass: true,
+		message: message.into(),
+	};
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(2), "{obs:?}");
+	assert_eq!(obs.checks[&0], pass("the teacher still holds ['teacher']"));
+	assert_eq!(obs.checks[&2], pass("balance 30"));
 }
