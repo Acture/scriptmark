@@ -42,11 +42,12 @@ pub fn run_lint(
 		.map_err(|e| format!("could not stage the file to lint: {e}"))?;
 	let (_keep, base) = scratch;
 	let work = base.join("work");
-	let copy = base.join("submission").join(
-		file_path
-			.file_name()
-			.ok_or_else(|| format!("'{}' names no file", file_path.display()))?,
-	);
+	let name = file_path
+		.file_name()
+		.ok_or_else(|| format!("'{}' names no file", file_path.display()))?;
+	let copy = base
+		.join("submission")
+		.join(safe_name(&name.to_string_lossy()));
 	std::fs::create_dir_all(&work)
 		.and_then(|_| std::fs::create_dir_all(copy.parent().expect("a parent")))
 		.and_then(|_| std::fs::copy(file_path, &copy))
@@ -133,6 +134,28 @@ pub fn run_lint(
 	Ok(style_score(warnings, config.max_warnings))
 }
 
+/// The student's file name with anything a shell would read as syntax replaced: the name
+/// reaches the tool's arguments, and a teacher's command may hand it to `sh -c`. Letters,
+/// digits, `.`, `_` and `-` stay, so a linter judging module names judges the same one.
+fn safe_name(name: &str) -> String {
+	let safe: String = name
+		.chars()
+		.map(|c| {
+			if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+				c
+			} else {
+				'_'
+			}
+		})
+		.collect();
+	// Never an option, and never `.` or `..`.
+	if safe.starts_with(['-', '.']) {
+		format!("_{safe}")
+	} else {
+		safe
+	}
+}
+
 /// The program a command names: a path as given, or the first match on the grader's PATH.
 fn locate(program: &str) -> Result<PathBuf, String> {
 	let given = Path::new(program);
@@ -192,20 +215,27 @@ fn tool_reads(program: &Path) -> Vec<PathBuf> {
 	reads
 }
 
-/// The directory a program is installed in: above its `bin` — a virtual environment or a
-/// Homebrew keg — or its own. Never a prefix many programs share, such as `/`,
-/// `/usr/local` or `/opt/homebrew`: those hold configuration and data in `etc` and `var`.
+/// What a program's installation is: the whole of it when it is self-contained — a virtual
+/// environment, as `uv tool` and `pipx` make, or a Homebrew keg — and otherwise only the
+/// program itself. A directory it merely sits in, such as `~/bin` or `/usr/local/bin`, may
+/// hold anything.
 fn installation(real: &Path) -> PathBuf {
 	let dir = real.parent().unwrap_or(real);
 	let above = dir.parent().filter(|above| {
-		matches!(
+		let in_bin = matches!(
 			dir.file_name().and_then(|n| n.to_str()),
 			Some("bin" | "sbin")
-		) && !["etc", "var"]
-			.iter()
-			.any(|shared| above.join(shared).exists())
+		);
+		let venv = above.join("pyvenv.cfg").is_file();
+		// …/Cellar/<formula>/<version>/bin/<program>
+		let keg = above
+			.parent()
+			.and_then(Path::parent)
+			.and_then(Path::file_name)
+			.is_some_and(|n| n == "Cellar");
+		in_bin && (venv || keg)
 	});
-	above.unwrap_or(dir).to_path_buf()
+	above.unwrap_or(real).to_path_buf()
 }
 
 /// `max(0, 1 - warnings / max_warnings) * 100`; with `max_warnings = 0`, any warning is 0.
@@ -242,18 +272,39 @@ mod tests {
 	}
 
 	#[test]
-	fn test_a_tool_is_read_from_its_own_installation_never_a_shared_prefix() {
+	fn test_a_tool_is_read_whole_only_when_its_installation_is_its_own() {
 		let dir = tempfile::tempdir().unwrap();
 		let root = dir.path();
-		for made in ["venv/bin", "prefix/bin", "prefix/etc"] {
+		for made in ["venv/bin", "Cellar/ruff/0.6/bin", "home/bin"] {
 			std::fs::create_dir_all(root.join(made)).unwrap();
 		}
+		std::fs::write(root.join("venv/pyvenv.cfg"), "home = /usr/bin\n").unwrap();
 		assert_eq!(installation(&root.join("venv/bin/ruff")), root.join("venv"));
 		assert_eq!(
-			installation(&root.join("prefix/bin/ruff")),
-			root.join("prefix/bin")
+			installation(&root.join("Cellar/ruff/0.6/bin/ruff")),
+			root.join("Cellar/ruff/0.6")
 		);
-		assert_eq!(installation(Path::new("/bin/sh")), PathBuf::from("/bin"));
+		// `~/bin` holds whatever its owner put there: only the tool itself.
+		assert_eq!(
+			installation(&root.join("home/bin/ruff")),
+			root.join("home/bin/ruff")
+		);
+		assert_eq!(installation(Path::new("/bin/sh")), PathBuf::from("/bin/sh"));
+	}
+
+	#[test]
+	fn test_a_students_file_name_never_reaches_the_tool_as_syntax() {
+		assert_eq!(safe_name("Lab5_1.py"), "Lab5_1.py");
+		assert_eq!(safe_name("x'; rm -rf ~ #.py"), "x___rm_-rf____.py");
+		assert_eq!(safe_name("-rf.py"), "_-rf.py");
+		assert_eq!(safe_name("..py"), "_..py");
+		assert_eq!(safe_name("实验一.py"), "___.py");
+		// The tool sees the safe name, whatever the submission was called: one line.
+		let dir = tempfile::tempdir().unwrap();
+		let file = dir.path().join("a;echo injected;b.py");
+		std::fs::write(&file, "x = 1\n").unwrap();
+		let probe = config("sh -c 'echo {file}' sh", 10);
+		assert_eq!(lint(&probe, &file), Ok(90.0));
 	}
 
 	#[test]
