@@ -88,6 +88,26 @@ pub fn apply_sandbox(cmd: &mut tokio::process::Command, config: &SandboxConfig) 
 	}
 }
 
+/// Limits for a teacher's tool — a checker script or a lint tool — run outside a unit: its
+/// own process group, so it ends with everything it started, a CPU limit a second past
+/// its deadline, and no file larger than `SandboxConfig`'s or any core dump.
+#[cfg(unix)]
+pub fn limit_tool(cmd: &mut std::process::Command, deadline_secs: u64) {
+	use std::os::unix::process::CommandExt;
+	let cpu = deadline_secs.saturating_add(1);
+	let fsize = SandboxConfig::default().fsize_mb * 1024 * 1024;
+	cmd.process_group(0);
+	// SAFETY: setrlimit is async-signal-safe; this runs between fork and exec.
+	unsafe {
+		cmd.pre_exec(move || {
+			let _ = set_rlimits(libc::RLIMIT_CPU, cpu, cpu.saturating_add(1));
+			let _ = set_rlimit(libc::RLIMIT_FSIZE, fsize);
+			let _ = set_rlimit(libc::RLIMIT_CORE, 0);
+			Ok(())
+		});
+	}
+}
+
 #[cfg(target_os = "macos")]
 type RlimitResource = libc::c_int;
 #[cfg(target_os = "linux")]
@@ -387,7 +407,7 @@ mod platform {
 		let abi = abi()?;
 		let ruleset = landlock_ruleset(abi, c).map_err(|e| format!("Landlock: {e}"))?;
 		// Signals and abstract sockets are Landlock's from ABI 6; before it, seccomp's.
-		let filters = filters(c, abi < ABI::V6)?;
+		let filters = filters(c, abi < ABI::V6, abi < ABI::V3)?;
 		let mut cmd = std::process::Command::new(program);
 		let mut ruleset = Some(ruleset);
 		// SAFETY: between fork and exec this only makes the syscalls that apply a prepared
@@ -505,9 +525,12 @@ mod platform {
 
 	/// The seccomp filters for `c`. Landlock governs paths; these govern what it cannot:
 	/// sockets other than a pair the process makes for itself, connecting or binding
-	/// anything, sending to an address, starting processes, tracing, and the kernel's other
-	/// ways out. `signals` adds the kill family, when Landlock cannot scope signals.
-	fn filters(c: &Confinement, signals: bool) -> Result<Vec<BpfProgram>, String> {
+	/// anything, sending to an address, starting processes, tracing, changing another
+	/// process's limits or scheduling, changing any file's mode, owner or extended
+	/// attributes, and the kernel's other ways out. `signals` adds the kill family, when
+	/// Landlock cannot scope signals; `truncate` adds truncating by path, before Landlock
+	/// governs it (ABI 3).
+	fn filters(c: &Confinement, signals: bool, truncate: bool) -> Result<Vec<BpfProgram>, String> {
 		let mut denied: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
 		for call in [
 			libc::SYS_connect,
@@ -565,6 +588,42 @@ mod platform {
 			for call in [libc::SYS_fork, libc::SYS_vfork] {
 				denied.insert(call, Vec::new());
 			}
+		}
+		// Its own limits and priority stay its own (pid 0, who 0); another process's are not.
+		for (call, arg) in [
+			(libc::SYS_prlimit64, 0),
+			(libc::SYS_setpriority, 1),
+			(libc::SYS_sched_setaffinity, 0),
+			(libc::SYS_sched_setscheduler, 0),
+			(libc::SYS_sched_setparam, 0),
+			(libc::SYS_sched_setattr, 0),
+		] {
+			denied.insert(call, vec![condition(arg, SeccompCmpOp::Ne, 0)?]);
+		}
+		// Landlock has no right for mode, owner or extended attributes: a student could
+		// otherwise lock another file of the user's away, even one it cannot read.
+		const SYS_FCHMODAT2: i64 = 452;
+		for call in [
+			libc::SYS_fchmod,
+			libc::SYS_fchmodat,
+			SYS_FCHMODAT2,
+			libc::SYS_fchown,
+			libc::SYS_fchownat,
+			libc::SYS_setxattr,
+			libc::SYS_lsetxattr,
+			libc::SYS_fsetxattr,
+			libc::SYS_removexattr,
+			libc::SYS_lremovexattr,
+			libc::SYS_fremovexattr,
+		] {
+			denied.insert(call, Vec::new());
+		}
+		#[cfg(target_arch = "x86_64")]
+		for call in [libc::SYS_chmod, libc::SYS_chown, libc::SYS_lchown] {
+			denied.insert(call, Vec::new());
+		}
+		if truncate {
+			denied.insert(libc::SYS_truncate, Vec::new());
 		}
 		if signals {
 			for call in [

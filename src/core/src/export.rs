@@ -474,11 +474,7 @@ pub fn about(record: &Record, n: u32) -> Result<Table> {
 		("run_by".into(), Cell::text(&evidence.scriptmark)),
 		(
 			"isolation".into(),
-			Cell::text(if evidence.bundle.isolation.is_sandboxed() {
-				"sandboxed"
-			} else {
-				"unisolated (--no-sandbox)"
-			}),
+			Cell::text(crate::record::isolation_label(evidence.bundle.isolation)),
 		),
 		("scored_by".into(), Cell::text(&revision.scriptmark)),
 		(

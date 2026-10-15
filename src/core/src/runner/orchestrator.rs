@@ -361,6 +361,7 @@ async fn lint(
 				std::path::Path::new(&file),
 				&bundle,
 				isolation,
+				crate::runner::linter::LINT_TIMEOUT,
 			)
 		})
 		.await

@@ -82,6 +82,18 @@ pub fn judge(
 		match obs.steps.get(index) {
 			Some(record) => {
 				let check = obs.checks.get(&index);
+				if let (Some(stop), Some(CheckObservation::Error(e))) = (stop, check)
+					&& stop.index == index
+					&& e.type_name == "StudentEnded"
+				{
+					// The student side went while the checker read its values: how it
+					// went decides, not the checker.
+					let blanket =
+						student_stop(obs, stop, "the reading of its values for the checker");
+					results.push(blanket_result(s, &blanket, target(index)));
+					stopped = Some(not_run(&blanket, s.name));
+					continue;
+				}
 				if check.is_none()
 					&& call.is_some_and(|c| c.check.is_some())
 					&& matches!(record.outcome, Outcome::Returned { .. })
@@ -310,6 +322,17 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 						message.clone(),
 					);
 				}
+				// Every name is resolved before the call: a setup call that produced one
+				// failing stops the loop first, so what is unresolved here is a student's
+				// value that could not be read — whoever's call needed it.
+				outcome @ Outcome::Unresolved { .. } => {
+					return blanket(
+						TestStatus::Error,
+						Fault::Student,
+						Cause::Dependency,
+						format!("not run: {label} {}", describe(outcome, call.timeout)),
+					);
+				}
 				outcome => {
 					return blanket(
 						TestStatus::Error,
@@ -324,7 +347,15 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 					return Some(broken);
 				}
 				let killed = match &obs.stopped {
-					Some(stop) => student_stop(obs, stop, &label),
+					// How the student side stopped says more than "setup": a timeout stays
+					// a timeout, a memory kill a memory kill.
+					Some(stop) => {
+						let stopped = student_stop(obs, stop, &label);
+						return Some(Blanket {
+							message: format!("not run: {}", stopped.message),
+							..stopped
+						});
+					}
 					None => unfinished(obs, owner, Cause::Setup, &label),
 				};
 				if killed.fault != owner {
@@ -1358,6 +1389,96 @@ mod tests {
 		);
 		assert_eq!(
 			verdict(&r[2]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
+		);
+	}
+
+	/// A student value that cannot be read for a teacher setup call is the student's; a
+	/// student side that stops during setup keeps how it stopped; and one that goes while a
+	/// checker reads its values is judged by how it went, not as a failed checker.
+	#[test]
+	fn test_what_the_student_side_does_outside_a_scored_call_is_still_the_students() {
+		let c = case("expect = 1");
+		let mut p = plan(1);
+		let mut student_setup = call(Target::Function {
+			name: "make".into(),
+		});
+		student_setup.id = Some("obj".into());
+		let mut teacher_setup = call(Target::Teacher {
+			name: "wrap".into(),
+		});
+		teacher_setup.id = Some("wrapped".into());
+		p.setup = vec![student_setup, teacher_setup];
+
+		let mut unreadable = finished(vec![]);
+		unreadable.setup = vec![
+			record(0, returned(Value::Null)),
+			record(1, Outcome::Unresolved { name: "obj".into() }),
+		];
+		assert_eq!(
+			verdict(&one(&c, &p, &unreadable)),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Dependency)
+			)
+		);
+
+		let mut hog = finished(vec![]);
+		hog.setup = Vec::new();
+		hog.stopped = Some(Stopped {
+			phase: Phase::Setup,
+			index: 0,
+			reason: StopReason::Exited,
+			message: String::new(),
+		});
+		hog.exit = Exit::Memory;
+		let r = one(&c, &p, &hog);
+		assert_eq!(
+			verdict(&r),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory))
+		);
+		assert!(r.failure.unwrap().message.starts_with("not run:"));
+
+		let mut p = plan(2);
+		p.steps[0].check = Some(InProcessCheck {
+			function: "chk".into(),
+			expected: None,
+		});
+		let c = case("expect = 1\ncheck = { function = \"chk\" }");
+		let scored = [
+			Scored {
+				name: "a",
+				case: &c,
+			},
+			Scored {
+				name: "b",
+				case: &c,
+			},
+		];
+		let mut gone = finished(vec![record(0, returned(json!(1)))]);
+		gone.checks.insert(
+			0,
+			CheckObservation::Error(ErrorInfo {
+				type_name: "StudentEnded".into(),
+				types: vec!["StudentEnded".into()],
+				message: "the student side ended".into(),
+			}),
+		);
+		gone.stopped = Some(Stopped {
+			phase: Phase::Step,
+			index: 0,
+			reason: StopReason::Exited,
+			message: String::new(),
+		});
+		gone.exit = Exit::Memory;
+		let r = judge(&p, &scored, &gone, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[0]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory))
+		);
+		assert_eq!(
+			verdict(&r[1]),
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
 		);
 	}

@@ -102,6 +102,20 @@ def environ_of_grader():
 
 def env():
     return attempt(lambda: sorted(os.environ))
+
+def chmod(path):
+    stat = importlib.import_module('stat')
+    def change():
+        mode = os.stat(path).st_mode
+        os.chmod(path, stat.S_IMODE(mode))  # the mode it already has: nothing to undo
+    return attempt(change)
+
+def unix_socket(path):
+    return attempt(lambda: socket.socket(socket.AF_UNIX).connect(path))
+
+def limits_of_grader():
+    resource = importlib.import_module('resource')
+    return attempt(lambda: resource.prlimit(os.getppid(), resource.RLIMIT_CPU))
 "#;
 
 struct Bench {
@@ -115,6 +129,9 @@ struct Bench {
 	/// A port the grader listens on, which no unit may connect to.
 	port: u16,
 	_listener: std::net::TcpListener,
+	/// A Unix socket the grader listens on, likewise.
+	socket: PathBuf,
+	_unix: std::os::unix::net::UnixListener,
 }
 
 impl Bench {
@@ -127,7 +144,19 @@ impl Bench {
 		let other = write(&root, "submissions/bob/lab.py", "SECRET = 'bob'\n");
 		let student = write(&root, "submissions/alice/lab.py", PROBES);
 		let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+		// Short: a socket path has a length limit, and a temporary directory can be deep.
+		let unique = dir
+			.path()
+			.file_name()
+			.unwrap()
+			.to_string_lossy()
+			.into_owned();
+		let socket = std::env::temp_dir().join(format!("sm{unique}.sock"));
+		let _ = std::fs::remove_file(&socket);
+		let unix = std::os::unix::net::UnixListener::bind(&socket).unwrap();
 		Self {
+			socket,
+			_unix: unix,
 			port: listener.local_addr().unwrap().port(),
 			_listener: listener,
 			_dir: dir,
@@ -156,6 +185,12 @@ impl Bench {
 			setup: Vec::new(),
 			steps,
 		}
+	}
+}
+
+impl Drop for Bench {
+	fn drop(&mut self) {
+		let _ = std::fs::remove_file(&self.socket);
 	}
 }
 
@@ -252,6 +287,14 @@ async fn test_the_student_side_reaches_only_its_own_directory() {
 		("spawn", function("spawn", vec![])),
 		("signal", function("signal_grader", vec![])),
 		("own directory", function("write", vec![json!("mine.txt")])),
+		(
+			"mode of a bundle file",
+			function("chmod", vec![path(&bench.answers)]),
+		),
+		(
+			"unix socket",
+			function("unix_socket", vec![path(&bench.socket)]),
+		),
 	];
 	let mut sandboxed_only = vec![("run program", function("run_program", vec![]))];
 	if cfg!(target_os = "macos") {
@@ -350,8 +393,15 @@ fn test_a_lint_tool_reads_the_bundle_and_the_copy_and_nothing_else() {
 		max_warnings: 10,
 		ok_exit_codes: vec![0],
 	};
-	let lint =
-		|config: &LintConfig, isolation| run_lint(config, &bench.student, &bench.bundle, isolation);
+	let lint = |config: &LintConfig, isolation| {
+		run_lint(
+			config,
+			&bench.student,
+			&bench.bundle,
+			isolation,
+			scriptmark_core::runner::linter::LINT_TIMEOUT,
+		)
+	};
 	assert_eq!(
 		lint(&reading(&bench.answers), Isolation::Sandboxed),
 		Ok(90.0)

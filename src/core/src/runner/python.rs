@@ -24,8 +24,15 @@ use crate::runner::sandbox::{Confinement, Isolation, covering};
 /// Resolve a python command to an absolute path so env_clear() doesn't change
 /// which interpreter runs. Falls back to the original string if resolution fails.
 fn resolve_python_path(cmd: &str) -> String {
-	if cmd.starts_with('/') {
+	let path = Path::new(cmd);
+	if path.is_absolute() {
 		return cmd.to_string();
+	}
+	// A relative path, `.venv/bin/python`, is the grader's: each side starts elsewhere.
+	if path.components().count() > 1 {
+		return std::path::absolute(path)
+			.map(|p| p.to_string_lossy().into_owned())
+			.unwrap_or_else(|_| cmd.to_string());
 	}
 	if let Ok(output) = std::process::Command::new("which").arg(cmd).output()
 		&& output.status.success()
@@ -129,6 +136,9 @@ struct Interpreter {
 	exec: Vec<PathBuf>,
 }
 
+/// The oldest Python the harness runs on.
+const MINIMUM_PYTHON: (u32, u32) = (3, 10);
+
 /// Asks the interpreter where it lives, unconfined and once: its prefixes, and where its
 /// standard library and installed packages are — not every `sys.path` entry, which a
 /// package's `.pth` file can point anywhere, a home directory included.
@@ -136,6 +146,7 @@ const PROBE: &str = "import json, os, sys, sysconfig
 places = sysconfig.get_paths()
 paths = [sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, *(places[k] for k in ('stdlib', 'platstdlib', 'purelib', 'platlib'))]
 print(json.dumps({
+	'version': list(sys.version_info[:2]),
 	'executable': os.path.realpath(sys.executable),
 	'base': os.path.realpath(sys.base_prefix),
 	'paths': [os.path.realpath(p) for p in paths if p and os.path.exists(p)],
@@ -145,6 +156,7 @@ impl Interpreter {
 	fn probe(python_cmd: &str) -> Result<Self, String> {
 		#[derive(serde::Deserialize)]
 		struct Found {
+			version: (u32, u32),
 			executable: PathBuf,
 			base: PathBuf,
 			paths: Vec<PathBuf>,
@@ -160,6 +172,13 @@ impl Interpreter {
 				String::from_utf8_lossy(&output.stderr).trim()
 			)
 		})?;
+		// The harness uses `X | None` and `match`-era typing: older interpreters die starting it.
+		if found.version < MINIMUM_PYTHON {
+			return Err(format!(
+				"{python_cmd} is Python {}.{}; ScriptMark needs Python {}.{} or newer",
+				found.version.0, found.version.1, MINIMUM_PYTHON.0, MINIMUM_PYTHON.1
+			));
+		}
 		let command = PathBuf::from(python_cmd);
 		let mut read = found.paths;
 		read.extend(system_libraries(&found.base));
@@ -477,10 +496,12 @@ impl PythonExecutor {
 		teacher: Vec<PathBuf>,
 		student: Vec<PathBuf>,
 	) -> Result<Option<[Confinement; 2]>, String> {
+		// Asked even unsandboxed: an interpreter too old for the harness is refused here,
+		// with its version, rather than by both sides failing to start.
+		let interpreter = interpreter(&self.python_cmd)?;
 		if !self.isolation.is_sandboxed() {
 			return Ok(None);
 		}
-		let interpreter = interpreter(&self.python_cmd)?;
 		let confine = |side: &Side, extra: Vec<PathBuf>| Confinement {
 			read: covering(interpreter.read.iter().cloned().chain(extra).collect()),
 			write: vec![side.work.clone(), side.home.clone(), side.tmp.clone()],
@@ -990,7 +1011,7 @@ impl Executor for PythonExecutor {
 	}
 
 	async fn inspect(&self, spec: &TestSpec, timeout_secs: u64) -> Result<TeacherRuntime, String> {
-		if spec.meta.imports.is_empty() {
+		if spec.meta.imports.is_empty() && spec.meta.shared.is_empty() {
 			return Ok(TeacherRuntime::default());
 		}
 		let data = spec

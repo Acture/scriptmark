@@ -139,6 +139,8 @@ pub(crate) fn run_with_timeout(
 	stdin: Option<String>,
 	timeout: Duration,
 ) -> std::io::Result<Option<Ran>> {
+	#[cfg(unix)]
+	crate::runner::sandbox::limit_tool(&mut cmd, timeout.as_secs());
 	let mut child = cmd
 		.stdin(if stdin.is_some() {
 			Stdio::piped()
@@ -175,11 +177,27 @@ pub(crate) fn run_with_timeout(
 			.take()
 			.map(|p| Box::new(p) as Box<dyn Read + Send>),
 	);
+	// Its own process group: whatever it started goes with it, so nothing left behind
+	// holds its pipes open.
+	let group = child.id();
+	let end_group = || {
+		#[cfg(unix)]
+		if let Ok(group) = i32::try_from(group) {
+			// SAFETY: killpg only sends a signal; the group may already be gone.
+			unsafe {
+				libc::killpg(group, libc::SIGKILL);
+			}
+		}
+		#[cfg(not(unix))]
+		let _ = group;
+	};
 	let Some(status) = child.wait_timeout(timeout)? else {
+		end_group();
 		let _ = child.kill();
 		let _ = child.wait();
 		return Ok(None);
 	};
+	end_group();
 	Ok(Some(Ran {
 		status,
 		stdout: stdout.join().unwrap_or_default(),

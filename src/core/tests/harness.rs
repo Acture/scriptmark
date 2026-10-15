@@ -1280,3 +1280,78 @@ async fn test_a_checker_can_read_the_students_source() {
 		"{obs:?}"
 	);
 }
+
+/// Values the transfer encoding once could not rebuild — a cycle back through a tuple, an
+/// integer of millions of digits — still reach the checker.
+#[tokio::test]
+async fn test_a_tuple_cycle_and_a_huge_integer_reach_the_checker() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def looped():\n    inner = []\n    outer = (inner, 1)\n    inner.append(outer)\n    return outer\n\ndef huge():\n    return 2 ** 5_000_000\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def looped(result, expected):\n    inner, one = result\n    return one == 1 and inner == ['<cycle>'], repr(result)[:80]\n\ndef huge(result, expected):\n    return result == 2 ** 5_000_000\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.steps = ["looped", "huge"]
+		.iter()
+		.map(|name| {
+			let mut c = function(name, vec![]);
+			c.check = Some(InProcessCheck {
+				function: name.to_string(),
+				expected: None,
+			});
+			c
+		})
+		.collect();
+	let obs = run(&plan).await;
+	assert!(obs.stopped.is_none(), "{:?}", obs.stopped);
+	for index in 0..2 {
+		assert!(
+			matches!(
+				&obs.checks[&index],
+				CheckObservation::Verdict { pass: true, .. }
+			),
+			"{:?}",
+			obs.checks[&index]
+		);
+	}
+}
+
+/// A forged answer padded past what a record may hold is the student's broken channel,
+/// not a record stream the grader cannot read.
+#[tokio::test]
+async fn test_a_padded_answer_is_the_students_not_the_harnesss() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib, json, struct\nos = importlib.import_module('os')\n\ndef pad():\n    body = json.dumps({'outcome': {'returned': {'value': 1, 'type': 'int'}}, 'stdout': 'x' * (8 * 1024 * 1024), 'stdout_truncated': False, 'elapsed_ms': 0}).encode()\n    for fd in range(3, 64):\n        try:\n            os.write(fd, struct.pack('>I', len(body)) + body)\n        except OSError:\n            pass\n    return 1\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def any(result, expected):\n    return True\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut pad = function("pad", vec![]);
+	pad.check = Some(InProcessCheck {
+		function: "any".into(),
+		expected: None,
+	});
+	plan.steps = vec![pad];
+	let obs = run(&plan).await;
+	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
+	assert!(obs.done, "{obs:?}");
+	let stopped = obs.stopped.as_ref().expect("the student side is stopped");
+	assert!(
+		matches!(stopped.reason, StopReason::Garbled | StopReason::Flooded),
+		"{stopped:?}"
+	);
+}

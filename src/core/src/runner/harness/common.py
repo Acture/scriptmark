@@ -49,8 +49,6 @@ VALUE_LIMIT = 4 * 1024 * 1024
 MESSAGE_LIMIT = 64 * 1024
 TRANSFER_LIMIT = 32 * 1024 * 1024
 DEPTH_LIMIT = 100
-# The longest integer the transfer encoding carries, in hexadecimal digits.
-INT_DIGITS = 1 << 20
 
 
 def configure(limits):
@@ -463,13 +461,14 @@ _ATOMS = (decimal.Decimal, fractions.Fraction, complex, datetime.date, datetime.
 
 
 class _Node:
-	__slots__ = ("kind", "body", "refs", "number")
+	__slots__ = ("kind", "body", "refs", "number", "building")
 
 	def __init__(self, kind):
 		self.kind = kind
 		self.body = None
 		self.refs = 1
 		self.number = None
+		self.building = False
 
 
 def encode(value):
@@ -565,16 +564,31 @@ def _emit(item, numbers):
 		return {"$": "text", "v": item[1], "type": item[2]}
 	if item.number is not None:
 		return {"$": "ref", "#": item.number}
+	kind = item.kind
+	if kind in ("tuple", "frozenset"):
+		# Made from their items, so they are numbered once those are: a way back into one
+		# while its items are written cannot be rebuilt, and reads as a cycle, as the
+		# record encoding says.
+		if item.building:
+			return {"$": "text", "v": "<cycle>", "type": kind}
+		item.building = True
+		items = [_emit(v, numbers) for v in item.body]
+		item.building = False
+		tagged = {}
+		if item.refs > 1:
+			item.number = numbers[0]
+			numbers[0] += 1
+			tagged["#"] = item.number
+		return {"$": kind, **tagged, "v": items}
 	tagged = {}
 	if item.refs > 1:
 		item.number = numbers[0]
 		numbers[0] += 1
 		tagged["#"] = item.number
-	kind = item.kind
 	if kind == "list":
 		items = [_emit(v, numbers) for v in item.body]
 		return items if not tagged else {"$": "list", **tagged, "v": items}
-	if kind in ("tuple", "set", "frozenset"):
+	if kind == "set":
 		return {"$": kind, **tagged, "v": [_emit(v, numbers) for v in item.body]}
 	if kind == "dict":
 		pairs = [(_emit(k, numbers), _emit(v, numbers)) for k, v in item.body]
@@ -643,8 +657,9 @@ def _tagged(kind, tree, made, resolve, depth):
 			raise Garbled("a reference to a value this side does not hold")
 		return resolve(tree["name"])
 	if kind == "int":
-		if not isinstance(body, str) or len(body) > INT_DIGITS:
-			raise Garbled("an integer too long to carry")
+		# Its length is the frame's, already bounded; hexadecimal parses in linear time.
+		if not isinstance(body, str):
+			raise Garbled("an integer that is not text")
 		return int(body, 16)
 	if kind == "float":
 		return float(body)

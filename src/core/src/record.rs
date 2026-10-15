@@ -122,14 +122,20 @@ pub struct BundleVersion {
 	/// The frozen inputs and answers the batch used, when it had any.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub frozen: Option<FrozenLink>,
-	/// Whether student and teacher code ran in their sandboxes. Written only when they did
-	/// not (`--no-sandbox`), so every sandboxed record keeps its bytes and its digest.
-	#[serde(default, skip_serializing_if = "is_sandboxed")]
-	pub isolation: Isolation,
+	/// Whether student and teacher code ran in their sandboxes. Absent from a record made
+	/// before ScriptMark sandboxed them, whose bytes and digest it keeps: nothing was
+	/// isolated then.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub isolation: Option<Isolation>,
 }
 
-fn is_sandboxed(isolation: &Isolation) -> bool {
-	isolation.is_sandboxed()
+/// How a record's evidence was gathered, in words.
+pub fn isolation_label(isolation: Option<Isolation>) -> &'static str {
+	match isolation {
+		Some(Isolation::Sandboxed) => "sandboxed",
+		Some(Isolation::Unisolated) => "unisolated (--no-sandbox)",
+		None => "unisolated (graded before ScriptMark sandboxed student code)",
+	}
 }
 
 /// One test spec as it ran.
@@ -197,7 +203,14 @@ pub struct View {
 	/// The items the revision scored, in declaration order; empty when unscored.
 	pub items: Vec<GradingItem>,
 	/// How the evidence was gathered: an unisolated run is shown as one.
-	pub isolation: Isolation,
+	pub isolation: Option<Isolation>,
+}
+
+impl View {
+	/// Student code ran in its sandbox.
+	pub fn sandboxed(&self) -> bool {
+		self.isolation == Some(Isolation::Sandboxed)
+	}
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -693,7 +706,7 @@ pub fn bundle_version(
 		digest: digest(&serde_json::to_vec(&(timeout, semantics)).expect("plain JSON")),
 		timeout,
 		python,
-		isolation,
+		isolation: Some(isolation),
 		frozen: (!frozen.is_empty()).then(|| FrozenLink {
 			path: frozen_path,
 			digest: digest(frozen.to_json().as_bytes()),

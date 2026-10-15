@@ -13,7 +13,7 @@ use crate::models::LintConfig;
 use crate::runner::sandbox::{Confinement, Isolation};
 
 /// How long a lint tool may run on one file.
-const LINT_TIMEOUT: Duration = Duration::from_secs(120);
+pub const LINT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Run a lint command on a copy of `file_path` and return its style score, 0 to 100.
 ///
@@ -25,11 +25,11 @@ pub fn run_lint(
 	file_path: &Path,
 	bundle: &Path,
 	isolation: Isolation,
+	timeout: Duration,
 ) -> Result<f64, String> {
 	// Split as a shell would, quotes included, before filling in the path: a path with a
 	// space in it stays one argument.
-	let parts = shlex::split(&config.command)
-		.ok_or_else(|| format!("the lint command has an unclosed quote: {}", config.command))?;
+	let parts = split(&config.command)?;
 	let Some((program, _)) = parts.split_first() else {
 		return Err("the lint command is empty".into());
 	};
@@ -59,9 +59,14 @@ pub fn run_lint(
 		.map_err(|e| format!("could not stage the file to lint: {e}"))?;
 
 	let file = copy.display().to_string();
+	// `{bundle}` names the test bundle, for a configuration file kept in it.
+	let bundle_dir = bundle.display().to_string();
 	let args: Vec<String> = parts[1..]
 		.iter()
-		.map(|part| part.replace("{file}", &file))
+		.map(|part| {
+			part.replace("{file}", &file)
+				.replace("{bundle}", &bundle_dir)
+		})
 		.collect();
 	let command = std::iter::once(program.display().to_string())
 		.chain(args.iter().cloned())
@@ -88,18 +93,16 @@ pub fn run_lint(
 	} else {
 		Command::new(&program)
 	};
-	let mut path = std::env::join_paths(
-		crate::runner::sandbox::system_programs()
-			.iter()
-			.map(|p| p.join("bin")),
+	// The tool's own directory, then the system's: what a wrapper script it runs may need.
+	let path = std::env::join_paths(
+		program.parent().map(Path::to_path_buf).into_iter().chain(
+			PROGRAM_DIRS
+				.iter()
+				.map(PathBuf::from)
+				.filter(|d| d.is_dir()),
+		),
 	)
 	.unwrap_or_default();
-	if let Some(dir) = program.parent() {
-		path = std::env::join_paths(
-			std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&path)),
-		)
-		.unwrap_or(path);
-	}
 	cmd.args(&args)
 		.env_clear()
 		.env("PATH", path)
@@ -112,9 +115,9 @@ pub fn run_lint(
 		cmd.env("SYSTEMROOT", root);
 	}
 
-	let out = crate::checker::python_checker::run_with_timeout(cmd, None, LINT_TIMEOUT)
+	let out = crate::checker::python_checker::run_with_timeout(cmd, None, timeout)
 		.map_err(|e| format!("could not run `{command}`: {e}"))?
-		.ok_or_else(|| format!("`{command}` ran longer than {}s", LINT_TIMEOUT.as_secs()))?;
+		.ok_or_else(|| format!("`{command}` ran longer than {}s", timeout.as_secs()))?;
 	if !out
 		.status
 		.code()
@@ -156,16 +159,56 @@ fn safe_name(name: &str) -> String {
 	}
 }
 
-/// The program a command names: a path as given, or the first match on the grader's PATH.
+/// Where a tool finds the system's programs, in the order a shell would look.
+#[cfg(unix)]
+const PROGRAM_DIRS: &[&str] = &[
+	"/usr/local/bin",
+	"/opt/homebrew/bin",
+	"/usr/bin",
+	"/bin",
+	"/usr/sbin",
+	"/sbin",
+];
+#[cfg(not(unix))]
+const PROGRAM_DIRS: &[&str] = &[];
+
+/// A command split as a shell would, quotes included. On Windows, where a path is written
+/// with backslashes a POSIX shell would read as escapes, on whitespace.
+fn split(command: &str) -> Result<Vec<String>, String> {
+	if cfg!(windows) {
+		return Ok(command.split_whitespace().map(String::from).collect());
+	}
+	shlex::split(command)
+		.ok_or_else(|| format!("the lint command has an unclosed quote: {command}"))
+}
+
+/// The program a command names: a path as given, or the first match on the grader's PATH
+/// (with Windows' executable extensions there).
 fn locate(program: &str) -> Result<PathBuf, String> {
 	let given = Path::new(program);
 	if given.components().count() > 1 {
 		return std::path::absolute(given).map_err(|e| format!("cannot find `{program}`: {e}"));
 	}
+	let extensions: Vec<String> = if cfg!(windows) {
+		std::iter::once(String::new())
+			.chain(
+				std::env::var("PATHEXT")
+					.unwrap_or_else(|_| ".EXE;.CMD;.BAT".into())
+					.split(';')
+					.map(String::from),
+			)
+			.collect()
+	} else {
+		vec![String::new()]
+	};
 	std::env::var_os("PATH")
 		.iter()
 		.flat_map(std::env::split_paths)
-		.map(|dir| dir.join(program))
+		.flat_map(|dir| {
+			extensions
+				.iter()
+				.map(move |ext| dir.join(format!("{program}{ext}")))
+		})
 		.find(|candidate| candidate.is_file())
 		.ok_or_else(|| format!("could not run `{program}`: not found on PATH"))
 }
@@ -268,7 +311,13 @@ mod tests {
 	/// Unconfined, so these run inside any sandbox the test itself is in; the sandboxed
 	/// runs are exercised end to end in the integration tests.
 	fn lint(config: &LintConfig, file: &Path) -> Result<f64, String> {
-		run_lint(config, file, file.parent().unwrap(), Isolation::Unisolated)
+		run_lint(
+			config,
+			file,
+			file.parent().unwrap(),
+			Isolation::Unisolated,
+			LINT_TIMEOUT,
+		)
 	}
 
 	#[test]
@@ -304,6 +353,32 @@ mod tests {
 		let file = dir.path().join("a;echo injected;b.py");
 		std::fs::write(&file, "x = 1\n").unwrap();
 		let probe = config("sh -c 'echo {file}' sh", 10);
+		assert_eq!(lint(&probe, &file), Ok(90.0));
+	}
+
+	#[test]
+	fn test_a_tool_past_its_deadline_has_failed_and_its_children_go_with_it() {
+		let (_dir, file) = student_file();
+		let config = config("sh -c 'sleep 30 & sleep 30'", 10);
+		let started = std::time::Instant::now();
+		let late = run_lint(
+			&config,
+			&file,
+			file.parent().unwrap(),
+			Isolation::Unisolated,
+			Duration::from_secs(1),
+		);
+		assert!(late.unwrap_err().contains("ran longer than 1s"));
+		assert!(
+			started.elapsed() < Duration::from_secs(10),
+			"a child holding the pipes was ended with its group"
+		);
+	}
+
+	#[test]
+	fn test_bundle_names_the_test_bundle() {
+		let (_dir, file) = student_file();
+		let probe = config("sh -c 'test -d \"$1\" && echo found' sh {bundle}", 10);
 		assert_eq!(lint(&probe, &file), Ok(90.0));
 	}
 

@@ -682,10 +682,13 @@ fn shown(path: &Path, view: &View) -> String {
 		Some(n) => format!("{} (revision {n} of {})", path.display(), view.of),
 		None => format!("{} (unscored)", path.display()),
 	};
-	if view.isolation.is_sandboxed() {
+	if view.sandboxed() {
 		title
 	} else {
-		format!("{title} — UNISOLATED: student code ran without a sandbox")
+		format!(
+			"{title} — UNISOLATED: {}",
+			record::isolation_label(view.isolation)
+		)
 	}
 }
 
@@ -721,9 +724,15 @@ async fn run_bundles(
 	let executor = Arc::new(
 		PythonExecutor::with_python_cmd(&run_options.python).with_isolation(run_options.isolation),
 	);
-	let bundles = prepare(specs, &generation, executor.clone(), timeout)
-		.await
-		.context("refusing to grade: the test bundle is not ready")?;
+	// Preparing runs teacher code in units of its own process groups too: Ctrl-C ends them.
+	let bundles = tokio::select! {
+		prepared = prepare(specs, &generation, executor.clone(), timeout) => prepared
+			.context("refusing to grade: the test bundle is not ready")?,
+		_ = tokio::signal::ctrl_c() => {
+			scriptmark_core::runner::python::kill_all_units();
+			anyhow::bail!("interrupted while preparing: every running unit was stopped")
+		}
+	};
 	println!(
 		"Prepared {} test bundle(s): {} unit(s) per student",
 		bundles.len(),
@@ -1462,10 +1471,11 @@ async fn cmd_grades_push(args: GradesPushArgs) -> Result<()> {
 		}
 	}
 	let view = record.view(args.revision)?;
-	if !view.isolation.is_sandboxed() {
+	if !view.sandboxed() {
 		eprintln!(
-			"warning: {} was graded with --no-sandbox: these grades come from runs where student code was not isolated",
-			args.results.display()
+			"warning: {} is {}: student code was not isolated when these grades were made",
+			args.results.display(),
+			record::isolation_label(view.isolation)
 		);
 	}
 	let revision = scored(&view, &args.results)?;
@@ -1583,6 +1593,7 @@ fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
 
 fn cmd_report(args: ReportArgs) -> Result<()> {
 	let (_, view) = load_view(&args.results, args.revision.revision)?;
+	let (sandboxed, isolation) = (view.sandboxed(), view.isolation);
 	let reports = view.reports;
 
 	let similarity = if let Some(sim_dir) = &args.similarity_dir {
@@ -1609,12 +1620,13 @@ fn cmd_report(args: ReportArgs) -> Result<()> {
 		None
 	};
 
-	let title = if view.isolation.is_sandboxed() {
+	let title = if sandboxed {
 		args.title.clone()
 	} else {
 		format!(
-			"{} — UNISOLATED: student code ran without a sandbox",
-			args.title
+			"{} — UNISOLATED: {}",
+			args.title,
+			record::isolation_label(isolation)
 		)
 	};
 	report::generate_html_report(&reports, similarity.as_deref(), &title, &args.output)?;

@@ -29,6 +29,16 @@ def emit(record):
 	write_all(_RECORDS, frame(record))
 
 
+def emit_bounded(record, bound, student):
+	"""Emit a record built from a student's answer, if it fits what a record of its call
+	may hold: an answer padded past that is the student's, not a record the grader
+	cannot read."""
+	data = frame(record)
+	if len(data) - HEADER.size > bound:
+		raise student.garbled(f"an answer that makes a record of {len(data)} bytes, where at most {bound} may")
+	write_all(_RECORDS, data)
+
+
 def finish(student=None):
 	"""Stop now: threads teacher code left running must not hold the unit open."""
 	if student is not None:
@@ -341,11 +351,18 @@ def load_teacher_modules():
 	return exports, duplicates
 
 
-def into_bundle(value):
-	"""Whether `value` is an absolute path into the test bundle, which only teacher code can
-	open: student code gets data through `data_files`, by a path relative to it."""
+def into_bundle(value, depth=0):
+	"""Whether `value` is, or holds, an absolute path into the test bundle, which only
+	teacher code can open: student code gets data through `data_files`, by a path relative
+	to it."""
 	bundle = PAYLOAD.get("bundle")
-	if not bundle or not isinstance(value, (str, os.PathLike)):
+	if not bundle or depth > DEPTH_LIMIT:
+		return False
+	if isinstance(value, (list, tuple, set, frozenset)):
+		return any(into_bundle(v, depth + 1) for v in value)
+	if isinstance(value, dict):
+		return any(into_bundle(v, depth + 1) for v in [*value.keys(), *value.values()])
+	if not isinstance(value, (str, os.PathLike)):
 		return False
 	try:
 		path = os.fspath(value)
@@ -611,7 +628,11 @@ def student_call(plan, phase, index, student):
 			})
 		stopped(phase, index, stop)
 		return None
-	emit({"kind": "call", "phase": phase, "index": index, **record})
+	try:
+		emit_bounded({"kind": "call", "phase": phase, "index": index, **record}, call_bound(len(files)), student)
+	except Stop as stop:
+		stopped(phase, index, stop)
+		return None
 	if returned and plan.get("id"):
 		bind(plan["id"], student=True)
 	if returned and check is not None:
@@ -656,7 +677,11 @@ def run_load(student):
 				"stdout": "", "stdout_truncated": False, "elapsed_ms": int((PAYLOAD["load_timeout"] + GRACE) * 1000)})
 		stopped("load", 0, stop)
 		return False
-	emit({"kind": "call", "phase": "load", "index": 0, **record})
+	try:
+		emit_bounded({"kind": "call", "phase": "load", "index": 0, **record}, call_bound(value=False), student)
+	except Stop as stop:
+		stopped("load", 0, stop)
+		return False
 	return "returned" in record["outcome"]
 
 
@@ -681,7 +706,11 @@ def run_script(student):
 		stopped("step", 0, stop)
 		return
 	# A script that does not compile never ran: that is its load failing.
-	emit({"kind": "call", "phase": "load" if compile_error else "step", "index": 0, **record})
+	phase = "load" if compile_error else "step"
+	try:
+		emit_bounded({"kind": "call", "phase": phase, "index": 0, **record}, call_bound(len(files), value=False), student)
+	except Stop as stop:
+		stopped("step", 0, stop)
 
 
 def start_student():
