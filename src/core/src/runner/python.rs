@@ -5,7 +5,7 @@
 //! teacher side's records; it never relays what passes between them.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
@@ -423,6 +423,8 @@ struct Finished {
 	exit: Exit,
 	teacher_exit: Exit,
 	stderr: String,
+	/// The most the student side was seen holding, in bytes.
+	peak: u64,
 }
 
 impl Finished {
@@ -432,9 +434,52 @@ impl Finished {
 			exit: Exit::Spawn(message.clone()),
 			teacher_exit: Exit::Spawn(message),
 			stderr: String::new(),
+			peak: 0,
 		}
 	}
 }
+
+/// What the student side may hold: `limit_mb` beyond `interpreter`, the bytes it takes idle.
+#[derive(Debug, Clone, Copy)]
+struct Memory {
+	limit_mb: u64,
+	interpreter: u64,
+}
+
+impl Memory {
+	fn watched(self) -> u64 {
+		self.interpreter
+			.saturating_add(self.limit_mb.saturating_mul(1 << 20))
+	}
+
+	fn total_mb(self) -> u64 {
+		self.watched().div_ceil(1 << 20)
+	}
+
+	fn exceeded(self) -> Exit {
+		Exit::Memory {
+			limit_mb: self.limit_mb,
+			interpreter_mb: self.interpreter.div_ceil(1 << 20),
+		}
+	}
+}
+
+/// An interpreter, and whether it runs sandboxed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+type IdleKey = (String, bool);
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+type Idle = tokio::sync::OnceCell<u64>;
+
+/// What the student side takes idle — Python, the harness and a loaded module — per
+/// interpreter and isolation, measured once by the instrument that enforces the limit.
+/// A failed measurement is not kept: the next unit measures again.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+static IDLE_MEMORY: LazyLock<Mutex<std::collections::HashMap<IdleKey, Arc<Idle>>>> =
+	LazyLock::new(Default::default);
+
+/// The student whose idle memory is measured: it waits while the watch samples it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const IDLE_SUBJECT: &str = "import time\n\ndef idle():\n    time.sleep(0.3)\n";
 
 impl PythonExecutor {
 	/// A command for one side: confined when sandboxed, with a cleared environment, the
@@ -447,6 +492,7 @@ impl PythonExecutor {
 		memory_mb: u64,
 		confinement: Option<&Confinement>,
 	) -> Result<Command, String> {
+		// `memory_mb`: all the side may hold, interpreter included.
 		let mut cmd = match confinement {
 			Some(c) => Command::from(
 				crate::runner::sandbox::confined(Path::new(&self.python_cmd), c)
@@ -520,13 +566,13 @@ impl PythonExecutor {
 	}
 
 	/// Run a staged unit — the teacher side, and the student side when `with_student` —
-	/// end both at `deadline_secs`, and the student side past `memory_mb` MiB.
+	/// end both at `deadline_secs`, and the student side past `memory`.
 	#[allow(clippy::too_many_arguments)]
 	async fn run_unit(
 		&self,
 		staged: &Staged,
 		deadline_secs: u64,
-		memory_mb: u64,
+		memory: Memory,
 		bounds: Bounds,
 		with_student: bool,
 		confinements: Option<[Confinement; 2]>,
@@ -539,7 +585,7 @@ impl PythonExecutor {
 			&TEACHER_SCRIPT,
 			&staged.teacher,
 			deadline_secs,
-			memory_mb,
+			memory.total_mb(),
 			teacher_confinement.as_ref(),
 		) {
 			Ok(cmd) => cmd,
@@ -560,7 +606,7 @@ impl PythonExecutor {
 				&STUDENT_SCRIPT,
 				&staged.student,
 				deadline_secs,
-				memory_mb,
+				memory.total_mb(),
 				student_confinement.as_ref(),
 			) {
 				Ok(cmd) => cmd,
@@ -646,16 +692,22 @@ impl PythonExecutor {
 			pumps.spawn(pump(pipe, teacher_tail.clone()));
 		}
 		let over_memory = Arc::new(AtomicBool::new(false));
+		let peak = Arc::new(AtomicU64::new(0));
 		let mut watch = None;
 		if let Some(child) = student.as_mut() {
 			if let Some(pipe) = child.stderr.take() {
 				pumps.spawn(pump(pipe, student_tail.clone()));
 			}
 			if let Some(pid) = child.id() {
-				let limit = memory_mb.saturating_mul(1 << 20);
-				let over = over_memory.clone();
+				let (over, held) = (over_memory.clone(), peak.clone());
 				let group = student_group.0;
-				watch = Some(tokio::spawn(watch_memory(pid, group, limit, over)));
+				watch = Some(tokio::spawn(watch_memory(
+					pid,
+					group,
+					memory.watched(),
+					over,
+					held,
+				)));
 			}
 		}
 
@@ -676,10 +728,10 @@ impl PythonExecutor {
 				let ended = tokio::time::timeout(linger, child.wait()).await;
 				let over = || over_memory.load(Ordering::SeqCst);
 				match ended {
-					Ok(Ok(_)) if over() => Exit::Memory(memory_mb),
+					Ok(Ok(_)) if over() => memory.exceeded(),
 					Ok(Ok(status)) => exit_of(status),
 					Ok(Err(e)) => Exit::Spawn(format!("lost the student side: {e}")),
-					Err(_) if over() => Exit::Memory(memory_mb),
+					Err(_) if over() => memory.exceeded(),
 					Err(_) if teacher_exit == Exit::Deadline => Exit::Deadline,
 					Err(_) => Exit::Stopped,
 				}
@@ -731,6 +783,7 @@ impl PythonExecutor {
 			exit,
 			teacher_exit,
 			stderr,
+			peak: peak.load(Ordering::SeqCst),
 		}
 	}
 }
@@ -787,9 +840,16 @@ async fn pump_records<R: tokio::io::AsyncRead + Unpin>(mut pipe: R, reader: Arc<
 
 /// End the student side once it holds more than `limit` bytes: the operating system's
 /// sandbox cannot bound its memory everywhere, so the grader watches it.
-async fn watch_memory(pid: u32, group: Option<i32>, limit: u64, over: Arc<AtomicBool>) {
+async fn watch_memory(
+	pid: u32,
+	group: Option<i32>,
+	limit: u64,
+	over: Arc<AtomicBool>,
+	peak: Arc<AtomicU64>,
+) {
 	let mut tick = tokio::time::interval(Duration::from_millis(50));
 	while let Some(held) = resident_bytes(pid) {
+		peak.fetch_max(held, Ordering::SeqCst);
 		if held > limit {
 			over.store(true, Ordering::SeqCst);
 			if let Some(group) = group {
@@ -1063,9 +1123,13 @@ impl Executor for PythonExecutor {
 				self.run_unit(
 					&staged,
 					deadline,
-					spec.meta
-						.memory_mb
-						.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
+					Memory {
+						limit_mb: spec
+							.meta
+							.memory_mb
+							.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
+						interpreter: 0,
+					},
 					INSPECT_BOUNDS,
 					false,
 					confinements,
@@ -1099,6 +1163,104 @@ impl Executor for PythonExecutor {
 	}
 
 	async fn run(&self, plan: &UnitPlan) -> UnitObservation {
+		let interpreter = match self.idle_memory().await {
+			Ok(bytes) => bytes,
+			Err(e) => {
+				let mut obs = UnitObservation::not_started(Exit::Spawn(e));
+				obs.sandboxed = self.isolation.is_sandboxed();
+				return obs;
+			}
+		};
+		self.observe(
+			plan,
+			Memory {
+				limit_mb: plan.memory_mb,
+				interpreter,
+			},
+		)
+		.await
+		.0
+	}
+}
+
+impl PythonExecutor {
+	/// What the student side takes idle, in bytes: what `memory_mb` is counted beyond.
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
+	async fn idle_memory(&self) -> Result<u64, String> {
+		let cell = IDLE_MEMORY
+			.lock()
+			.expect("idle memory cache poisoned")
+			.entry((self.python_cmd.clone(), self.isolation.is_sandboxed()))
+			.or_default()
+			.clone();
+		cell.get_or_try_init(|| self.measure_idle_memory())
+			.await
+			.copied()
+	}
+
+	/// Nothing to count it by where the student side's memory is not watched.
+	#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+	async fn idle_memory(&self) -> Result<u64, String> {
+		Ok(0)
+	}
+
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
+	async fn measure_idle_memory(&self) -> Result<u64, String> {
+		let dir = tempfile::tempdir().map_err(|e| format!("could not stage the idle unit: {e}"))?;
+		let file = dir.path().join("idle.py");
+		std::fs::write(&file, IDLE_SUBJECT)
+			.map_err(|e| format!("could not stage the idle unit: {e}"))?;
+		let plan = UnitPlan {
+			subject: Subject::Student,
+			functions: crate::matching::Functions::default(),
+			file,
+			script: None,
+			imports: Vec::new(),
+			vars: Arc::default(),
+			data_files: Vec::new(),
+			bundle: dir.path().to_path_buf(),
+			shared: Vec::new(),
+			memory_mb: *crate::spec_loader::MEMORY_MB.end(),
+			allowed_imports: Vec::new(),
+			load_timeout: STARTUP_SECS,
+			setup: Vec::new(),
+			steps: vec![crate::runner::executor::CallPlan {
+				target: crate::models::Target::Function {
+					name: "idle".into(),
+				},
+				args: Vec::new(),
+				stdin: None,
+				timeout: STARTUP_SECS,
+				id: None,
+				files: Vec::new(),
+				check: None,
+			}],
+		};
+		let memory = Memory {
+			limit_mb: plan.memory_mb,
+			interpreter: 0,
+		};
+		let (obs, peak) = self.observe(&plan, memory).await;
+		if let Exit::Spawn(e) = &obs.exit {
+			return Err(e.clone());
+		}
+		let idled = obs.done
+			&& obs.steps.first().is_some_and(|s| {
+				matches!(s.outcome, crate::runner::executor::Outcome::Returned { .. })
+			});
+		if !idled || peak == 0 {
+			return Err(format!(
+				"could not measure what Python takes idle ({:?}): {}",
+				obs.exit,
+				obs.stderr.trim()
+			));
+		}
+		Ok(peak)
+	}
+
+	/// Run `plan` with the student side held to `memory`: what it reported, and the most
+	/// the student side was seen holding.
+	async fn observe(&self, plan: &UnitPlan, memory: Memory) -> (UnitObservation, u64) {
 		let data = plan.data_files.clone();
 		let shared = plan.shared.clone();
 		let file = plan.file.clone();
@@ -1143,14 +1305,12 @@ impl Executor for PythonExecutor {
 			{
 				Ok(Ok(staged)) => staged,
 				Ok(Err(e)) => {
-					return UnitObservation::not_started(Exit::Spawn(format!(
-						"could not stage the unit: {e}"
-					)));
+					let exit = Exit::Spawn(format!("could not stage the unit: {e}"));
+					return (UnitObservation::not_started(exit), 0);
 				}
 				Err(e) => {
-					return UnitObservation::not_started(Exit::Spawn(format!(
-						"staging panicked: {e}"
-					)));
+					let exit = Exit::Spawn(format!("staging panicked: {e}"));
+					return (UnitObservation::not_started(exit), 0);
 				}
 			};
 		debug_assert!(staged.subject.as_ref().is_some_and(|s| s.is_file()));
@@ -1171,7 +1331,7 @@ impl Executor for PythonExecutor {
 				self.run_unit(
 					&staged,
 					plan.deadline_secs(),
-					plan.memory_mb,
+					memory,
 					record_bounds(plan),
 					true,
 					confinements,
@@ -1183,7 +1343,7 @@ impl Executor for PythonExecutor {
 		discard(staged).await;
 
 		let records = finished.records;
-		UnitObservation {
+		let obs = UnitObservation {
 			ready: records.ready,
 			load: records.load,
 			setup: records.setup,
@@ -1197,7 +1357,8 @@ impl Executor for PythonExecutor {
 			protocol_error: records.protocol_error,
 			stderr: finished.stderr,
 			sandboxed: self.isolation.is_sandboxed(),
-		}
+		};
+		(obs, finished.peak)
 	}
 }
 

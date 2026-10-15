@@ -1468,8 +1468,8 @@ async fn test_a_path_into_the_bundle_is_never_handed_to_student_code() {
 	assert_eq!(results[0].total_passed(), 1, "{:#?}", results[0]);
 }
 
-/// A unit's student process is held to `memory_mb`: 128 MiB unless the spec, the case or
-/// the scenario says otherwise, and a case that needs more declares it.
+/// A unit's student process is held to `memory_mb` beyond what it takes idle: 64 MiB unless
+/// the spec, the case or the scenario says otherwise, and a case that needs more declares it.
 #[tokio::test]
 async fn test_memory_is_the_default_unless_declared() {
 	let bench = Bench::new();
@@ -1491,7 +1491,11 @@ async fn test_memory_is_the_default_unless_declared() {
 		"{c:?}"
 	);
 	assert!(
-		c.failure.as_ref().unwrap().message.contains("128 MiB"),
+		c.failure
+			.as_ref()
+			.unwrap()
+			.message
+			.contains("64 MiB memory limit"),
 		"{:?}",
 		c.failure
 	);

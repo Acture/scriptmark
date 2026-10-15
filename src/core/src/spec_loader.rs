@@ -132,15 +132,15 @@ pub fn reserved(name: &str) -> Option<&'static str> {
 /// The longest timeout a spec or the command line may ask for.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
 
-/// The memory a unit's student process may hold when its spec does not say, in MiB: five
-/// times what it takes idle (about 25 MiB), and room to return a list of a million
-/// integers (about 40 MiB) to a function checker. The limit also counts the harness's
-/// copies of a returned value while it encodes it, a few times the value's own size.
-pub const DEFAULT_MEMORY_MB: u64 = 128;
+/// The memory a unit's student process may hold beyond what it takes idle, when its spec
+/// does not say, in MiB: what the student's code holds, and the harness's copies of what
+/// it returns while encoding them — a few times the value's own size. What Python and the
+/// harness take idle is measured, and added.
+pub const DEFAULT_MEMORY_MB: u64 = 64;
 
-/// The memory a spec may give a unit, in MiB: from what Python and the harness need to
-/// start, to 64 GiB.
-pub const MEMORY_MB: std::ops::RangeInclusive<u64> = 64..=65_536;
+/// The memory a spec may give a unit beyond what it takes idle, in MiB: from what a small
+/// exercise holds, above the noise of loading a module, to 64 GiB.
+pub const MEMORY_MB: std::ops::RangeInclusive<u64> = 16..=65_536;
 
 /// What the harness keeps of a call's stdout; an expectation longer than this can never match.
 pub const STDOUT_LIMIT: usize = 64 * 1024;
@@ -1983,8 +1983,8 @@ expect = 150
 	#[test]
 	fn test_memory_is_declared_per_process_within_bounds() {
 		refused(
-			"[[cases]]\nname = \"x\"\nexpect = 1\nmemory_mb = 16\n",
-			"memory_mb must be between 64 and 65536 MiB",
+			"[[cases]]\nname = \"x\"\nexpect = 1\nmemory_mb = 8\n",
+			"memory_mb must be between 16 and 65536 MiB",
 		);
 		refused(
 			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\nmemory_mb = 512\n",

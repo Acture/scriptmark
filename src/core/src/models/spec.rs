@@ -495,8 +495,8 @@ pub struct TestCase {
 	#[serde(default)]
 	pub timeout: Option<u64>,
 
-	/// The most memory the case's student process may hold, in MiB. Not on a scenario
-	/// step: its steps share their scenario's process.
+	/// The most memory the case's student process may hold beyond what it takes idle, in
+	/// MiB. Not on a scenario step: its steps share their scenario's process.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub memory_mb: Option<u64>,
 
@@ -580,8 +580,8 @@ pub struct TestMeta {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub shared: Vec<String>,
 
-	/// The most memory a unit's student process may hold, in MiB, where a case or scenario
-	/// does not say: `DEFAULT_MEMORY_MB` when neither does.
+	/// The most memory a unit's student process may hold beyond what it takes idle, in MiB,
+	/// where a case or scenario does not say: `DEFAULT_MEMORY_MB` when neither does.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub memory_mb: Option<u64>,
 
@@ -659,7 +659,8 @@ pub struct Scenario {
 	#[serde(default)]
 	pub timeout: Option<u64>,
 
-	/// The most memory the scenario's student process may hold, in MiB.
+	/// The most memory the scenario's student process may hold beyond what it takes idle,
+	/// in MiB.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub memory_mb: Option<u64>,
 

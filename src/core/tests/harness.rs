@@ -1036,7 +1036,10 @@ async fn test_a_student_side_past_its_memory_limit_is_ended() {
 	plan.steps = vec![function("hog", vec![]), function("hog", vec![])];
 	plan.memory_mb = 96;
 	let obs = run(&plan).await;
-	assert_eq!(obs.exit, Exit::Memory(96), "{obs:?}");
+	assert!(
+		matches!(obs.exit, Exit::Memory { limit_mb: 96, interpreter_mb } if interpreter_mb > 0),
+		"{obs:?}"
+	);
 	assert!(obs.steps.is_empty());
 	assert_eq!(
 		obs.stopped.as_ref().map(|s| s.reason),

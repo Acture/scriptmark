@@ -384,7 +384,7 @@ fn in_flight(exit: &Exit, fault: Fault, cause: Cause, what: &str) -> Blanket {
 			TestStatus::Error
 		},
 		fault,
-		cause: if matches!(exit, Exit::Memory(_)) {
+		cause: if matches!(exit, Exit::Memory { .. }) {
 			Cause::Memory
 		} else {
 			cause
@@ -465,9 +465,15 @@ fn death(exit: &Exit) -> (TestStatus, String) {
 			TestStatus::Timeout,
 			"the unit's deadline passed during".into(),
 		),
-		Exit::Memory(limit) => (
+		Exit::Memory {
+			limit_mb,
+			interpreter_mb,
+		} => (
 			TestStatus::Error,
-			format!("the {limit} MiB memory limit (`memory_mb`) was exceeded during"),
+			format!(
+				"the {limit_mb} MiB memory limit (`memory_mb`, beyond the interpreter's \
+				 {interpreter_mb} MiB) was exceeded during"
+			),
 		),
 		Exit::Stopped => (
 			TestStatus::Error,
@@ -1308,7 +1314,10 @@ mod tests {
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::Killed))
 		);
 
-		obs.exit = Exit::Memory(256);
+		obs.exit = Exit::Memory {
+			limit_mb: 64,
+			interpreter_mb: 24,
+		};
 		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
@@ -1433,7 +1442,10 @@ mod tests {
 			reason: StopReason::Exited,
 			message: String::new(),
 		});
-		hog.exit = Exit::Memory(256);
+		hog.exit = Exit::Memory {
+			limit_mb: 64,
+			interpreter_mb: 24,
+		};
 		let r = one(&c, &p, &hog);
 		assert_eq!(
 			verdict(&r),
@@ -1472,7 +1484,10 @@ mod tests {
 			reason: StopReason::Exited,
 			message: String::new(),
 		});
-		gone.exit = Exit::Memory(256);
+		gone.exit = Exit::Memory {
+			limit_mb: 64,
+			interpreter_mb: 24,
+		};
 		let r = judge(&p, &scored, &gone, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[0]),
