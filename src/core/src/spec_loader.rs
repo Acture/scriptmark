@@ -132,6 +132,15 @@ pub fn reserved(name: &str) -> Option<&'static str> {
 /// The longest timeout a spec or the command line may ask for.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
 
+/// The memory a unit's student process may hold when its spec does not say, in MiB:
+/// several times what an introductory exercise needs (Python itself takes about 25 MiB, a
+/// list of a million integers about 40 more).
+pub const DEFAULT_MEMORY_MB: u64 = 256;
+
+/// The memory a spec may give a unit, in MiB: from what Python and the harness need to
+/// start, to 64 GiB.
+pub const MEMORY_MB: std::ops::RangeInclusive<u64> = 64..=65_536;
+
 /// What the harness keeps of a call's stdout; an expectation longer than this can never match.
 pub const STDOUT_LIMIT: usize = 64 * 1024;
 
@@ -237,6 +246,7 @@ impl<'a> Validator<'a> {
 			}
 		}
 		self.shared();
+		self.memory(self.spec.meta.memory_mb, "[meta]");
 		for (name, value) in &self.spec.vars {
 			if contains_null(value) {
 				self.problem(
@@ -358,6 +368,19 @@ impl<'a> Validator<'a> {
 		}
 	}
 
+	fn memory(&mut self, memory: Option<u64>, at: &str) {
+		if memory.is_some_and(|m| !MEMORY_MB.contains(&m)) {
+			self.problem(
+				at,
+				format!(
+					"memory_mb must be between {} and {} MiB",
+					MEMORY_MB.start(),
+					MEMORY_MB.end()
+				),
+			);
+		}
+	}
+
 	fn unique_name(&mut self, names: &mut BTreeSet<String>, name: String) {
 		if !names.insert(name.clone()) {
 			self.problem(
@@ -376,6 +399,7 @@ impl<'a> Validator<'a> {
 			self.problem(&at, "has no steps");
 		}
 		self.timeout(scenario.timeout, &at);
+		self.memory(scenario.memory_mb, &at);
 		let mut bound = top.clone();
 		for step in &scenario.setup {
 			self.setup(step, &mut bound, &format!("{at} setup '{}'", step.id));
@@ -475,6 +499,14 @@ impl<'a> Validator<'a> {
 			);
 		}
 		self.timeout(case.timeout, at);
+		if is_step && case.memory_mb.is_some() {
+			self.problem(
+				at,
+				"memory_mb belongs to the scenario: its steps share one process",
+			);
+		} else {
+			self.memory(case.memory_mb, at);
+		}
 		if case.args.iter().any(contains_null) {
 			self.problem(
 				at,
@@ -1945,6 +1977,31 @@ expect = 150
 				"{shared}: expected {needle:?}, got {found:?}"
 			);
 		}
+	}
+
+	#[test]
+	fn test_memory_is_declared_per_process_within_bounds() {
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = 1\nmemory_mb = 16\n",
+			"memory_mb must be between 64 and 65536 MiB",
+		);
+		refused(
+			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\nmemory_mb = 512\n",
+			"memory_mb belongs to the scenario",
+		);
+		assert!(
+			problems(
+				"[[scenarios]]\nname = \"s\"\nmemory_mb = 512\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\n"
+			)
+			.is_empty()
+		);
+		// Unset, it is not part of what a spec's digest covers: older records still match.
+		let spec = load_spec_str(
+			&format!("{META}[[cases]]\nname = \"x\"\nexpect = 1\n"),
+			Path::new("."),
+		)
+		.unwrap();
+		assert!(!serde_json::to_string(&spec).unwrap().contains("memory_mb"));
 	}
 
 	#[test]

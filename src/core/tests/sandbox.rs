@@ -180,6 +180,7 @@ impl Bench {
 			data_files: Vec::new(),
 			bundle: self.bundle.clone(),
 			shared: Vec::new(),
+			memory_mb: 256,
 			allowed_imports: Vec::new(),
 			load_timeout: 5,
 			setup: Vec::new(),

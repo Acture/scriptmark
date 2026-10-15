@@ -59,6 +59,8 @@ pub struct UnitPlan {
 	/// Shared modules, as `(source in the bundle, relative destination)`: staged beside the
 	/// student's file, and imported by the teacher side from the bundle.
 	pub shared: Vec<(PathBuf, String)>,
+	/// The most memory the student side may hold, in MiB, before it is ended.
+	pub memory_mb: u64,
 	pub allowed_imports: Vec<String>,
 	pub load_timeout: u64,
 	pub setup: Vec<CallPlan>,
@@ -270,8 +272,8 @@ pub enum Exit {
 	Signal(i32),
 	/// Killed by the grader at the unit's deadline.
 	Deadline,
-	/// Killed by the grader for going past the unit's memory limit.
-	Memory,
+	/// Killed by the grader for going past the unit's memory limit, in MiB.
+	Memory(u64),
 	/// Still running when the teacher side finished, and ended by the grader then.
 	Stopped,
 	/// Never started.

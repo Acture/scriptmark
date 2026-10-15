@@ -26,7 +26,9 @@ use crate::runner::frozen::{Generation, replay_entry};
 use crate::runner::generation::{DrawSeed, Generated, generate, seed_for};
 use crate::runner::judge::Scored;
 use crate::runner::oracle::{resolve_oracle, validate_references};
-use crate::spec_loader::{MAX_TIMEOUT_SECS, refs, reserved, validate, validate_expanded};
+use crate::spec_loader::{
+	DEFAULT_MEMORY_MB, MAX_TIMEOUT_SECS, refs, reserved, validate, validate_expanded,
+};
 
 /// A prepared test bundle: one spec, ready to run against any student.
 #[derive(Debug, Serialize)]
@@ -653,6 +655,7 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 			.map(|rel| (spec.dir.join(rel), rel.clone()))
 			.collect(),
 		allowed_imports: spec.meta.allowed_imports.clone(),
+		memory_mb: spec.meta.memory_mb.unwrap_or(DEFAULT_MEMORY_MB),
 		load_timeout: timeout_secs,
 		setup: Vec::new(),
 		steps: Vec::new(),
@@ -665,6 +668,10 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 		.collect();
 
 	let cases = spec.cases.iter().map(|case| {
+		let base = UnitPlan {
+			memory_mb: case.memory_mb.unwrap_or(base.memory_mb),
+			..base.clone()
+		};
 		let plan = if case.script {
 			UnitPlan {
 				script: Some(ScriptRun {
@@ -690,6 +697,7 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 		let timeout = scenario.timeout.unwrap_or(timeout_secs);
 		Unit {
 			plan: UnitPlan {
+				memory_mb: scenario.memory_mb.unwrap_or(base.memory_mb),
 				setup: top_setup
 					.iter()
 					.cloned()

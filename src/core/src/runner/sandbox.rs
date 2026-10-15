@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 pub struct SandboxConfig {
 	/// CPU time limit in seconds (RLIMIT_CPU). Default: 30.
 	pub cpu_secs: u64,
-	/// Memory limit in MB: RLIMIT_AS on Linux, and the grader's watch on the student side
-	/// everywhere. Default: 512.
+	/// Address-space limit in MB (RLIMIT_AS, Linux only): a backstop far above the memory a
+	/// unit is held to by the grader's watch of its resident memory. Default: 2048.
 	pub mem_mb: u64,
 	/// Max file write size in MB (RLIMIT_FSIZE). Default: 10.
 	pub fsize_mb: u64,
@@ -42,7 +42,7 @@ impl Default for SandboxConfig {
 	fn default() -> Self {
 		Self {
 			cpu_secs: 30,
-			mem_mb: 512,
+			mem_mb: 2048,
 			fsize_mb: 10,
 			nofile: 64,
 			nproc: Some(64),
@@ -714,7 +714,7 @@ mod tests {
 	fn test_default_config() {
 		let config = SandboxConfig::default();
 		assert_eq!(config.cpu_secs, 30);
-		assert_eq!(config.mem_mb, 512);
+		assert_eq!(config.mem_mb, 2048);
 		assert_eq!(config.fsize_mb, 10);
 		assert_eq!(config.nofile, 64);
 		assert_eq!(config.nproc, Some(64));

@@ -1465,3 +1465,36 @@ async fn test_a_path_into_the_bundle_is_never_handed_to_student_code() {
 	let results = grade(vec![spec], &[student]).await;
 	assert_eq!(results[0].total_passed(), 1, "{:#?}", results[0]);
 }
+
+/// A unit's student process is held to `memory_mb`: 256 MiB unless the spec, the case or
+/// the scenario says otherwise, and a case that needs more declares it.
+#[tokio::test]
+async fn test_memory_is_the_default_unless_declared() {
+	let bench = Bench::new();
+	let spec = |meta: &str, case: &str| {
+		bench.spec(&format!(
+			"[meta]\nname = \"m\"\nfile = \"lab.py\"\nfunction = \"big\"\nlanguage = \"python\"\n{meta}\n[[cases]]\nname = \"big\"\nexpect = 8000000\n{case}\n"
+		))
+	};
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def big():\n    return len(list(range(8_000_000)))\n",
+	);
+	let tight = grade(vec![spec("", "")], std::slice::from_ref(&student)).await;
+	let c = &tight[0].test_results[0].cases[0];
+	assert_eq!(
+		(c.status, c.fault, c.cause),
+		(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory)),
+		"{c:?}"
+	);
+	assert!(
+		c.failure.as_ref().unwrap().message.contains("256 MiB"),
+		"{:?}",
+		c.failure
+	);
+	for (meta, case) in [("memory_mb = 1024", ""), ("", "memory_mb = 1024")] {
+		let roomy = grade(vec![spec(meta, case)], std::slice::from_ref(&student)).await;
+		assert_eq!(roomy[0].total_passed(), 1, "{meta}{case}: {:#?}", roomy[0]);
+	}
+}

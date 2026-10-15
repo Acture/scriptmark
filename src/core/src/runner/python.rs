@@ -50,7 +50,6 @@ fn resolve_python_path(cmd: &str) -> String {
 pub struct PythonExecutor {
 	python_cmd: String,
 	/// The most memory the student side may hold before it is ended, in MiB.
-	memory_mb: u64,
 	isolation: Isolation,
 }
 
@@ -62,15 +61,8 @@ impl PythonExecutor {
 	pub fn with_python_cmd(python_cmd: impl Into<String>) -> Self {
 		Self {
 			python_cmd: resolve_python_path(&python_cmd.into()),
-			memory_mb: crate::runner::sandbox::SandboxConfig::default().mem_mb,
 			isolation: Isolation::default(),
 		}
-	}
-
-	/// End the student side once it holds more than `mb` MiB.
-	pub fn with_memory_limit(mut self, mb: u64) -> Self {
-		self.memory_mb = mb;
-		self
 	}
 
 	/// Whether each side runs in its own sandbox. Sandboxed is the default; a unit whose
@@ -452,6 +444,7 @@ impl PythonExecutor {
 		script: &str,
 		side: &Side,
 		deadline_secs: u64,
+		memory_mb: u64,
 		confinement: Option<&Confinement>,
 	) -> Result<Command, String> {
 		let mut cmd = match confinement {
@@ -480,10 +473,13 @@ impl PythonExecutor {
 		{
 			// Its own process group, so anything it spawns dies with it.
 			cmd.process_group(0);
-			apply_sandbox(&mut cmd, &sandbox_for(deadline_secs, confinement.is_some()));
+			apply_sandbox(
+				&mut cmd,
+				&sandbox_for(deadline_secs, memory_mb, confinement.is_some()),
+			);
 		}
 		#[cfg(not(unix))]
-		let _ = deadline_secs;
+		let _ = (deadline_secs, memory_mb);
 		Ok(cmd)
 	}
 
@@ -524,11 +520,13 @@ impl PythonExecutor {
 	}
 
 	/// Run a staged unit — the teacher side, and the student side when `with_student` —
-	/// and end both at `deadline_secs`.
+	/// end both at `deadline_secs`, and the student side past `memory_mb` MiB.
+	#[allow(clippy::too_many_arguments)]
 	async fn run_unit(
 		&self,
 		staged: &Staged,
 		deadline_secs: u64,
+		memory_mb: u64,
 		bounds: Bounds,
 		with_student: bool,
 		confinements: Option<[Confinement; 2]>,
@@ -541,6 +539,7 @@ impl PythonExecutor {
 			&TEACHER_SCRIPT,
 			&staged.teacher,
 			deadline_secs,
+			memory_mb,
 			teacher_confinement.as_ref(),
 		) {
 			Ok(cmd) => cmd,
@@ -561,6 +560,7 @@ impl PythonExecutor {
 				&STUDENT_SCRIPT,
 				&staged.student,
 				deadline_secs,
+				memory_mb,
 				student_confinement.as_ref(),
 			) {
 				Ok(cmd) => cmd,
@@ -652,7 +652,7 @@ impl PythonExecutor {
 				pumps.spawn(pump(pipe, student_tail.clone()));
 			}
 			if let Some(pid) = child.id() {
-				let limit = self.memory_mb.saturating_mul(1 << 20);
+				let limit = memory_mb.saturating_mul(1 << 20);
 				let over = over_memory.clone();
 				let group = student_group.0;
 				watch = Some(tokio::spawn(watch_memory(pid, group, limit, over)));
@@ -676,10 +676,10 @@ impl PythonExecutor {
 				let ended = tokio::time::timeout(linger, child.wait()).await;
 				let over = || over_memory.load(Ordering::SeqCst);
 				match ended {
-					Ok(Ok(_)) if over() => Exit::Memory,
+					Ok(Ok(_)) if over() => Exit::Memory(memory_mb),
 					Ok(Ok(status)) => exit_of(status),
 					Ok(Err(e)) => Exit::Spawn(format!("lost the student side: {e}")),
-					Err(_) if over() => Exit::Memory,
+					Err(_) if over() => Exit::Memory(memory_mb),
 					Err(_) if teacher_exit == Exit::Deadline => Exit::Deadline,
 					Err(_) => Exit::Stopped,
 				}
@@ -834,14 +834,22 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 }
 
 /// The limits for a unit: its CPU limit sits above its deadline, a backstop for one busy
-/// core rather than a second, shorter timeout. Confined, it cannot start processes, so the
-/// per-user process limit — which counts threads on Linux — only stops a thread bomb, and
-/// leaves a busy machine's own threads room.
+/// core rather than a second, shorter timeout. Its address space (Linux) sits far above
+/// the memory the grader's watch holds it to: a backstop for an allocation faster than the
+/// watch, which a library reserving address space it never uses (OpenBLAS) must not hit.
+/// Confined, it cannot start processes, so the per-user process limit — which counts
+/// threads on Linux — only stops a thread bomb, and leaves a busy machine's own threads
+/// room.
 #[cfg(unix)]
-fn sandbox_for(deadline_secs: u64, confined: bool) -> crate::runner::sandbox::SandboxConfig {
+fn sandbox_for(
+	deadline_secs: u64,
+	memory_mb: u64,
+	confined: bool,
+) -> crate::runner::sandbox::SandboxConfig {
 	let defaults = crate::runner::sandbox::SandboxConfig::default();
 	crate::runner::sandbox::SandboxConfig {
 		cpu_secs: deadline_secs.saturating_add(1),
+		mem_mb: memory_mb.saturating_mul(4).max(defaults.mem_mb),
 		nproc: if confined {
 			Some(crate::runner::sandbox::CONFINED_NPROC)
 		} else {
@@ -1052,8 +1060,17 @@ impl Executor for PythonExecutor {
 			Vec::new(),
 		) {
 			Ok(confinements) => {
-				self.run_unit(&staged, deadline, INSPECT_BOUNDS, false, confinements)
-					.await
+				self.run_unit(
+					&staged,
+					deadline,
+					spec.meta
+						.memory_mb
+						.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
+					INSPECT_BOUNDS,
+					false,
+					confinements,
+				)
+				.await
 			}
 			Err(e) => Finished::spawn_failed(e),
 		};
@@ -1154,6 +1171,7 @@ impl Executor for PythonExecutor {
 				self.run_unit(
 					&staged,
 					plan.deadline_secs(),
+					plan.memory_mb,
 					record_bounds(plan),
 					true,
 					confinements,
@@ -1199,14 +1217,18 @@ mod tests {
 	#[test]
 	fn test_the_cpu_limit_sits_above_any_units_deadline() {
 		for deadline in [3, 45, 4 * 10 + 2, 86_400 * 4] {
-			assert!(sandbox_for(deadline, true).cpu_secs > deadline);
+			assert!(sandbox_for(deadline, 256, true).cpu_secs > deadline);
 		}
-		assert_eq!(sandbox_for(u64::MAX, true).cpu_secs, u64::MAX, "saturates");
 		assert_eq!(
-			sandbox_for(3, true).nproc,
+			sandbox_for(u64::MAX, 256, true).cpu_secs,
+			u64::MAX,
+			"saturates"
+		);
+		assert_eq!(
+			sandbox_for(3, 256, true).nproc,
 			Some(crate::runner::sandbox::CONFINED_NPROC)
 		);
-		assert_eq!(sandbox_for(3, false).nproc, Some(64));
+		assert_eq!(sandbox_for(3, 256, false).nproc, Some(64));
 	}
 
 	/// Each record is bounded by the largest a call can make, and the stream by the number
@@ -1233,6 +1255,7 @@ mod tests {
 			data_files: Vec::new(),
 			bundle: PathBuf::new(),
 			shared: Vec::new(),
+			memory_mb: 256,
 			allowed_imports: Vec::new(),
 			load_timeout: 1,
 			setup: Vec::new(),

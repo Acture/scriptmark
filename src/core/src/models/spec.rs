@@ -495,6 +495,11 @@ pub struct TestCase {
 	#[serde(default)]
 	pub timeout: Option<u64>,
 
+	/// The most memory the case's student process may hold, in MiB. Not on a scenario
+	/// step: its steps share their scenario's process.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub memory_mb: Option<u64>,
+
 	/// Generate concrete cases from this one.
 	#[serde(default)]
 	pub parametrize: Option<Parametrize>,
@@ -575,6 +580,11 @@ pub struct TestMeta {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub shared: Vec<String>,
 
+	/// The most memory a unit's student process may hold, in MiB, where a case or scenario
+	/// does not say: `DEFAULT_MEMORY_MB` when neither does.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub memory_mb: Option<u64>,
+
 	/// Refused: every case now has its own process.
 	#[serde(default)]
 	pub copy_refs: Option<bool>,
@@ -648,6 +658,10 @@ pub struct Scenario {
 	/// Default timeout in seconds for this scenario's setup and steps.
 	#[serde(default)]
 	pub timeout: Option<u64>,
+
+	/// The most memory the scenario's student process may hold, in MiB.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub memory_mb: Option<u64>,
 
 	/// Runs once, at the start of the scenario, after the top-level setup.
 	#[serde(default)]

@@ -44,6 +44,10 @@ pub async fn resolve_oracle<E: Executor>(
 				.map(|rel| (spec.dir.join(rel), rel.clone()))
 				.collect(),
 			allowed_imports: spec.meta.allowed_imports.clone(),
+			memory_mb: case
+				.memory_mb
+				.or(spec.meta.memory_mb)
+				.unwrap_or(crate::spec_loader::DEFAULT_MEMORY_MB),
 			load_timeout: timeout_secs,
 			setup: Vec::new(),
 			steps: vec![CallPlan {

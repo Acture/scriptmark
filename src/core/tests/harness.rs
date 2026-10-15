@@ -54,6 +54,7 @@ fn unit(file: &Path) -> UnitPlan {
 		data_files: Vec::new(),
 		bundle: file.parent().unwrap().to_path_buf(),
 		shared: Vec::new(),
+		memory_mb: 256,
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
 		setup: Vec::new(),
@@ -1030,8 +1031,9 @@ async fn test_a_student_side_past_its_memory_limit_is_ended() {
 	);
 	let mut plan = unit(&student);
 	plan.steps = vec![function("hog", vec![]), function("hog", vec![])];
-	let obs = PythonExecutor::new().with_memory_limit(96).run(&plan).await;
-	assert_eq!(obs.exit, Exit::Memory, "{obs:?}");
+	plan.memory_mb = 96;
+	let obs = run(&plan).await;
+	assert_eq!(obs.exit, Exit::Memory(96), "{obs:?}");
 	assert!(obs.steps.is_empty());
 	assert_eq!(
 		obs.stopped.as_ref().map(|s| s.reason),
