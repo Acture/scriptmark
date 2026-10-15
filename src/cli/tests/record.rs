@@ -6,6 +6,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use scriptmark_core::record::Record;
+use scriptmark_core::runner::sandbox::Isolation;
 
 const SPEC: &str = r#"
 [meta]
@@ -876,4 +877,43 @@ fn a_canvas_record_rescores_from_its_bundle_and_refuses_another_attempt_or_excus
 	payload["submissions"][1]["excused"] = true.into();
 	std::fs::write(&payload_path, payload.to_string()).unwrap();
 	refused(rescore(dir, &[]), "2024002 is excused now");
+}
+
+/// OSS-10: a record says whether student code ran in its sandbox, and a summary of one
+/// that did not says so.
+#[test]
+fn a_run_without_the_sandbox_is_recorded_as_unisolated() {
+	let dir = bench();
+	for (flags, isolated) in [(&[][..], true), (&["--no-sandbox"][..], false)] {
+		let mut args = vec![
+			"grade",
+			"submissions",
+			"-t",
+			"tests",
+			"-o",
+			"out/result.json",
+			"--force",
+		];
+		args.extend(flags);
+		let output = scriptmark(dir.path(), &args);
+		assert!(
+			output.status.success(),
+			"{}",
+			String::from_utf8_lossy(&output.stderr)
+		);
+		let text = std::fs::read_to_string(dir.path().join("out/result.json")).unwrap();
+		let record = Record::load(&dir.path().join("out/result.json")).unwrap();
+		let expected = if isolated {
+			Isolation::Sandboxed
+		} else {
+			Isolation::Unisolated
+		};
+		assert_eq!(record.evidence.bundle.isolation, Some(expected));
+		assert!(text.contains("\"isolation\""), "{text}");
+		let summary = scriptmark(dir.path(), &["summarize", "out/result.json"]);
+		assert_eq!(
+			String::from_utf8_lossy(&summary.stdout).contains("UNISOLATED"),
+			!isolated
+		);
+	}
 }

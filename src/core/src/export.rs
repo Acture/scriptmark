@@ -472,6 +472,10 @@ pub fn about(record: &Record, n: u32) -> Result<Table> {
 	}
 	rows.extend([
 		("run_by".into(), Cell::text(&evidence.scriptmark)),
+		(
+			"isolation".into(),
+			Cell::text(crate::record::isolation_label(evidence.bundle.isolation)),
+		),
 		("scored_by".into(), Cell::text(&revision.scriptmark)),
 		(
 			"derived_items".into(),

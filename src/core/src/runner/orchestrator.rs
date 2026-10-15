@@ -21,6 +21,9 @@ pub struct RunOptions {
 	pub concurrency: Option<usize>,
 	/// The interpreter that runs teacher Python checker scripts.
 	pub python: String,
+	/// Whether teacher checker scripts and lint tools run in the teacher's sandbox, as the
+	/// units do.
+	pub isolation: crate::runner::sandbox::Isolation,
 }
 
 impl Default for RunOptions {
@@ -29,8 +32,16 @@ impl Default for RunOptions {
 			matching: crate::matching::Config::default(),
 			concurrency: None,
 			python: "python3".into(),
+			isolation: crate::runner::sandbox::Isolation::default(),
 		}
 	}
+}
+
+/// How teacher scripts and tools run outside a unit: checker scripts and lint.
+#[derive(Debug, Clone)]
+struct Tools {
+	python: Arc<str>,
+	isolation: crate::runner::sandbox::Isolation,
 }
 
 /// Run every prepared bundle against every student.
@@ -59,7 +70,10 @@ pub async fn run_all<E: Executor>(
 		})
 		.clamp(1, Semaphore::MAX_PERMITS);
 	let semaphore = Arc::new(Semaphore::new(concurrency));
-	let python: Arc<str> = options.python.as_str().into();
+	let tools = Tools {
+		python: options.python.as_str().into(),
+		isolation: options.isolation,
+	};
 	let matching = Arc::new(options.matching.clone());
 
 	let mut handles = Vec::new();
@@ -77,11 +91,11 @@ pub async fn run_all<E: Executor>(
 			.map(|bundle| crate::matching::item_match(&matching, student, &bundle.spec))
 			.collect();
 		let matching = matching.clone();
-		let (bundles, executor, semaphore, python) = (
+		let (bundles, executor, semaphore, tools) = (
 			bundles.clone(),
 			executor.clone(),
 			semaphore.clone(),
-			python.clone(),
+			tools.clone(),
 		);
 
 		let handle = tokio::spawn(async move {
@@ -95,7 +109,7 @@ pub async fn run_all<E: Executor>(
 					bundles,
 					executor,
 					semaphore,
-					python,
+					tools,
 					matching,
 				)
 				.await;
@@ -135,7 +149,7 @@ async fn run_student<E: Executor>(
 	bundles: Arc<[Bundle]>,
 	executor: Arc<E>,
 	semaphore: Arc<Semaphore>,
-	python: Arc<str>,
+	tools: Tools,
 	matching: Arc<crate::matching::Config>,
 ) {
 	let mut slots: Vec<Vec<Option<Vec<CaseResult>>>> =
@@ -191,11 +205,11 @@ async fn run_student<E: Executor>(
 		let functions = matching.functions(&report.student_id, &bundle.spec.meta.name);
 		for u in 0..bundle.units.len() {
 			let functions = functions.clone();
-			let (bundles, executor, semaphore, python, path) = (
+			let (bundles, executor, semaphore, tools, path) = (
 				bundles.clone(),
 				executor.clone(),
 				semaphore.clone(),
-				python.clone(),
+				tools.clone(),
 				path.clone(),
 			);
 			let handle = tasks.spawn(async move {
@@ -223,7 +237,13 @@ async fn run_student<E: Executor>(
 						}
 					}
 					(
-						judge(&plan, &unit.scored(), &observation, &python),
+						judge(
+							&plan,
+							&unit.scored(),
+							&observation,
+							&tools.python,
+							tools.isolation,
+						),
 						functions,
 					)
 				})
@@ -285,7 +305,7 @@ async fn run_student<E: Executor>(
 			}
 		}
 	}
-	report.lint = lint(&bundles, &graded_files, &semaphore).await;
+	report.lint = lint(&bundles, &graded_files, &semaphore, tools.isolation).await;
 	report.test_results = bundles
 		.iter()
 		.zip(slots)
@@ -299,30 +319,67 @@ async fn run_student<E: Executor>(
 	report.backend_name = Some(executor.language().to_string());
 }
 
-/// Lint the file of the first spec that asks for it — that item's file, not whichever the
-/// student happened to hand in first.
+/// Lint every file a spec asks to — each item's own file, with its own `[lint]` — and score
+/// the student by their mean: an item whose file is missing counts 0. A file two items
+/// share under the same command is linted once.
 async fn lint(
 	bundles: &[Bundle],
 	graded_files: &[Option<String>],
 	semaphore: &Semaphore,
+	isolation: crate::runner::sandbox::Isolation,
 ) -> Option<LintOutcome> {
-	let (b, config) = bundles
-		.iter()
-		.enumerate()
-		.find_map(|(b, bundle)| bundle.spec.lint.clone().map(|c| (b, c)))?;
-	let Some(file) = graded_files[b].clone() else {
+	let mut asked: Vec<(
+		(Option<String>, String),
+		crate::models::LintConfig,
+		std::path::PathBuf,
+	)> = Vec::new();
+	for (bundle, file) in bundles.iter().zip(graded_files) {
+		if let Some(config) = &bundle.spec.lint {
+			let key = (file.clone(), config.command.clone());
+			if !asked.iter().any(|(k, ..)| *k == key) {
+				asked.push((key, config.clone(), bundle.spec.dir.clone()));
+			}
+		}
+	}
+	if asked.is_empty() {
+		return None;
+	}
+	if asked.iter().all(|((file, _), ..)| file.is_none()) {
 		return Some(LintOutcome::NoFile);
-	};
-	let _permit = semaphore.acquire().await.expect("semaphore closed");
-	let outcome = tokio::task::spawn_blocking(move || {
-		crate::runner::linter::run_lint(&config, std::path::Path::new(&file))
-	})
-	.await
-	.map_err(|e| format!("linting failed: {e}"))
-	.and_then(|scored| scored);
-	Some(match outcome {
-		Ok(score) => LintOutcome::Scored { score },
-		Err(message) => LintOutcome::Failed { message },
+	}
+	let mut scores = Vec::new();
+	let mut failures = Vec::new();
+	for ((file, _), config, bundle) in asked {
+		let Some(file) = file else {
+			scores.push(0.0);
+			continue;
+		};
+		let _permit = semaphore.acquire().await.expect("semaphore closed");
+		let outcome = tokio::task::spawn_blocking(move || {
+			crate::runner::linter::run_lint(
+				&config,
+				std::path::Path::new(&file),
+				&bundle,
+				isolation,
+				crate::runner::linter::LINT_TIMEOUT,
+			)
+		})
+		.await
+		.map_err(|e| format!("linting failed: {e}"))
+		.and_then(|scored| scored);
+		match outcome {
+			Ok(score) => scores.push(score),
+			Err(message) => failures.push(message),
+		}
+	}
+	Some(if failures.is_empty() {
+		LintOutcome::Scored {
+			score: scores.iter().sum::<f64>() / scores.len() as f64,
+		}
+	} else {
+		LintOutcome::Failed {
+			message: failures.join("; "),
+		}
 	})
 }
 

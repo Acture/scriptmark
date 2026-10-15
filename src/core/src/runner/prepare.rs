@@ -25,8 +25,9 @@ use crate::runner::executor::{
 use crate::runner::frozen::{Generation, replay_entry};
 use crate::runner::generation::{DrawSeed, Generated, generate, seed_for};
 use crate::runner::judge::Scored;
+use crate::runner::memory;
 use crate::runner::oracle::{resolve_oracle, validate_references};
-use crate::spec_loader::{MAX_TIMEOUT_SECS, RESERVED, refs, validate, validate_expanded};
+use crate::spec_loader::{MAX_TIMEOUT_SECS, refs, reserved, validate, validate_expanded};
 
 /// A prepared test bundle: one spec, ready to run against any student.
 #[derive(Debug, Serialize)]
@@ -340,6 +341,7 @@ async fn prepare_one<E: Executor>(
 	}
 
 	problems.extend(check_names(&spec, &teacher));
+	problems.extend(check_bundle_paths(&spec, &teacher));
 	problems.extend(dry_run_rhai(&spec));
 	if !problems.is_empty() {
 		return Err(fail(problems));
@@ -367,10 +369,12 @@ fn check_names(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> {
 			)
 		})
 		.collect();
-	if teacher.exports.contains_key(RESERVED) {
-		problems.push(format!(
-			"a teacher module exports '{RESERVED}', a name checkers reserve for the call's output"
-		));
+	for name in teacher.exports.keys() {
+		if let Some(meaning) = reserved(name) {
+			problems.push(format!(
+				"a teacher module exports '{name}', a name checkers reserve for {meaning}"
+			));
+		}
 	}
 	let exports: BTreeSet<&str> = teacher.exports.keys().map(String::as_str).collect();
 	let mut top: BTreeSet<String> = BTreeSet::new();
@@ -422,6 +426,93 @@ fn check_names(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> {
 	problems
 }
 
+/// Student code runs in a sandbox that cannot read the test bundle: a path into it, handed to
+/// student code, names a file the student can never open. Such a file belongs in
+/// `data_files`, which stages it beside the student's file, under a relative path.
+fn check_bundle_paths(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> {
+	let Ok(bundle) = std::fs::canonicalize(&spec.dir) else {
+		return Vec::new();
+	};
+	let fix = "list it in [meta] data_files and pass its path relative to the student's directory";
+	let mut problems = Vec::new();
+	let mut literals = |at: &str, value: &Value| {
+		for path in bundle_paths(value, &bundle) {
+			problems.push(format!(
+				"{at}: '{path}' is a path into the test bundle, which student code cannot read: {fix}"
+			));
+		}
+	};
+	for (name, value) in &spec.vars {
+		literals(&format!("[vars] '{name}'"), value);
+	}
+	let student_setup = |steps: &[SetupStep]| -> Vec<(String, Vec<Value>)> {
+		steps
+			.iter()
+			.filter(|s| s.teacher.is_none())
+			.map(|s| (format!("setup '{}'", s.id), s.args.clone()))
+			.collect()
+	};
+	let mut calls: Vec<(String, Vec<Value>)> = student_setup(&spec.setup);
+	calls.extend(
+		spec.cases
+			.iter()
+			.map(|c| (format!("case '{}'", c.name), c.args.clone())),
+	);
+	for scenario in &spec.scenarios {
+		calls.extend(student_setup(&scenario.setup));
+		calls.extend(scenario.steps.iter().map(|s| {
+			(
+				format!("scenario '{}' step '{}'", scenario.name, s.name),
+				s.args.clone(),
+			)
+		}));
+	}
+	for (at, args) in &calls {
+		for arg in args {
+			literals(at, arg);
+		}
+	}
+	for (at, args) in calls {
+		for name in refs(&args) {
+			if teacher.exports.get(&name).is_some_and(|e| e.bundle_path) {
+				problems.push(format!(
+					"{at}: '${name}' is a path into the test bundle, which student code cannot read: {fix}"
+				));
+			}
+		}
+	}
+	problems
+}
+
+/// `path` with its links resolved as far as it exists: a file the student would write
+/// still resolves through its directory.
+fn resolved(path: &std::path::Path) -> PathBuf {
+	if let Ok(real) = std::fs::canonicalize(path) {
+		return real;
+	}
+	match (path.parent(), path.file_name()) {
+		(Some(parent), Some(name)) => resolved(parent).join(name),
+		_ => path.to_path_buf(),
+	}
+}
+
+/// Every string in `value` that is an absolute path into `bundle`.
+fn bundle_paths(value: &Value, bundle: &std::path::Path) -> Vec<String> {
+	match value {
+		Value::String(text) => {
+			let path = std::path::Path::new(text);
+			if path.is_absolute() && resolved(path).starts_with(bundle) {
+				vec![text.clone()]
+			} else {
+				Vec::new()
+			}
+		}
+		Value::Array(items) => items.iter().flat_map(|v| bundle_paths(v, bundle)).collect(),
+		Value::Object(map) => map.values().flat_map(|v| bundle_paths(v, bundle)).collect(),
+		_ => Vec::new(),
+	}
+}
+
 fn unknown_refs(args: &[Value], scope: &BTreeSet<String>, at: &str) -> Vec<String> {
 	refs(args)
 		.into_iter()
@@ -471,7 +562,7 @@ fn check_call(
 					for param in params.iter().skip(2) {
 						// *args, **kwargs and defaulted parameters are filled only when named.
 						let filled = param.is_variadic()
-							|| param.default || param.name == RESERVED
+							|| param.default || reserved(&param.name).is_some()
 							|| scope.contains(&param.name);
 						if !filled {
 							problems.push(format!(
@@ -555,7 +646,17 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 			.iter()
 			.map(|rel| (spec.dir.join(rel), rel.clone()))
 			.collect(),
+		bundle: spec.dir.clone(),
+		shared: spec
+			.meta
+			.shared
+			.iter()
+			.map(|rel| (spec.dir.join(rel), rel.clone()))
+			.collect(),
 		allowed_imports: spec.meta.allowed_imports.clone(),
+		// Each unit's, from its own declarations and data: below.
+		memory_mb: 0,
+		memory_basis: None,
 		load_timeout: timeout_secs,
 		setup: Vec::new(),
 		steps: Vec::new(),
@@ -566,6 +667,14 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 		.iter()
 		.map(|s| setup_call(s, timeout_secs))
 		.collect();
+
+	let meta = (spec.meta.memory_mb, spec.meta.space.as_deref());
+	let held =
+		|mut plan: UnitPlan, narrow: (Option<u64>, Option<&str>), scored: &[(String, TestCase)]| {
+			let size = memory::unit_size(spec, &plan, scored.iter().map(|(_, c)| c));
+			(plan.memory_mb, plan.memory_basis) = memory::resolve([narrow, meta], size);
+			plan
+		};
 
 	let cases = spec.cases.iter().map(|case| {
 		let plan = if case.script {
@@ -584,32 +693,39 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 				..base.clone()
 			}
 		};
+		let scored = vec![(case.name.clone(), case.clone())];
 		Unit {
-			plan,
-			scored: vec![(case.name.clone(), case.clone())],
+			plan: held(plan, (case.memory_mb, case.space.as_deref()), &scored),
+			scored,
 		}
 	});
 	let scenarios = spec.scenarios.iter().map(|scenario| {
 		let timeout = scenario.timeout.unwrap_or(timeout_secs);
-		Unit {
-			plan: UnitPlan {
-				setup: top_setup
-					.iter()
-					.cloned()
-					.chain(scenario.setup.iter().map(|s| setup_call(s, timeout)))
-					.collect(),
-				steps: scenario
-					.steps
-					.iter()
-					.map(|s| call_of(s, default_function, timeout))
-					.collect(),
-				..base.clone()
-			},
-			scored: scenario
+		let scored: Vec<(String, TestCase)> = scenario
+			.steps
+			.iter()
+			.map(|s| (scenario.step_name(s), s.clone()))
+			.collect();
+		let plan = UnitPlan {
+			setup: top_setup
+				.iter()
+				.cloned()
+				.chain(scenario.setup.iter().map(|s| setup_call(s, timeout)))
+				.collect(),
+			steps: scenario
 				.steps
 				.iter()
-				.map(|s| (scenario.step_name(s), s.clone()))
+				.map(|s| call_of(s, default_function, timeout))
 				.collect(),
+			..base.clone()
+		};
+		Unit {
+			plan: held(
+				plan,
+				(scenario.memory_mb, scenario.space.as_deref()),
+				&scored,
+			),
+			scored,
 		}
 	});
 	cases.chain(scenarios).collect()

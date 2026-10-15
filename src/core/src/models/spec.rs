@@ -495,6 +495,16 @@ pub struct TestCase {
 	#[serde(default)]
 	pub timeout: Option<u64>,
 
+	/// The most memory the case's student process may hold beyond what it takes idle, in
+	/// MiB. Not on a scenario step: its steps share their scenario's process.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub memory_mb: Option<u64>,
+
+	/// The space the algorithm may use, as `O(n)` and the like: the memory is then estimated
+	/// from it and the size of the test data. Not beside `memory_mb`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
+
 	/// Generate concrete cases from this one.
 	#[serde(default)]
 	pub parametrize: Option<Parametrize>,
@@ -568,11 +578,30 @@ pub struct TestMeta {
 	#[serde(default)]
 	pub data_files: Vec<String>,
 
+	/// Teacher modules whose classes cross between the two sides of a unit by value. Each
+	/// is copied beside the student's file, where student code imports it without an
+	/// `allowed_imports` entry, and the teacher side imports its own copy from the bundle:
+	/// an instance one side sends is rebuilt from the other side's copy of its class.
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	pub shared: Vec<String>,
+
+	/// The most memory a unit's student process may hold beyond what it takes idle, in MiB,
+	/// where a case or scenario does not say. Where nothing does, it is estimated from
+	/// `space`, or `DEFAULT_SPACE`, and the size of the unit's test data.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub memory_mb: Option<u64>,
+
+	/// The space the algorithm may use, as `O(n)` and the like: the memory is then estimated
+	/// from it and the size of the test data. Not beside `memory_mb`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
+
 	/// Refused: every case now has its own process.
 	#[serde(default)]
 	pub copy_refs: Option<bool>,
 
-	/// Extra packages allowed in student code (beyond safe stdlib).
+	/// Extra packages allowed in student code (beyond safe stdlib). An entry is a module
+	/// name, and allows its top-level package: `numpy`, `matplotlib.pyplot`.
 	#[serde(default)]
 	pub allowed_imports: Vec<String>,
 }
@@ -641,6 +670,16 @@ pub struct Scenario {
 	/// Default timeout in seconds for this scenario's setup and steps.
 	#[serde(default)]
 	pub timeout: Option<u64>,
+
+	/// The most memory the scenario's student process may hold beyond what it takes idle,
+	/// in MiB.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub memory_mb: Option<u64>,
+
+	/// The space the algorithm may use, as `O(n)` and the like: the memory is then estimated
+	/// from it and the size of the test data. Not beside `memory_mb`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub space: Option<String>,
 
 	/// Runs once, at the start of the scenario, after the top-level setup.
 	#[serde(default)]

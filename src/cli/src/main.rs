@@ -20,6 +20,7 @@ use scriptmark_core::runner::generation::SeedSource;
 use scriptmark_core::runner::orchestrator::{self, RunOptions};
 use scriptmark_core::runner::prepare::prepare;
 use scriptmark_core::runner::python::PythonExecutor;
+use scriptmark_core::runner::sandbox::{self, Isolation};
 use scriptmark_core::spec_loader::load_specs_from_dir;
 
 #[derive(Parser)]
@@ -80,6 +81,27 @@ struct FrozenArgs {
 	fresh: bool,
 }
 
+#[derive(clap::Args)]
+struct IsolationArgs {
+	/// Run student code without the operating system's sandbox. Each unit still runs as a
+	/// teacher side and a student side under resource limits, but student code can then
+	/// read and write whatever your user can — other students' files, the test bundle, your
+	/// home directory — and reach the network. The grading record marks the results
+	/// unisolated. For platforms ScriptMark cannot sandbox yet.
+	#[arg(long)]
+	no_sandbox: bool,
+}
+
+impl IsolationArgs {
+	fn isolation(&self) -> Isolation {
+		if self.no_sandbox {
+			Isolation::Unisolated
+		} else {
+			Isolation::Sandboxed
+		}
+	}
+}
+
 #[derive(Parser)]
 struct GradeArgs {
 	/// Directories containing student submissions
@@ -133,6 +155,9 @@ struct GradeArgs {
 	#[command(flatten)]
 	frozen: FrozenArgs,
 
+	#[command(flatten)]
+	isolation: IsolationArgs,
+
 	/// Replace the grading record at --output even when it holds rescored revisions,
 	/// discarding them. Long form only: there is no -f.
 	#[arg(long)]
@@ -182,6 +207,9 @@ struct RunArgs {
 
 	#[command(flatten)]
 	frozen: FrozenArgs,
+
+	#[command(flatten)]
+	isolation: IsolationArgs,
 
 	/// Replace the grading record at --output even when it holds rescored revisions,
 	/// discarding them. Long form only: there is no -f.
@@ -650,9 +678,17 @@ fn scored(view: &View, path: &Path) -> Result<u32> {
 
 /// How a summary names what it shows.
 fn shown(path: &Path, view: &View) -> String {
-	match view.revision {
+	let title = match view.revision {
 		Some(n) => format!("{} (revision {n} of {})", path.display(), view.of),
 		None => format!("{} (unscored)", path.display()),
+	};
+	if view.sandboxed() {
+		title
+	} else {
+		format!(
+			"{title} — UNISOLATED: {}",
+			record::isolation_label(view.isolation)
+		)
 	}
 }
 
@@ -670,14 +706,33 @@ async fn run_bundles(
 	output: &Path,
 	options: &FrozenArgs,
 ) -> Result<(Vec<StudentReport>, Frozen, String)> {
+	if run_options.isolation.is_sandboxed() {
+		// Fail closed, before anything runs: a unit whose sandbox cannot be applied is
+		// never graded.
+		sandbox::available().map_err(anyhow::Error::msg).context(
+			"refusing to grade: student code cannot be sandboxed here (pass --no-sandbox to grade without isolation; the results will say so)",
+		)?;
+	} else {
+		eprintln!(
+			"warning: --no-sandbox: student code runs without a sandbox and can reach everything your user can; the results are marked unisolated"
+		);
+	}
 	let generation = match &options.replay {
 		Some(path) => Generation::Replay(Frozen::load(path)?),
 		None => Generation::fresh(),
 	};
-	let executor = Arc::new(PythonExecutor::with_python_cmd(&run_options.python));
-	let bundles = prepare(specs, &generation, executor.clone(), timeout)
-		.await
-		.context("refusing to grade: the test bundle is not ready")?;
+	let executor = Arc::new(
+		PythonExecutor::with_python_cmd(&run_options.python).with_isolation(run_options.isolation),
+	);
+	// Preparing runs teacher code in units of its own process groups too: Ctrl-C ends them.
+	let bundles = tokio::select! {
+		prepared = prepare(specs, &generation, executor.clone(), timeout) => prepared
+			.context("refusing to grade: the test bundle is not ready")?,
+		_ = tokio::signal::ctrl_c() => {
+			scriptmark_core::runner::python::kill_all_units();
+			anyhow::bail!("interrupted while preparing: every running unit was stopped")
+		}
+	};
 	println!(
 		"Prepared {} test bundle(s): {} unit(s) per student",
 		bundles.len(),
@@ -877,6 +932,7 @@ async fn execute(
 	let spec_versions = record::spec_versions(&specs)?;
 	let versions = record::submission_versions(&input.students)?;
 	let matching = run_options.matching.clone();
+	let isolation = run_options.isolation;
 	let (mut reports, frozen, python) = run_bundles(
 		&input.students,
 		specs,
@@ -891,6 +947,7 @@ async fn execute(
 		spec_versions,
 		timeout,
 		python,
+		isolation,
 		&frozen,
 		(!frozen.is_empty()).then(|| frozen::beside(output)),
 	);
@@ -940,6 +997,7 @@ async fn cmd_grade(args: GradeArgs) -> Result<()> {
 			concurrency: args
 				.concurrency
 				.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+			isolation: args.isolation.isolation(),
 		},
 		args.timeout,
 		&args.output,
@@ -1053,6 +1111,7 @@ async fn cmd_run(args: RunArgs) -> Result<()> {
 			concurrency: args
 				.concurrency
 				.map(|n| usize::try_from(n).unwrap_or(usize::MAX)),
+			isolation: args.isolation.isolation(),
 		},
 		args.timeout,
 		&args.output,
@@ -1412,6 +1471,13 @@ async fn cmd_grades_push(args: GradesPushArgs) -> Result<()> {
 		}
 	}
 	let view = record.view(args.revision)?;
+	if !view.sandboxed() {
+		eprintln!(
+			"warning: {} is {}: student code was not isolated when these grades were made",
+			args.results.display(),
+			record::isolation_label(view.isolation)
+		);
+	}
 	let revision = scored(&view, &args.results)?;
 
 	// Only graded students are pushed — a real 0 included, a withheld grade never. The
@@ -1527,6 +1593,7 @@ fn cmd_similarity(args: SimilarityArgs) -> Result<()> {
 
 fn cmd_report(args: ReportArgs) -> Result<()> {
 	let (_, view) = load_view(&args.results, args.revision.revision)?;
+	let (sandboxed, isolation) = (view.sandboxed(), view.isolation);
 	let reports = view.reports;
 
 	let similarity = if let Some(sim_dir) = &args.similarity_dir {
@@ -1553,7 +1620,16 @@ fn cmd_report(args: ReportArgs) -> Result<()> {
 		None
 	};
 
-	report::generate_html_report(&reports, similarity.as_deref(), &args.title, &args.output)?;
+	let title = if sandboxed {
+		args.title.clone()
+	} else {
+		format!(
+			"{} — UNISOLATED: {}",
+			args.title,
+			record::isolation_label(isolation)
+		)
+	};
+	report::generate_html_report(&reports, similarity.as_deref(), &title, &args.output)?;
 
 	println!("HTML report generated: {}", args.output.display());
 	Ok(())

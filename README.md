@@ -17,9 +17,15 @@ notes/                Private project documentation submodule
 ```
 
 Run Cargo commands from the repository root. The CLI depends on `scriptmark-core`;
-the core has no CLI, network, database or terminal UI dependencies. Python 3 is still
-required to execute student submissions, teacher checkers and reference solutions.
+the core has no CLI, network, database or terminal UI dependencies. Python 3.10 or newer
+is still required to execute student submissions, teacher checkers and reference
+solutions.
 ScriptMark is distributed as a Rust CLI; it does not expose a Python package/API.
+
+Student code and teacher code run in separate processes, each in the operating system's
+sandbox: Seatbelt on macOS, Landlock and seccomp on Linux (5.13 or later, Landlock
+enabled). Grading refuses where no sandbox can be applied; `--no-sandbox` grades without
+one — on Windows, for now — and the results are marked unisolated.
 
 ## Documentation and checkout
 
@@ -387,13 +393,13 @@ See [the scoring contract](https://github.com/Acture/obsidian-vault/blob/project
 | `sorted` / `set_eq` / `contains` | Collection checks |
 | Rhai expression | `check = { rhai = "result != () && result > 0" }` |
 | Python script | `check = { python = "verifiers/check.py" }` |
-| Teacher function | `check = { function = "is_valid" }`, run on the live value |
+| Teacher function | `check = { function = "is_valid" }`, run on the returned value |
 | Output and files | `expected_stdout = "..."`, `expect_files = { "out.txt" = "..." }` |
 
 ## Features
 
 - **Custom test engine** -- subprocess execution, no pytest dependency
-- **Isolated units** -- a process and directory per case, env isolation, import allowlist, setrlimit, timeout with kill; contains accidents, not a security sandbox ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
+- **Sandboxed units** -- every case runs as a teacher process and a student process, each in the OS sandbox: the student's reads only its own directory, with no network, no new programs and no signals to others; the teacher's reads the bundle but not other students' work or your environment. Resource limits, a memory watch and per-call deadlines contain accidents; built for introductory courses, not against a student attacking the grader ([details](https://github.com/Acture/obsidian-vault/blob/project/scriptmark/docs/test-bundles.md#what-grading-does-not-defend-against))
 - **Parallel** -- tokio orchestrator, grades 80+ students in seconds
 - **Parametrize + oracle** -- random inputs with teacher reference implementations
 - **Per-item scoring** -- declared points and aggregation; zero and withheld kept apart in every export

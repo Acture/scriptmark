@@ -72,6 +72,12 @@ impl Contract {
 		let mut paths: BTreeSet<String> = spec.meta.imports.iter().cloned().collect();
 		paths.extend(
 			spec.meta
+				.shared
+				.iter()
+				.map(|p| spec.dir.join(p).to_string_lossy().into_owned()),
+		);
+		paths.extend(
+			spec.meta
 				.data_files
 				.iter()
 				.map(|p| spec.dir.join(p).to_string_lossy().into_owned()),
@@ -98,11 +104,14 @@ impl Contract {
 			runtime: executor.identity()?,
 			sources,
 			protocol: digest(
-				concat!(
+				[
 					include_str!("oracle.rs"),
-					include_str!("harness.py"),
-					include_str!("../checker/rhai_checker.rs")
-				)
+					include_str!("../checker/rhai_checker.rs"),
+				]
+				.iter()
+				.chain(&crate::runner::python::PROTOCOL)
+				.copied()
+				.collect::<String>()
 				.as_bytes(),
 			),
 		})

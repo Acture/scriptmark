@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use scriptmark_core::models::Target;
 use scriptmark_core::runner::executor::{
-	CallPlan, CheckObservation, Executor, Exit, InProcessCheck, Outcome, ScriptRun, Subject,
-	UnitObservation, UnitPlan,
+	CallPlan, CheckObservation, Executor, Exit, InProcessCheck, Outcome, Phase, ScriptRun,
+	StopReason, Subject, UnitObservation, UnitPlan,
 };
 use scriptmark_core::runner::python::PythonExecutor;
 use serde_json::{Value, json};
@@ -52,6 +52,10 @@ fn unit(file: &Path) -> UnitPlan {
 		imports: Vec::new(),
 		vars: Arc::new(BTreeMap::new()),
 		data_files: Vec::new(),
+		bundle: file.parent().unwrap().to_path_buf(),
+		shared: Vec::new(),
+		memory_mb: 64,
+		memory_basis: None,
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
 		setup: Vec::new(),
@@ -135,13 +139,16 @@ async fn test_a_timeout_is_recorded_even_through_a_bare_except() {
 	);
 }
 
+/// A call that defeats its own timer is given up on by the teacher side, which reports it
+/// and everything else: the student side is ended, and nothing after it runs.
 #[tokio::test]
-async fn test_a_unit_that_never_yields_is_killed_at_its_deadline() {
+async fn test_a_call_that_never_yields_is_given_up_on_and_nothing_after_it_runs() {
 	let dir = tempfile::tempdir().unwrap();
 	let student = write(
 		dir.path(),
 		"lab.py",
-		"def forever():\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n\ndef ok():\n    return 1\n",
+		// Never returns to the interpreter, where the timer would fire.
+		"import itertools\n\ndef forever():\n    return sum(itertools.count())\n\ndef ok():\n    return 1\n",
 	);
 	let mut plan = unit(&student);
 	plan.load_timeout = 1;
@@ -150,10 +157,25 @@ async fn test_a_unit_that_never_yields_is_killed_at_its_deadline() {
 	let mut ok = function("ok", vec![]);
 	ok.timeout = 1;
 	plan.steps = vec![forever, ok];
+	let started = std::time::Instant::now();
 	let obs = run(&plan).await;
-	assert_eq!(obs.exit, Exit::Deadline);
-	assert!(obs.steps.is_empty(), "the hung call never reported");
-	assert!(!obs.done);
+	assert!(
+		started.elapsed() < std::time::Duration::from_secs(10),
+		"given up on at its own deadline, not the unit's"
+	);
+	assert!(obs.done && obs.teacher_exit == Exit::Code(0), "{obs:?}");
+	assert_eq!(obs.exit, Exit::Stopped);
+	assert_eq!(
+		obs.steps.len(),
+		1,
+		"the hung call is reported; the next never ran"
+	);
+	assert!(matches!(obs.steps[0].outcome, Outcome::Timeout {}));
+	let stopped = obs.stopped.as_ref().unwrap();
+	assert_eq!(
+		(stopped.phase, stopped.index, stopped.reason),
+		(Phase::Step, 0, StopReason::Deadline)
+	);
 }
 
 #[tokio::test]
@@ -651,6 +673,8 @@ async fn test_serialisation_edges_found_in_rereview() {
 	);
 	let mut plan = unit(&student);
 	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	// 1.5 million integers, and the harness's copies of them for the checker.
+	plan.memory_mb = 512;
 	let mut big = function("big_list", vec![]);
 	big.check = Some(InProcessCheck {
 		function: "length".into(),
@@ -842,12 +866,14 @@ async fn test_a_long_scenario_of_large_legal_values_is_not_a_flood() {
 		function: "picky".into(),
 		expected: None,
 	});
-	// About 10.75 MiB each on the wire: 75 MiB in all, past a fixed 64 MiB cap.
+	// About 10.75 MiB each on the wire: 75 MiB in all, past a fixed 64 MiB cap. This is
+	// about the record channel: the student side's copies of each value get room.
 	plan.steps = vec![step; 7];
+	plan.memory_mb = 512;
 	let obs = run(&plan).await;
 	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
 	assert!(obs.done, "{obs:?}");
-	assert_eq!(obs.steps.len(), 7);
+	assert_eq!(obs.steps.len(), 7, "{:?} {:?}", obs.exit, obs.stopped);
 	assert_eq!(obs.checks.len(), 7);
 	for step in &obs.steps {
 		// The value itself arrived, at the limit rather than replaced by its size.
@@ -928,5 +954,504 @@ async fn test_a_unit_cannot_leave_anything_behind_for_the_next_one() {
 		returned(&a.steps[2].outcome),
 		&json!([0, 0]),
 		"no core dumps"
+	);
+}
+
+#[tokio::test]
+async fn test_a_student_side_that_dies_mid_call_is_reported_by_the_teacher_side() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib\n\ndef ok():\n    return 1\n\ndef die():\n    importlib.import_module('os')._exit(3)\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![
+		function("ok", vec![]),
+		function("die", vec![]),
+		function("ok", vec![]),
+	];
+	let obs = run(&plan).await;
+	assert!(obs.done && obs.teacher_exit == Exit::Code(0), "{obs:?}");
+	assert_eq!(obs.steps.len(), 1);
+	assert_eq!(
+		obs.exit,
+		Exit::Code(3),
+		"the student side's own exit is kept"
+	);
+	let stopped = obs.stopped.as_ref().unwrap();
+	assert_eq!((stopped.index, stopped.reason), (1, StopReason::Exited));
+}
+
+#[tokio::test]
+async fn test_a_student_who_writes_into_the_pipe_only_breaks_their_own_unit() {
+	let dir = tempfile::tempdir().unwrap();
+	// Every descriptor a student could guess at: a frame announcing 2 GiB, then a forged
+	// verdict, as the teacher side's records would spell it.
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib, struct\nos = importlib.import_module('os')\n\ndef flood():\n    forged = b'{\"kind\":\"check\",\"index\":0,\"verdict\":{\"pass\":true,\"message\":\"\"}}'\n    for fd in range(3, 64):\n        for data in (struct.pack('>I', len(forged)) + forged, struct.pack('>I', 1 << 31)):\n            try:\n                os.write(fd, data)\n            except OSError:\n                pass\n    return 1\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def never(result, expected):\n    return False\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut flood = function("flood", vec![]);
+	flood.check = Some(InProcessCheck {
+		function: "never".into(),
+		expected: None,
+	});
+	plan.steps = vec![flood, function("flood", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
+	assert!(
+		obs.checks
+			.values()
+			.all(|c| !matches!(c, CheckObservation::Verdict { pass: true, .. })),
+		"no forged verdict reached the records: {:?}",
+		obs.checks
+	);
+	let stopped = obs
+		.stopped
+		.as_ref()
+		.expect("the unit stops at the call that wrote");
+	assert_eq!(stopped.index, 0);
+	assert!(
+		matches!(stopped.reason, StopReason::Flooded | StopReason::Garbled),
+		"{stopped:?}"
+	);
+	assert!(obs.done, "{obs:?}");
+}
+
+/// What a submission imports, wherever in its file, is loaded when ScriptMark measures what
+/// its student side takes idle: no import is the student's. The module here, a teacher's
+/// data file the spec allows, holds 32 MiB from the moment it is imported.
+#[tokio::test]
+async fn test_what_a_submission_imports_counts_as_idle() {
+	let dir = tempfile::tempdir().unwrap();
+	let heavy = write(dir.path(), "heavy.py", "BLOB = b'x' * (32 * 1024 * 1024)\n");
+	let mut idle = Vec::new();
+	for (name, import) in [("bare.py", ""), ("imports.py", "    import heavy\n")] {
+		let student = write(
+			dir.path(),
+			name,
+			&format!(
+				"import time\n\ndef hog():\n{import}    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n"
+			),
+		);
+		let mut plan = unit(&student);
+		plan.data_files = vec![(heavy.clone(), "heavy.py".into())];
+		plan.allowed_imports = vec!["heavy".into()];
+		plan.steps = vec![function("hog", vec![])];
+		plan.memory_mb = 16;
+		match run(&plan).await.exit {
+			Exit::Memory { idle_mb, .. } => idle.push(idle_mb),
+			other => panic!("{name}: {other:?}"),
+		}
+	}
+	assert!(idle[1] >= idle[0] + 30, "{idle:?} MiB");
+}
+
+/// Reading a submission's imports takes memory its source decides — about 140 MiB for the
+/// 120,000 constants here — and none of it is part of what its unit takes idle.
+#[tokio::test]
+async fn test_what_reading_a_submission_takes_is_not_idle() {
+	let dir = tempfile::tempdir().unwrap();
+	let hog = "import time\n\ndef hog():\n    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n";
+	let mut idle = Vec::new();
+	for (name, extra) in [
+		("plain.py", String::new()),
+		("padded.py", format!("PAD = [{}]\n", "1,".repeat(120_000))),
+	] {
+		let student = write(dir.path(), name, &format!("{extra}{hog}"));
+		let mut plan = unit(&student);
+		plan.steps = vec![function("hog", vec![])];
+		plan.memory_mb = 16;
+		plan.load_timeout = 30;
+		match run(&plan).await.exit {
+			Exit::Memory { idle_mb, .. } => idle.push(idle_mb),
+			other => panic!("{name}: {other:?}"),
+		}
+	}
+	assert!(idle[1] <= idle[0] + 3, "{idle:?} MiB");
+}
+
+/// An import that exits when loaded — `unittest.__main__` runs the test runner — cannot
+/// stop a submission's idle share from being measured, nor turn its units into the
+/// environment's failure: it is measured without its imports.
+#[tokio::test]
+async fn test_an_import_that_exits_does_not_stop_the_measurement() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def never():\n    import unittest.__main__\n\ndef two():\n    return 2\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("two", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.done && obs.exit == Exit::Code(0), "{obs:?}");
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(2));
+}
+
+/// An entry names a module: a dotted one allows its whole package, and one that is not
+/// installed does not keep the unit from running.
+#[tokio::test]
+async fn test_a_dotted_allowed_import_allows_its_package() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import wsgiref.util\n\ndef scheme():\n    return wsgiref.util.guess_scheme({})\n",
+	);
+	let mut plan = unit(&student);
+	plan.allowed_imports = vec!["wsgiref.util".into(), "not_installed_anywhere".into()];
+	plan.steps = vec![function("scheme", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.done, "{obs:?}");
+	assert_eq!(returned(&obs.steps[0].outcome), &json!("http"));
+}
+
+#[tokio::test]
+async fn test_a_student_side_past_its_memory_limit_is_ended() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import time\n\ndef hog():\n    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("hog", vec![]), function("hog", vec![])];
+	plan.memory_mb = 96;
+	let obs = run(&plan).await;
+	assert!(
+		matches!(obs.exit, Exit::Memory { limit_mb: 96, idle_mb, basis: None } if idle_mb > 0),
+		"{obs:?}"
+	);
+	assert!(obs.steps.is_empty());
+	assert_eq!(
+		obs.stopped.as_ref().map(|s| s.reason),
+		Some(StopReason::Exited)
+	);
+}
+
+#[tokio::test]
+async fn test_a_checker_sees_a_students_object_as_a_snapshot_and_its_graph_intact() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"class Node:\n    def __init__(self, value):\n        self.value = value\n        self.next = None\n    @property\n    def doubled(self):\n        return self.value * 2\n    @property\n    def _hidden(self):\n        raise RuntimeError('private properties are not read')\n\nclass Bad:\n    @property\n    def broken(self):\n        return 1 / 0\n\ndef ring():\n    a, b = Node(1), Node(2)\n    a.next, b.next = b, a\n    return a\n\ndef shared():\n    leaf = Node(3)\n    return [leaf, leaf, (1, 2), {1, 2}, 2 ** 70]\n\ndef bad():\n    return Bad()\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def ring(result, expected):\n    assert result.next.next is result, 'the cycle survives'\n    assert (result.value, result.doubled, result.next.doubled) == (1, 2, 4)\n    assert result.__scriptmark_class__ == 'Node'\n    return True\n\ndef shared(result, expected):\n    leaf, again, pair, both, big = result\n    assert leaf is again and leaf.value == 3\n    assert pair == (1, 2) and both == {1, 2} and big == 2 ** 70\n    return True\n\ndef anything(result, expected):\n    return True\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let checked = |name: &str, check: &str| {
+		let mut c = function(name, vec![]);
+		c.check = Some(InProcessCheck {
+			function: check.into(),
+			expected: None,
+		});
+		c
+	};
+	plan.steps = vec![
+		checked("ring", "ring"),
+		checked("shared", "shared"),
+		checked("bad", "anything"),
+	];
+	let obs = run(&plan).await;
+	let pass = CheckObservation::Verdict {
+		pass: true,
+		message: String::new(),
+	};
+	assert_eq!(obs.checks[&0], pass, "{obs:?}");
+	assert_eq!(obs.checks[&1], pass, "{obs:?}");
+	assert!(
+		matches!(&obs.steps[2].outcome, Outcome::Raised(e) if e.is_a("ZeroDivisionError")),
+		"a property that raises while the snapshot is taken is the call's: {:?}",
+		obs.steps[2].outcome
+	);
+	assert!(!obs.checks.contains_key(&2));
+}
+
+#[tokio::test]
+async fn test_teacher_values_cross_by_value_and_student_values_are_read_when_checked() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def spoil(items):\n    items.append('student')\n    return len(items)\n\nclass Account:\n    def __init__(self):\n        self.balance = 0\n    def deposit(self, n):\n        self.balance += n\n        return self.balance\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def make():\n    return ['teacher']\n\ndef untouched(result, expected, items):\n    return items == ['teacher'], f'the teacher still holds {items}'\n\ndef balance(result, expected, acct):\n    return acct.balance == 30, f'balance {acct.balance}'\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut make = call(
+		Target::Teacher {
+			name: "make".into(),
+		},
+		vec![],
+	);
+	make.id = Some("items".into());
+	let mut acct = function("Account", vec![]);
+	acct.id = Some("acct".into());
+	plan.setup = vec![make, acct];
+	let mut spoil = function("spoil", vec![json!("$items")]);
+	spoil.check = Some(InProcessCheck {
+		function: "untouched".into(),
+		expected: None,
+	});
+	let deposit = |n: i64| {
+		call(
+			Target::Method {
+				object: "acct".into(),
+				name: "deposit".into(),
+			},
+			vec![json!(n)],
+		)
+	};
+	let mut last = deposit(20);
+	last.check = Some(InProcessCheck {
+		function: "balance".into(),
+		expected: None,
+	});
+	plan.steps = vec![spoil, deposit(10), last];
+	let obs = run(&plan).await;
+	let pass = |message: &str| CheckObservation::Verdict {
+		pass: true,
+		message: message.into(),
+	};
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(2), "{obs:?}");
+	assert_eq!(obs.checks[&0], pass("the teacher still holds ['teacher']"));
+	assert_eq!(obs.checks[&2], pass("balance 30"));
+}
+
+const COMMON: &str = "class ListNode:\n    def __init__(self, value, next=None):\n        self.value = value\n        self.next = next\n\n    def length(self):\n        n, node, seen = 0, self, set()\n        while node is not None and id(node) not in seen:\n            seen.add(id(node))\n            n += 1\n            node = node.next\n        return n\n";
+
+/// A shared class crosses by value both ways, rebuilt from the receiving side's own copy:
+/// the teacher's checker gets the teacher's class, cycles and all, and what a student does
+/// to their copy stays on their side.
+#[tokio::test]
+async fn test_shared_classes_cross_by_value_into_each_sides_own_copy() {
+	let dir = tempfile::tempdir().unwrap();
+	let common = write(dir.path(), "common.py", COMMON);
+	let teacher = write(
+		dir.path(),
+		"teacher.py",
+		"from common import ListNode\n\ndef is_ring(result, expected):\n    assert type(result) is ListNode, type(result)\n    assert result.next.next is result, 'the cycle survives'\n    return result.length() == 2\n\ndef make():\n    return ListNode(1, ListNode(2))\n\ndef base(result, expected):\n    return type(result) is ListNode and result.length() == 1, f'{type(result)} {result.length()}'\n",
+	);
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"from common import ListNode\n\nclass Mine(ListNode):\n    def length(self):\n        return -1\n\ndef ring():\n    a, b = ListNode(1), ListNode(2)\n    a.next, b.next = b, a\n    return a\n\ndef sub():\n    return Mine(9)\n\ndef walk(head):\n    return [isinstance(head, ListNode), head.value, head.next.value, head.length()]\n\ndef tamper():\n    ListNode.length = lambda self: 42\n    return ListNode(5)\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.shared = vec![(common, "common.py".into())];
+	let checked = |name: &str, check: &str| {
+		let mut c = function(name, vec![]);
+		c.check = Some(InProcessCheck {
+			function: check.into(),
+			expected: None,
+		});
+		c
+	};
+	let mut made = call(
+		Target::Teacher {
+			name: "make".into(),
+		},
+		vec![],
+	);
+	made.id = Some("made".into());
+	plan.setup = vec![made];
+	plan.steps = vec![
+		checked("ring", "is_ring"),
+		checked("sub", "base"),
+		function("walk", vec![json!("$made")]),
+		checked("tamper", "base"),
+	];
+	let obs = run(&plan).await;
+	let pass = CheckObservation::Verdict {
+		pass: true,
+		message: String::new(),
+	};
+	assert_eq!(obs.checks[&0], pass, "{obs:?}");
+	assert!(
+		matches!(
+			&obs.checks[&1],
+			CheckObservation::Verdict { pass: true, .. }
+		),
+		"a student subclass arrives as the shared base: {:?}",
+		obs.checks[&1]
+	);
+	assert_eq!(
+		returned(&obs.steps[2].outcome),
+		&json!([true, 1, 2, 2]),
+		"the teacher's list arrives as the student's own class"
+	);
+	assert!(
+		matches!(
+			&obs.checks[&3],
+			CheckObservation::Verdict { pass: true, .. }
+		),
+		"the student's patch stays on the student's side: {:?}",
+		obs.checks[&3]
+	);
+}
+
+/// A shared module imports without an `allowed_imports` entry, and a student file that
+/// shares its name with a teacher module never stands in for it.
+#[tokio::test]
+async fn test_a_shared_module_is_allowed_and_namespaces_stay_apart() {
+	let dir = tempfile::tempdir().unwrap();
+	let common = write(dir.path(), "bundle/common.py", COMMON);
+	write(dir.path(), "bundle/helper.py", "WHO = 'teacher'\n");
+	let teacher = write(
+		dir.path(),
+		"bundle/teacher.py",
+		"import helper\n\ndef who(result, expected):\n    return helper.WHO == 'teacher', helper.WHO\n",
+	);
+	let student = write(
+		dir.path(),
+		"submission/helper.py",
+		"import common\nWHO = 'student'\n\ndef f():\n    return common.ListNode(1).length()\n",
+	);
+	let mut plan = unit(&student);
+	plan.bundle = dir.path().join("bundle");
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.shared = vec![(common, "common.py".into())];
+	let mut f = function("f", vec![]);
+	f.check = Some(InProcessCheck {
+		function: "who".into(),
+		expected: None,
+	});
+	plan.steps = vec![f];
+	let obs = run(&plan).await;
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(1), "{obs:?}");
+	assert_eq!(
+		obs.checks[&0],
+		CheckObservation::Verdict {
+			pass: true,
+			message: "teacher".into()
+		}
+	);
+}
+
+/// A checker may take the student's source, to judge it with `ast`.
+#[tokio::test]
+async fn test_a_checker_can_read_the_students_source() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def f(xs):\n    total = 0\n    for x in xs:\n        total += x\n    return total\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"import ast\n\ndef no_sum(result, expected, source):\n    calls = [n.func.id for n in ast.walk(ast.parse(source)) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)]\n    return 'sum' not in calls and result == expected, f'calls {calls}'\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut f = function("f", vec![json!([1, 2, 3])]);
+	f.check = Some(InProcessCheck {
+		function: "no_sum".into(),
+		expected: Some(json!(6)),
+	});
+	plan.steps = vec![f];
+	let obs = run(&plan).await;
+	assert_eq!(
+		obs.checks[&0],
+		CheckObservation::Verdict {
+			pass: true,
+			message: "calls []".into()
+		},
+		"{obs:?}"
+	);
+}
+
+/// Values the transfer encoding once could not rebuild — a cycle back through a tuple, an
+/// integer of millions of digits — still reach the checker.
+#[tokio::test]
+async fn test_a_tuple_cycle_and_a_huge_integer_reach_the_checker() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def looped():\n    inner = []\n    outer = (inner, 1)\n    inner.append(outer)\n    return outer\n\ndef huge():\n    return 2 ** 5_000_000\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def looped(result, expected):\n    inner, one = result\n    return one == 1 and inner == ['<cycle>'], repr(result)[:80]\n\ndef huge(result, expected):\n    return result == 2 ** 5_000_000\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	plan.steps = ["looped", "huge"]
+		.iter()
+		.map(|name| {
+			let mut c = function(name, vec![]);
+			c.check = Some(InProcessCheck {
+				function: name.to_string(),
+				expected: None,
+			});
+			c
+		})
+		.collect();
+	let obs = run(&plan).await;
+	assert!(obs.stopped.is_none(), "{:?}", obs.stopped);
+	for index in 0..2 {
+		assert!(
+			matches!(
+				&obs.checks[&index],
+				CheckObservation::Verdict { pass: true, .. }
+			),
+			"{:?}",
+			obs.checks[&index]
+		);
+	}
+}
+
+/// A forged answer padded past what a record may hold is the student's broken channel,
+/// not a record stream the grader cannot read.
+#[tokio::test]
+async fn test_a_padded_answer_is_the_students_not_the_harnesss() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"import importlib, json, struct\nos = importlib.import_module('os')\n\ndef pad():\n    body = json.dumps({'outcome': {'returned': {'value': 1, 'type': 'int'}}, 'stdout': 'x' * (8 * 1024 * 1024), 'stdout_truncated': False, 'elapsed_ms': 0}).encode()\n    for fd in range(3, 64):\n        try:\n            os.write(fd, struct.pack('>I', len(body)) + body)\n        except OSError:\n            pass\n    return 1\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def any(result, expected):\n    return True\n",
+	);
+	let mut plan = unit(&student);
+	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	let mut pad = function("pad", vec![]);
+	pad.check = Some(InProcessCheck {
+		function: "any".into(),
+		expected: None,
+	});
+	plan.steps = vec![pad];
+	let obs = run(&plan).await;
+	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
+	assert!(obs.done, "{obs:?}");
+	let stopped = obs.stopped.as_ref().expect("the student side is stopped");
+	assert!(
+		matches!(stopped.reason, StopReason::Garbled | StopReason::Flooded),
+		"{stopped:?}"
 	);
 }

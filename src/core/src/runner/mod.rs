@@ -5,6 +5,7 @@ pub mod generation;
 pub mod generator;
 pub mod judge;
 pub mod linter;
+pub mod memory;
 pub mod oracle;
 pub mod orchestrator;
 pub mod prepare;

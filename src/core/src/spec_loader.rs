@@ -6,6 +6,7 @@ use serde_json::Value;
 use crate::checker::rhai_checker;
 use crate::runner::generation::{MAX_COUNT, MAX_GENERATED, concrete_name, origins};
 use crate::runner::generator::Rule;
+use crate::runner::memory::Space;
 
 use crate::models::{
 	AssignmentConfig, Check, CourseConfig, Scenario, SetupStep, Target, TestCase, TestSpec,
@@ -115,11 +116,26 @@ fn resolve_paths(spec: &mut TestSpec) {
 	}
 }
 
-/// The name a function checker's `stdout` parameter always receives: the call's output.
-pub const RESERVED: &str = "stdout";
+/// The names a function checker's extra parameters always receive, and what they hold.
+pub const RESERVED: [(&str, &str); 2] = [
+	("stdout", "the call's output"),
+	("source", "the student's source text"),
+];
+
+/// What `name` always means to a function checker, if it is reserved.
+pub fn reserved(name: &str) -> Option<&'static str> {
+	RESERVED
+		.iter()
+		.find(|(reserved, _)| *reserved == name)
+		.map(|(_, meaning)| *meaning)
+}
 
 /// The longest timeout a spec or the command line may ask for.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
+
+/// The memory a spec may give a unit beyond what it takes idle, in MiB: from what a small
+/// exercise holds, above the noise of loading a module, to 64 GiB.
+pub const MEMORY_MB: std::ops::RangeInclusive<u64> = 16..=65_536;
 
 /// What the harness keeps of a call's stdout; an expectation longer than this can never match.
 pub const STDOUT_LIMIT: usize = 64 * 1024;
@@ -217,19 +233,97 @@ impl<'a> Validator<'a> {
 				self.problem("[meta]", format!("data file '{data}' does not exist"));
 			}
 		}
-		if self.spec.vars.contains_key(RESERVED) {
-			self.problem(
-				"[vars]",
-				format!(
-					"'{RESERVED}' is reserved: function checkers receive the call's output under it"
-				),
-			);
+		for name in self.spec.vars.keys() {
+			if let Some(meaning) = reserved(name) {
+				self.problem(
+					"[vars]",
+					format!("'{name}' is reserved: function checkers receive {meaning} under it"),
+				);
+			}
 		}
+		self.shared();
+		for name in &self.spec.meta.allowed_imports {
+			if !is_module_name(name) {
+				let message = format!(
+					"allowed import '{name}' must be a module name, such as 'numpy' or 'matplotlib.pyplot'"
+				);
+				self.problem("[meta]", message);
+			}
+		}
+		self.memory(
+			self.spec.meta.memory_mb,
+			self.spec.meta.space.as_deref(),
+			"[meta]",
+		);
 		for (name, value) in &self.spec.vars {
 			if contains_null(value) {
 				self.problem(
 					"[vars]",
 					format!("'{name}' contains a value TOML cannot hold (inf or nan?)"),
+				);
+			}
+		}
+	}
+
+	/// Shared modules: Python files in the bundle, each importable under a name of its own
+	/// on both sides, and neither data nor a teacher module besides.
+	fn shared(&mut self) {
+		let meta = &self.spec.meta;
+		let student = Path::new(&meta.file)
+			.file_name()
+			.map(|n| n.to_string_lossy().to_lowercase());
+		let mut names = BTreeSet::new();
+		for shared in &meta.shared {
+			let at = format!("shared module '{shared}'");
+			if !is_contained(shared) {
+				self.problem(
+					"[meta]",
+					format!("{at} must be a relative path without '..'"),
+				);
+				continue;
+			}
+			let path = Path::new(shared);
+			let module = path.file_stem().map(|s| s.to_string_lossy().into_owned());
+			if path.extension().is_none_or(|e| e != "py")
+				|| !module.as_deref().is_some_and(is_identifier)
+			{
+				self.problem(
+					"[meta]",
+					format!("{at} must be a .py file whose name can be imported"),
+				);
+			} else if !self.spec.dir.join(path).is_file() {
+				self.problem("[meta]", format!("{at} does not exist"));
+			}
+			let name = path.file_name().map(|n| n.to_string_lossy().to_lowercase());
+			if name.is_some() && name == student {
+				self.problem(
+					"[meta]",
+					format!("{at} has the student file's name: it would replace the submission"),
+				);
+			}
+			if let Some(module) = module
+				&& !names.insert(module.clone())
+			{
+				self.problem(
+					"[meta]",
+					format!("two shared modules are both imported as '{module}'"),
+				);
+			}
+			let resolved = self.spec.dir.join(path);
+			if meta.imports.iter().any(|i| Path::new(i) == resolved) {
+				self.problem(
+					"[meta]",
+					format!("{at} is also a teacher module: list it in shared only"),
+				);
+			}
+			if meta
+				.data_files
+				.iter()
+				.any(|d| path.starts_with(d) || Path::new(d).starts_with(path))
+			{
+				self.problem(
+					"[meta]",
+					format!("{at} is also a data file: list it in shared only"),
 				);
 			}
 		}
@@ -282,6 +376,33 @@ impl<'a> Validator<'a> {
 		}
 	}
 
+	fn memory(&mut self, memory: Option<u64>, space: Option<&str>, at: &str) {
+		if let Some(space) = space {
+			if memory.is_some() {
+				self.problem(
+					at,
+					"memory_mb and space both say what it may hold: keep one",
+				);
+			}
+			if Space::parse(space).is_none() {
+				self.problem(
+					at,
+					format!("space '{space}' must be O(1), O(log n), O(n), O(n log n) or O(n^2)"),
+				);
+			}
+		}
+		if memory.is_some_and(|m| !MEMORY_MB.contains(&m)) {
+			self.problem(
+				at,
+				format!(
+					"memory_mb must be between {} and {} MiB",
+					MEMORY_MB.start(),
+					MEMORY_MB.end()
+				),
+			);
+		}
+	}
+
 	fn unique_name(&mut self, names: &mut BTreeSet<String>, name: String) {
 		if !names.insert(name.clone()) {
 			self.problem(
@@ -300,6 +421,7 @@ impl<'a> Validator<'a> {
 			self.problem(&at, "has no steps");
 		}
 		self.timeout(scenario.timeout, &at);
+		self.memory(scenario.memory_mb, scenario.space.as_deref(), &at);
 		let mut bound = top.clone();
 		for step in &scenario.setup {
 			self.setup(step, &mut bound, &format!("{at} setup '{}'", step.id));
@@ -311,11 +433,8 @@ impl<'a> Validator<'a> {
 				if bound.all.contains(id) || self.spec.vars.contains_key(id) {
 					self.problem(&step_at, format!("id '{id}' is already bound"));
 				}
-				if id == RESERVED {
-					self.problem(
-						&step_at,
-						format!("id '{RESERVED}' is reserved for the call's output"),
-					);
+				if let Some(meaning) = reserved(id) {
+					self.problem(&step_at, format!("id '{id}' is reserved for {meaning}"));
 				}
 				if let Some(target) = step.target(self.spec.meta.function.as_deref()) {
 					bound.bind(id, &target);
@@ -332,11 +451,8 @@ impl<'a> Validator<'a> {
 		if bound.all.contains(&step.id) || self.spec.vars.contains_key(&step.id) {
 			self.problem(at, format!("id '{}' is already bound", step.id));
 		}
-		if step.id == RESERVED {
-			self.problem(
-				at,
-				format!("id '{RESERVED}' is reserved for the call's output"),
-			);
+		if let Some(meaning) = reserved(&step.id) {
+			self.problem(at, format!("id '{}' is reserved for {meaning}", step.id));
 		}
 		if step.args.iter().any(contains_null) {
 			self.problem(
@@ -405,6 +521,14 @@ impl<'a> Validator<'a> {
 			);
 		}
 		self.timeout(case.timeout, at);
+		if is_step && (case.memory_mb.is_some() || case.space.is_some()) {
+			self.problem(
+				at,
+				"memory_mb and space belong to the scenario: its steps share one process",
+			);
+		} else {
+			self.memory(case.memory_mb, case.space.as_deref(), at);
+		}
 		if case.args.iter().any(contains_null) {
 			self.problem(
 				at,
@@ -970,6 +1094,11 @@ fn is_contained(path: &str) -> bool {
 }
 
 /// A name a Rhai oracle can bind: letters, digits and `_`, not starting with a digit.
+/// A module Python can import by this name: `numpy`, `matplotlib.pyplot`.
+pub fn is_module_name(name: &str) -> bool {
+	name.split('.').all(is_identifier)
+}
+
 fn is_identifier(name: &str) -> bool {
 	let mut chars = name.chars();
 	chars
@@ -1809,6 +1938,153 @@ expect = 150
 		refused(
 			&format!("[[cases]]\nname = \"x\"\nexpected_stdout = \"{long}\"\n"),
 			"longer than the 64 KiB",
+		);
+	}
+
+	#[test]
+	fn test_shared_modules_are_importable_python_files_of_their_own() {
+		let dir = tempfile::tempdir().unwrap();
+		for file in [
+			"common.py",
+			"other/common.py",
+			"data/extra.py",
+			"lab.py",
+			"notes.txt",
+			"helpers/t.py",
+			"my-module.py",
+		] {
+			let path = dir.path().join(file);
+			std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+			std::fs::write(path, "X = 1\n").unwrap();
+		}
+		let problems = |shared: &str, extra: &str| -> Vec<String> {
+			let toml = format!(
+				"[meta]\nname = \"t\"\nfile = \"lab.py\"\nfunction = \"f\"\nlanguage = \"python\"\nshared = [{shared}]\n{extra}\n[[cases]]\nname = \"x\"\nexpect = 1\n"
+			);
+			match load_spec_str(&toml, dir.path()) {
+				Ok(_) => Vec::new(),
+				Err(SpecError::Invalid { problems, .. }) => problems,
+				Err(other) => vec![other.to_string()],
+			}
+		};
+		assert!(problems("\"common.py\"", "").is_empty());
+		for (shared, extra, needle) in [
+			("\"../x.py\"", "", "must be a relative path"),
+			(
+				"\"notes.txt\"",
+				"",
+				"must be a .py file whose name can be imported",
+			),
+			(
+				"\"my-module.py\"",
+				"",
+				"must be a .py file whose name can be imported",
+			),
+			("\"missing.py\"", "", "does not exist"),
+			("\"lab.py\"", "", "the student file's name"),
+			(
+				"\"common.py\", \"other/common.py\"",
+				"",
+				"both imported as 'common'",
+			),
+			(
+				"\"helpers/t.py\"",
+				"imports = [\"helpers/t.py\"]",
+				"also a teacher module",
+			),
+			(
+				"\"data/extra.py\"",
+				"data_files = [\"data\"]",
+				"also a data file",
+			),
+		] {
+			let found = problems(shared, extra);
+			assert!(
+				found.iter().any(|p| p.contains(needle)),
+				"{shared}: expected {needle:?}, got {found:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn test_memory_is_declared_per_process_within_bounds() {
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = 1\nmemory_mb = 8\n",
+			"memory_mb must be between 16 and 65536 MiB",
+		);
+		refused(
+			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\nmemory_mb = 512\n",
+			"memory_mb and space belong to the scenario",
+		);
+		assert!(
+			problems(
+				"[[scenarios]]\nname = \"s\"\nmemory_mb = 512\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\n"
+			)
+			.is_empty()
+		);
+		// Unset, it is not part of what a spec's digest covers: older records still match.
+		let spec = load_spec_str(
+			&format!("{META}[[cases]]\nname = \"x\"\nexpect = 1\n"),
+			Path::new("."),
+		)
+		.unwrap();
+		assert!(!serde_json::to_string(&spec).unwrap().contains("memory_mb"));
+	}
+
+	#[test]
+	fn test_space_is_big_o_and_not_beside_memory_mb() {
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = 1\nspace = \"O(n^3)\"\n",
+			"space 'O(n^3)' must be O(1), O(log n), O(n), O(n log n) or O(n^2)",
+		);
+		refused(
+			"[[cases]]\nname = \"x\"\nexpect = 1\nspace = \"O(n)\"\nmemory_mb = 64\n",
+			"memory_mb and space both say what it may hold",
+		);
+		refused(
+			"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\nspace = \"O(n)\"\n",
+			"memory_mb and space belong to the scenario",
+		);
+		assert!(
+			problems(
+				"space = \"O(n log n)\"\n[[scenarios]]\nname = \"s\"\nspace = \"O(1)\"\n[[scenarios.steps]]\nname = \"a\"\nexpect = 1\n[[cases]]\nname = \"x\"\nexpect = 1\nmemory_mb = 32\n"
+			)
+			.is_empty()
+		);
+	}
+
+	#[test]
+	fn test_an_allowed_import_is_a_module_name() {
+		for bad in [
+			"os; import shutil",
+			"numpy.",
+			".numpy",
+			"matplotlib..pyplot",
+			"1abc",
+			"",
+		] {
+			refused(
+				&format!("allowed_imports = [{bad:?}]\n[[cases]]\nname = \"x\"\nexpect = 1\n"),
+				"must be a module name",
+			);
+		}
+		assert!(
+			problems(
+				"allowed_imports = [\"numpy\", \"matplotlib.pyplot\", \"_private\"]\n[[cases]]\nname = \"x\"\nexpect = 1\n"
+			)
+			.is_empty()
+		);
+	}
+
+	#[test]
+	fn test_source_is_reserved_like_stdout() {
+		refused(
+			"[vars]\nsource = 1\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"'source' is reserved: function checkers receive the student's source text",
+		);
+		refused(
+			"[[setup]]\nid = \"source\"\nfunction = \"a\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"id 'source' is reserved",
 		);
 	}
 

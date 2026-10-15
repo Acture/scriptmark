@@ -1,8 +1,9 @@
 //! Turning what a unit did into results.
 //!
-//! The harness only observes. Here every non-pass gets its owner, derived from three
-//! things: which call the plan says was running, what kind of code that call runs, and
-//! how the process ended. Nothing a student can print decides it.
+//! The harness only observes. Here every non-pass gets its owner, derived from four
+//! things: which call the plan says was running, what kind of code that call runs, whether
+//! the teacher side gave up on the student side there, and how each side ended. Nothing a
+//! student can print decides it.
 
 use serde_json::{Value, json};
 
@@ -14,8 +15,10 @@ use crate::models::{
 	CaseInput, CaseResult, Cause, Check, FailureDetail, Fault, Target, TestCase, TestStatus,
 };
 use crate::runner::executor::{
-	CallObservation, CheckObservation, Exit, Outcome, ProtocolError, UnitObservation, UnitPlan,
+	CallObservation, CheckObservation, Exit, Outcome, Phase, ProtocolError, StopReason, Stopped,
+	UnitObservation, UnitPlan,
 };
+use crate::runner::sandbox::Isolation;
 
 /// A scored call: the name its result is reported under, and what it expects.
 #[derive(Debug, Clone, Copy)]
@@ -34,12 +37,26 @@ struct Blanket {
 }
 
 /// Judge one unit. `scored[i]` is `plan.steps[i]` — or, in script mode, the script run.
+/// How the teacher's Python checker scripts run.
+#[derive(Debug, Clone, Copy)]
+struct Scripts<'a> {
+	python: &'a str,
+	isolation: Isolation,
+	bundle: &'a std::path::Path,
+}
+
 pub fn judge(
 	plan: &UnitPlan,
 	scored: &[Scored],
 	obs: &UnitObservation,
 	python_cmd: &str,
+	isolation: Isolation,
 ) -> Vec<CaseResult> {
+	let scripts = Scripts {
+		python: python_cmd,
+		isolation,
+		bundle: &plan.bundle,
+	};
 	let target = |index: usize| plan.steps.get(index).map(|c| target_name(&c.target));
 	if let Some(blanket) = unit_failure(plan, obs) {
 		return scored
@@ -50,6 +67,8 @@ pub fn judge(
 	}
 	// The harness broke after student code ran: what it recorded before that still stands.
 	let broken = stream_break(obs);
+	// The teacher side gave up on the student side at a step: nothing after it ran.
+	let stop = obs.stopped.as_ref().filter(|s| s.phase == Phase::Step);
 
 	let mut results = Vec::with_capacity(scored.len());
 	// Once a call hangs or the process dies, nothing after it ran — on whoever's account.
@@ -63,13 +82,30 @@ pub fn judge(
 		match obs.steps.get(index) {
 			Some(record) => {
 				let check = obs.checks.get(&index);
+				if let (Some(stop), Some(CheckObservation::Error(e))) = (stop, check)
+					&& stop.index == index
+					&& e.type_name == "StudentEnded"
+				{
+					// The student side went while the checker read its values: how it
+					// went decides, not the checker.
+					let blanket =
+						student_stop(obs, stop, "the reading of its values for the checker");
+					results.push(blanket_result(s, &blanket, target(index)));
+					stopped = Some(not_run(&blanket, s.name));
+					continue;
+				}
 				if check.is_none()
 					&& call.is_some_and(|c| c.check.is_some())
 					&& matches!(record.outcome, Outcome::Returned { .. })
 				{
 					// The student's call finished; the teacher's checker never did.
 					let blanket = broken.clone().unwrap_or_else(|| {
-						in_flight(&obs.exit, Fault::Teacher, Cause::Checker, "its checker")
+						in_flight(
+							&obs.teacher_exit,
+							Fault::Teacher,
+							Cause::Checker,
+							"its checker",
+						)
 					});
 					results.push(blanket_result(s, &blanket, target(index)));
 					stopped = Some(broken.clone().unwrap_or_else(|| not_run(&blanket, s.name)));
@@ -85,23 +121,35 @@ pub fn judge(
 					record,
 					check,
 					plan.script.is_some(),
-					python_cmd,
+					scripts,
 				));
 			}
 			None => {
-				let blanket = match &broken {
-					Some(broken) => broken.clone(),
-					None if obs.done => Blanket {
+				let blanket = match (&broken, stop) {
+					(Some(broken), _) => broken.clone(),
+					(None, Some(stop)) if stop.index < index => {
+						// It stopped at a call that reported: its record says how.
+						let at = scored.get(stop.index).map_or("?", |s| s.name);
+						not_run(&student_stop(obs, stop, "this call"), at)
+					}
+					(None, Some(stop)) => student_stop(obs, stop, "this call"),
+					(None, None) if obs.done => Blanket {
 						status: TestStatus::Error,
 						fault: Fault::Environment,
 						cause: Cause::Harness,
 						message: "the harness finished without running this call".into(),
 					},
-					None => in_flight(&obs.exit, Fault::Student, Cause::Killed, "this call"),
+					(None, None) => unfinished(
+						obs,
+						call.map_or(Fault::Student, |c| owner_of(&c.target)),
+						Cause::Killed,
+						"this call",
+					),
 				};
 				results.push(blanket_result(s, &blanket, target(index)));
 				stopped = Some(match &broken {
 					Some(broken) => broken.clone(),
+					None if blanket.cause == Cause::NotRun => blanket.clone(),
 					None => not_run(&blanket, s.name),
 				});
 			}
@@ -120,26 +168,44 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 			message,
 		})
 	};
-	if let Exit::Spawn(message) = &obs.exit {
+	for exit in [&obs.teacher_exit, &obs.exit] {
+		if let Exit::Spawn(message) = exit {
+			return blanket(
+				TestStatus::Error,
+				Fault::Environment,
+				Cause::Spawn,
+				message.clone(),
+			);
+		}
+	}
+	if let Some(ProtocolError::Tampered(problem)) = &obs.protocol_error {
+		let (fault, cause) = teacher_side_broken(obs);
+		return blanket(
+			TestStatus::Error,
+			fault,
+			cause,
+			format!("the unit's records cannot be trusted: {problem}"),
+		);
+	}
+	if let Some(fatal) = obs.fatal.as_ref().filter(|f| f.stage == "sandbox") {
 		return blanket(
 			TestStatus::Error,
 			Fault::Environment,
 			Cause::Spawn,
-			message.clone(),
+			format!("refused to grade: {}", fatal.error.message),
 		);
 	}
-	if let Some(ProtocolError::Tampered(problem)) = &obs.protocol_error {
-		// After `ready`, student code has had the chance to write; before it, nobody's has.
-		let fault = if obs.ready {
-			Fault::Student
-		} else {
-			Fault::Environment
-		};
+	if let Some(fatal) = obs.fatal.as_ref().filter(|f| f.stage == "student") {
 		return blanket(
 			TestStatus::Error,
-			fault,
-			Cause::Protocol,
-			format!("the unit's records cannot be trusted: {problem}"),
+			Fault::Environment,
+			Cause::Harness,
+			format!(
+				"{}: {} ({})",
+				fatal.error.type_name,
+				fatal.error.message,
+				stderr_hint(obs)
+			),
 		);
 	}
 	if let Some(fatal) = obs.fatal.as_ref().filter(|f| f.stage == "teacher_import") {
@@ -172,7 +238,12 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 			TestStatus::Error,
 			fault,
 			cause,
-			format!("{} {} ({})", death(&obs.exit).1, what, stderr_hint(obs)),
+			format!(
+				"{} {} ({})",
+				death(&obs.teacher_exit).1,
+				what,
+				stderr_hint(obs)
+			),
 		);
 	}
 	if plan.script.is_some() {
@@ -191,12 +262,11 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 	match &obs.load {
 		None if stream_break(obs).is_some() => return stream_break(obs),
 		None => {
-			return Some(in_flight(
-				&obs.exit,
-				Fault::Student,
-				Cause::Killed,
-				"the student module while it loaded",
-			));
+			let what = "the student module while it loaded";
+			return Some(match &obs.stopped {
+				Some(stop) => student_stop(obs, stop, what),
+				None => unfinished(obs, Fault::Student, Cause::Killed, what),
+			});
 		}
 		Some(load) => match &load.outcome {
 			Outcome::Returned { .. } => {}
@@ -252,6 +322,17 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 						message.clone(),
 					);
 				}
+				// Every name is resolved before the call: a setup call that produced one
+				// failing stops the loop first, so what is unresolved here is a student's
+				// value that could not be read — whoever's call needed it.
+				outcome @ Outcome::Unresolved { .. } => {
+					return blanket(
+						TestStatus::Error,
+						Fault::Student,
+						Cause::Dependency,
+						format!("not run: {label} {}", describe(outcome, call.timeout)),
+					);
+				}
 				outcome => {
 					return blanket(
 						TestStatus::Error,
@@ -265,7 +346,21 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 				if let Some(broken) = stream_break(obs) {
 					return Some(broken);
 				}
-				let killed = in_flight(&obs.exit, owner, Cause::Setup, &label);
+				let killed = match &obs.stopped {
+					// How the student side stopped says more than "setup": a timeout stays
+					// a timeout, a memory kill a memory kill.
+					Some(stop) => {
+						let stopped = student_stop(obs, stop, &label);
+						return Some(Blanket {
+							message: format!("not run: {}", stopped.message),
+							..stopped
+						});
+					}
+					None => unfinished(obs, owner, Cause::Setup, &label),
+				};
+				if killed.fault != owner {
+					return Some(killed);
+				}
 				return blanket(
 					TestStatus::Error,
 					owner,
@@ -278,7 +373,7 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 	None
 }
 
-/// The verdict for the call in flight when the process stopped.
+/// The verdict for the call in flight when a process stopped.
 fn in_flight(exit: &Exit, fault: Fault, cause: Cause, what: &str) -> Blanket {
 	let (status, how) = death(exit);
 	Blanket {
@@ -289,8 +384,67 @@ fn in_flight(exit: &Exit, fault: Fault, cause: Cause, what: &str) -> Blanket {
 			TestStatus::Error
 		},
 		fault,
-		cause,
+		cause: if matches!(exit, Exit::Memory { .. }) {
+			Cause::Memory
+		} else {
+			cause
+		},
 		message: format!("{how} {what}"),
+	}
+}
+
+/// The verdict for the call during which the teacher side gave up on the student side.
+fn student_stop(obs: &UnitObservation, stop: &Stopped, what: &str) -> Blanket {
+	match stop.reason {
+		StopReason::Exited => in_flight(&obs.exit, Fault::Student, Cause::Killed, what),
+		StopReason::Deadline => Blanket {
+			status: TestStatus::Timeout,
+			fault: Fault::Student,
+			cause: Cause::Killed,
+			message: format!("the student side stopped answering during {what}"),
+		},
+		StopReason::Flooded | StopReason::Garbled => Blanket {
+			status: TestStatus::Error,
+			fault: Fault::Student,
+			cause: Cause::Protocol,
+			message: format!(
+				"the student side's answer could not be read during {what}: {}",
+				stop.message
+			),
+		},
+	}
+}
+
+/// The verdict for a call whose record never came, when the teacher side did not say it
+/// gave up on the student side: the teacher side itself ended. Teacher code in flight is
+/// the teacher's; a student call in flight was waiting on the teacher side, which student
+/// code cannot reach.
+fn unfinished(obs: &UnitObservation, owner: Fault, cause: Cause, what: &str) -> Blanket {
+	if owner == Fault::Teacher {
+		return in_flight(&obs.teacher_exit, Fault::Teacher, cause, what);
+	}
+	let (fault, cause) = teacher_side_broken(obs);
+	let (_, how) = death(&obs.teacher_exit);
+	Blanket {
+		status: TestStatus::Error,
+		fault,
+		cause,
+		message: format!(
+			"the teacher side ended: {how} {what} ({})",
+			stderr_hint(obs)
+		),
+	}
+}
+
+/// Whose doing it is when the teacher side breaks — ends, or writes records it could not
+/// have meant. In its sandbox, student code cannot reach it: the harness's. Unsandboxed,
+/// once student code has run, it can — signal it, or write into its records — and it is
+/// the student's, as it was when both shared one process.
+fn teacher_side_broken(obs: &UnitObservation) -> (Fault, Cause) {
+	if obs.sandboxed || !obs.ready {
+		(Fault::Environment, Cause::Harness)
+	} else {
+		(Fault::Student, Cause::Protocol)
 	}
 }
 
@@ -310,6 +464,27 @@ fn death(exit: &Exit) -> (TestStatus, String) {
 		Exit::Deadline => (
 			TestStatus::Timeout,
 			"the unit's deadline passed during".into(),
+		),
+		Exit::Memory {
+			limit_mb,
+			idle_mb,
+			basis,
+		} => {
+			let how = match basis {
+				Some(basis) => format!("estimated from {basis}"),
+				None => "`memory_mb`".into(),
+			};
+			(
+				TestStatus::Error,
+				format!(
+					"the {limit_mb} MiB memory limit ({how}, on top of the {idle_mb} MiB Python \
+					 and the submission's imports take) was exceeded during"
+				),
+			)
+		}
+		Exit::Stopped => (
+			TestStatus::Error,
+			"the process was ended with its unit during".into(),
 		),
 		#[cfg(unix)]
 		Exit::Signal(signal) if *signal == libc::SIGXCPU => (
@@ -334,7 +509,7 @@ fn death(exit: &Exit) -> (TestStatus, String) {
 fn stderr_hint(obs: &UnitObservation) -> String {
 	let tail = obs.stderr.trim();
 	if tail.is_empty() {
-		format!("{:?}", obs.exit)
+		format!("{:?}", obs.teacher_exit)
 	} else {
 		tail.lines().last().unwrap_or(tail).to_string()
 	}
@@ -362,17 +537,18 @@ fn describe(outcome: &Outcome, timeout: u64) -> String {
 	}
 }
 
-/// The record stream stopped meaning anything part-way: the harness crashed, wrote a
-/// record it could not have meant, or somebody flooded the channel. What was recorded
-/// before that stands; nothing after it can be known.
+/// The record stream stopped meaning anything part-way: the harness crashed, or the
+/// teacher side wrote a record it could not have meant. What was recorded before that
+/// stands; nothing after it can be known.
 fn stream_break(obs: &UnitObservation) -> Option<Blanket> {
+	let broken = teacher_side_broken(obs);
 	let (fault, cause, message) = match (&obs.fatal, &obs.protocol_error) {
 		(_, Some(ProtocolError::Flooded(problem))) => (
-			Fault::Student,
-			Cause::Protocol,
-			format!("the unit's output could not be read past this point: {problem}"),
+			broken.0,
+			broken.1,
+			format!("the unit's records could not be read past this point: {problem}"),
 		),
-		(Some(fatal), _) if fatal.stage != "teacher_import" => (
+		(Some(fatal), _) if fatal.stage == "harness" => (
 			Fault::Environment,
 			Cause::Harness,
 			format!(
@@ -381,8 +557,8 @@ fn stream_break(obs: &UnitObservation) -> Option<Blanket> {
 			),
 		),
 		(_, Some(ProtocolError::Unreadable(problem))) => (
-			Fault::Environment,
-			Cause::Harness,
+			broken.0,
+			broken.1,
 			format!("the harness wrote a record it could not have meant: {problem}"),
 		),
 		_ => return None,
@@ -472,7 +648,7 @@ fn judge_call(
 	record: &CallObservation,
 	check: Option<&CheckObservation>,
 	script: bool,
-	python_cmd: &str,
+	scripts: Scripts,
 ) -> CaseResult {
 	let case = s.case;
 	let mut verdict = Verdict {
@@ -554,7 +730,7 @@ fn judge_call(
 							case.expected_stdout.clone().map(Value::String),
 							record,
 							check,
-							python_cmd,
+							scripts,
 						) {
 						return failed;
 					}
@@ -597,15 +773,9 @@ fn judge_call(
 			} else {
 				(value.clone(), case.expect.clone())
 			};
-			if let Some(failed) = check_value(
-				&mut verdict,
-				case,
-				&value,
-				expected,
-				record,
-				check,
-				python_cmd,
-			) {
+			if let Some(failed) =
+				check_value(&mut verdict, case, &value, expected, record, check, scripts)
+			{
 				return failed;
 			}
 		}
@@ -662,7 +832,7 @@ fn check_value(
 	expected: Option<Value>,
 	record: &CallObservation,
 	check: Option<&CheckObservation>,
-	python_cmd: &str,
+	scripts: Scripts,
 ) -> Option<CaseResult> {
 	let take = |verdict: &mut Verdict| {
 		std::mem::replace(
@@ -735,7 +905,17 @@ fn check_value(
 				}
 				Check::Rhai(expr) => Box::new(RhaiChecker::new(expr)),
 				Check::Python(script) => {
-					Box::new(PythonChecker::new(script).with_python_cmd(python_cmd))
+					let checker = PythonChecker::new(script).with_python_cmd(scripts.python);
+					Box::new(if scripts.isolation.is_sandboxed() {
+						let beside = std::path::Path::new(script).parent().map(Into::into);
+						checker.confined(
+							std::iter::once(scripts.bundle.to_path_buf())
+								.chain(beside)
+								.collect(),
+						)
+					} else {
+						checker
+					})
 				}
 				Check::Function(_) => unreachable!("handled above"),
 			};
@@ -795,6 +975,10 @@ mod tests {
 			imports: Vec::new(),
 			vars: Arc::new(BTreeMap::new()),
 			data_files: Vec::new(),
+			bundle: std::path::PathBuf::new(),
+			shared: Vec::new(),
+			memory_mb: 64,
+			memory_basis: None,
 			allowed_imports: Vec::new(),
 			load_timeout: 10,
 			setup: Vec::new(),
@@ -854,6 +1038,7 @@ mod tests {
 			steps,
 			done: true,
 			exit: Exit::Code(0),
+			sandboxed: true,
 			..UnitObservation::not_started(Exit::Code(0))
 		}
 	}
@@ -863,7 +1048,14 @@ mod tests {
 	}
 
 	fn one(case: &TestCase, plan: &UnitPlan, obs: &UnitObservation) -> CaseResult {
-		judge(plan, &[Scored { name: "c", case }], obs, "python3").remove(0)
+		judge(
+			plan,
+			&[Scored { name: "c", case }],
+			obs,
+			"python3",
+			Isolation::Sandboxed,
+		)
+		.remove(0)
 	}
 
 	fn verdict(r: &CaseResult) -> (TestStatus, Option<Fault>, Option<Cause>) {
@@ -1099,10 +1291,16 @@ mod tests {
 				case: &c,
 			},
 		];
+		// The teacher side saw the student side go during 'b', and said so.
 		let mut obs = finished(vec![record(0, returned(json!(1)))]);
-		obs.done = false;
+		obs.stopped = Some(Stopped {
+			phase: Phase::Step,
+			index: 1,
+			reason: StopReason::Exited,
+			message: "the student side ended".into(),
+		});
 		obs.exit = Exit::Signal(libc::SIGXCPU);
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(r[0].status, TestStatus::Passed);
 		assert_eq!(
 			verdict(&r[1]),
@@ -1118,10 +1316,197 @@ mod tests {
 		);
 
 		obs.exit = Exit::Signal(libc::SIGSEGV);
-		let r = judge(&p, &scored, &obs, "python3");
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(
 			verdict(&r[1]),
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::Killed))
+		);
+
+		obs.exit = Exit::Memory {
+			limit_mb: 64,
+			idle_mb: 24,
+			basis: None,
+		};
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[1]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory))
+		);
+		assert_eq!(
+			verdict(&r[2]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
+		);
+
+		// A step that answered too much, or nonsense, is the student's.
+		obs.stopped.as_mut().unwrap().reason = StopReason::Flooded;
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[1]),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Protocol)
+			)
+		);
+
+		// Given up on at its deadline: the teacher side reported the call as timed out, and
+		// the rest as never run.
+		let mut late = finished(vec![
+			record(0, returned(json!(1))),
+			record(1, Outcome::Timeout {}),
+		]);
+		late.stopped = Some(Stopped {
+			phase: Phase::Step,
+			index: 1,
+			reason: StopReason::Deadline,
+			message: String::new(),
+		});
+		late.exit = Exit::Stopped;
+		let r = judge(&p, &scored, &late, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[1]),
+			(
+				TestStatus::Timeout,
+				Some(Fault::Student),
+				Some(Cause::Timeout)
+			)
+		);
+		assert_eq!(
+			verdict(&r[2]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
+		);
+		assert!(
+			r[2].failure.as_ref().unwrap().message.contains("'b'"),
+			"{:?}",
+			r[2].failure
+		);
+
+		// Without a word from the teacher side, the teacher side itself went: in its sandbox
+		// the student cannot reach it...
+		let mut lost = finished(vec![record(0, returned(json!(1)))]);
+		lost.done = false;
+		lost.teacher_exit = Exit::Signal(libc::SIGKILL);
+		let r = judge(&p, &scored, &lost, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[1]),
+			(
+				TestStatus::Error,
+				Some(Fault::Environment),
+				Some(Cause::Harness)
+			)
+		);
+		// ...but unsandboxed, student code could have signalled it.
+		lost.sandboxed = false;
+		let r = judge(&p, &scored, &lost, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[1]),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Protocol)
+			)
+		);
+		assert_eq!(
+			verdict(&r[2]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
+		);
+	}
+
+	/// A student value that cannot be read for a teacher setup call is the student's; a
+	/// student side that stops during setup keeps how it stopped; and one that goes while a
+	/// checker reads its values is judged by how it went, not as a failed checker.
+	#[test]
+	fn test_what_the_student_side_does_outside_a_scored_call_is_still_the_students() {
+		let c = case("expect = 1");
+		let mut p = plan(1);
+		let mut student_setup = call(Target::Function {
+			name: "make".into(),
+		});
+		student_setup.id = Some("obj".into());
+		let mut teacher_setup = call(Target::Teacher {
+			name: "wrap".into(),
+		});
+		teacher_setup.id = Some("wrapped".into());
+		p.setup = vec![student_setup, teacher_setup];
+
+		let mut unreadable = finished(vec![]);
+		unreadable.setup = vec![
+			record(0, returned(Value::Null)),
+			record(1, Outcome::Unresolved { name: "obj".into() }),
+		];
+		assert_eq!(
+			verdict(&one(&c, &p, &unreadable)),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Dependency)
+			)
+		);
+
+		let mut hog = finished(vec![]);
+		hog.setup = Vec::new();
+		hog.stopped = Some(Stopped {
+			phase: Phase::Setup,
+			index: 0,
+			reason: StopReason::Exited,
+			message: String::new(),
+		});
+		hog.exit = Exit::Memory {
+			limit_mb: 64,
+			idle_mb: 24,
+			basis: None,
+		};
+		let r = one(&c, &p, &hog);
+		assert_eq!(
+			verdict(&r),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory))
+		);
+		assert!(r.failure.unwrap().message.starts_with("not run:"));
+
+		let mut p = plan(2);
+		p.steps[0].check = Some(InProcessCheck {
+			function: "chk".into(),
+			expected: None,
+		});
+		let c = case("expect = 1\ncheck = { function = \"chk\" }");
+		let scored = [
+			Scored {
+				name: "a",
+				case: &c,
+			},
+			Scored {
+				name: "b",
+				case: &c,
+			},
+		];
+		let mut gone = finished(vec![record(0, returned(json!(1)))]);
+		gone.checks.insert(
+			0,
+			CheckObservation::Error(ErrorInfo {
+				type_name: "StudentEnded".into(),
+				types: vec!["StudentEnded".into()],
+				message: "the student side ended".into(),
+			}),
+		);
+		gone.stopped = Some(Stopped {
+			phase: Phase::Step,
+			index: 0,
+			reason: StopReason::Exited,
+			message: String::new(),
+		});
+		gone.exit = Exit::Memory {
+			limit_mb: 64,
+			idle_mb: 24,
+			basis: None,
+		};
+		let r = judge(&p, &scored, &gone, "python3", Isolation::Sandboxed);
+		assert_eq!(
+			verdict(&r[0]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory))
+		);
+		assert_eq!(
+			verdict(&r[1]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
 		);
 	}
 
@@ -1175,8 +1560,19 @@ mod tests {
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::Load))
 		);
 
+		// Only the teacher side writes records: sandboxed, student code cannot have broken
+		// them; unsandboxed, it could have written into them.
 		let mut tampered = finished(vec![record(0, returned(json!(1)))]);
 		tampered.protocol_error = Some(ProtocolError::Tampered("step record 0 repeated".into()));
+		assert_eq!(
+			verdict(&one(&c, &p, &tampered)),
+			(
+				TestStatus::Error,
+				Some(Fault::Environment),
+				Some(Cause::Harness)
+			)
+		);
+		tampered.sandboxed = false;
 		assert_eq!(
 			verdict(&one(&c, &p, &tampered)),
 			(
@@ -1184,6 +1580,40 @@ mod tests {
 				Some(Fault::Student),
 				Some(Cause::Protocol)
 			)
+		);
+
+		// A sandbox that did not hold grades nobody.
+		let mut leaky = UnitObservation::not_started(Exit::Code(0));
+		leaky.fatal = Some(Fatal {
+			stage: "sandbox".into(),
+			error: ErrorInfo {
+				type_name: "Sandbox".into(),
+				types: vec![],
+				message: "the student sandbox did not hold".into(),
+			},
+		});
+		assert_eq!(
+			verdict(&one(&c, &p, &leaky)),
+			(
+				TestStatus::Error,
+				Some(Fault::Environment),
+				Some(Cause::Spawn)
+			)
+		);
+
+		// A student module that never finished loading because its side went away.
+		let mut gone = finished(vec![]);
+		gone.load = None;
+		gone.stopped = Some(Stopped {
+			phase: Phase::Load,
+			index: 0,
+			reason: StopReason::Exited,
+			message: String::new(),
+		});
+		gone.exit = Exit::Signal(libc::SIGKILL);
+		assert_eq!(
+			verdict(&one(&c, &p, &gone)),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::Killed))
 		);
 	}
 
@@ -1276,7 +1706,7 @@ mod tests {
 			let mut obs = finished(vec![record(0, returned(json!(1)))]);
 			obs.done = false;
 			broke(&mut obs);
-			let r = judge(&p, &scored, &obs, "python3");
+			let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 			assert_eq!(r[0].status, TestStatus::Passed, "an earlier pass stands");
 			assert_eq!(
 				verdict(&r[1]),
@@ -1435,15 +1865,15 @@ mod tests {
 		];
 		let mut obs = finished(vec![record(0, returned(json!(1)))]);
 		obs.done = false;
-		obs.protocol_error = Some(ProtocolError::Flooded("64 MiB".into()));
-		let r = judge(&p, &scored, &obs, "python3");
+		obs.protocol_error = Some(ProtocolError::Flooded("a record of 64 MiB".into()));
+		let r = judge(&p, &scored, &obs, "python3", Isolation::Sandboxed);
 		assert_eq!(r[0].status, TestStatus::Passed);
 		assert_eq!(
 			verdict(&r[1]),
 			(
 				TestStatus::Error,
-				Some(Fault::Student),
-				Some(Cause::Protocol)
+				Some(Fault::Environment),
+				Some(Cause::Harness)
 			)
 		);
 	}

@@ -11,6 +11,7 @@ use scriptmark_core::runner::frozen::Generation;
 use scriptmark_core::runner::orchestrator::{RunOptions, run_all};
 use scriptmark_core::runner::prepare::prepare;
 use scriptmark_core::runner::python::PythonExecutor;
+use scriptmark_core::runner::sandbox::Isolation;
 use scriptmark_core::spec_loader::load_spec_str;
 
 /// A scratch directory holding specs, teacher files and one directory per student.
@@ -651,8 +652,10 @@ expect = 2
 #[tokio::test]
 async fn test_setup_runs_once_per_unit_and_once_per_scenario() {
 	let bench = Bench::new();
-	let unit_log = bench.path().join("unit.log");
-	let scenario_log = bench.path().join("scenario.log");
+	// Outside the bundle: a path into it is refused before it reaches student code.
+	let logs = tempfile::tempdir().unwrap();
+	let unit_log = logs.path().join("unit.log");
+	let scenario_log = logs.path().join("scenario.log");
 	let spec = bench.spec(&format!(
 		r#"
 [meta]
@@ -701,7 +704,10 @@ expect = "recorded"
 		"lab.py",
 		"def record(path):\n    with open(path, 'a') as fh:\n        fh.write('ran\\n')\n    return 'recorded'\n\ndef echo(x):\n    return x\n",
 	);
-	let results = grade(vec![spec], &[student]).await;
+	// The student counts its setup calls in logs shared by every unit, outside them all:
+	// only an unsandboxed unit can write there.
+	let unconfined = PythonExecutor::new().with_isolation(Isolation::Unisolated);
+	let results = grade_with(vec![spec], &[student], unconfined, 5).await;
 	assert_eq!(results[0].total_passed(), 4, "{:#?}", results[0]);
 
 	let lines = |p: &Path| std::fs::read_to_string(p).unwrap().lines().count();
@@ -1340,8 +1346,10 @@ expect = 2
 	}
 }
 
+/// A step that defeats its own timer is given up on: it timed out, and the steps after it
+/// never ran, on the student's account.
 #[tokio::test]
-async fn test_a_scenario_killed_at_its_deadline_blames_the_call_that_hung() {
+async fn test_a_scenario_given_up_on_at_its_deadline_blames_the_call_that_hung() {
 	let bench = Bench::new();
 	let spec = bench.spec(
 		r#"
@@ -1369,7 +1377,9 @@ expect = 1
 	let student = bench.student(
 		"alice",
 		"lab.py",
-		"def ok():\n    return 1\n\ndef forever():\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n",
+		// A loop that never returns to the interpreter, so the timer never fires in it. One
+		// that catches the timer's exception escapes when the timer lands in its handler.
+		"import itertools\n\ndef ok():\n    return 1\n\ndef forever():\n    return sum(itertools.count())\n",
 	);
 	let results = grade_with(vec![spec], &[student], PythonExecutor::new(), 1).await;
 	let r = &results[0];
@@ -1379,7 +1389,7 @@ expect = 1
 		(
 			TestStatus::Timeout,
 			Some(Fault::Student),
-			Some(Cause::Killed)
+			Some(Cause::Timeout)
 		)
 	);
 	assert_eq!(
@@ -1399,5 +1409,112 @@ impl TapImports for TestSpec {
 			.imports
 			.push(bench.path().join(path).to_string_lossy().into_owned());
 		self
+	}
+}
+
+/// OSS-10: student code cannot read the bundle, so a path into it handed to student code
+/// is refused before anyone is graded — whether a [vars] entry, an argument, or a teacher
+/// module's constant — and `data_files` is the way to give the student a file.
+#[tokio::test]
+async fn test_a_path_into_the_bundle_is_never_handed_to_student_code() {
+	let bench = Bench::new();
+	let data = bench.write("data/numbers.txt", "1 2 3\n");
+	bench.write(
+		"helpers/paths.py",
+		"from pathlib import Path\nDATA = Path(__file__).parent.parent / 'data' / 'numbers.txt'\nNAME = 'numbers.txt'\n",
+	);
+	let spec = |body: &str| {
+		bench.spec(&format!(
+			"[meta]\nname = \"t\"\nfile = \"lab.py\"\nfunction = \"f\"\nlanguage = \"python\"\nimports = [\"helpers/paths.py\"]\ndata_files = [\"data\"]\n{body}"
+		))
+	};
+	let path = data.to_string_lossy().into_owned();
+	// A file the student would write, which does not exist yet, through the same links
+	// (`/var` is `/private/var` on macOS).
+	let unborn = bench.path().join("out.log").to_string_lossy().into_owned();
+	for (body, wanted) in [
+		(
+			format!("[vars]\nOUT = {unborn:?}\n[[cases]]\nname = \"x\"\nexpect = 1\n"),
+			"[vars] 'OUT'",
+		),
+		(
+			format!("[vars]\nINPUT = {path:?}\n[[cases]]\nname = \"x\"\nexpect = 1\n"),
+			"[vars] 'INPUT'",
+		),
+		(
+			format!("[[cases]]\nname = \"x\"\nargs = [{path:?}]\nexpect = 1\n"),
+			"case 'x'",
+		),
+		(
+			"[[cases]]\nname = \"x\"\nargs = [\"$DATA\"]\nexpect = 1\n".to_string(),
+			"case 'x': '$DATA' is a path into the test bundle",
+		),
+	] {
+		let refused = refusal(spec(&body)).await;
+		assert!(refused.contains(wanted), "{refused}");
+		assert!(refused.contains("data_files"), "{refused}");
+	}
+
+	// Staged by data_files and named relatively, the same file is the student's to read.
+	let spec = spec(
+		"[vars]\nINPUT = \"data/numbers.txt\"\n[[cases]]\nname = \"x\"\nargs = [\"$NAME\"]\nexpect = 6\n",
+	);
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def f(name):\n    with open(INPUT) as fh:\n        return sum(int(n) for n in fh.read().split())\n",
+	);
+	let results = grade(vec![spec], &[student]).await;
+	assert_eq!(results[0].total_passed(), 1, "{:#?}", results[0]);
+}
+
+/// A unit's student process is held to `memory_mb` beyond what it takes idle. Undeclared,
+/// it is estimated from `space` — O(n^2) unless declared — and the size of the test data,
+/// an integer argument counting as its value; the narrowest declaration applies.
+#[tokio::test]
+async fn test_memory_is_estimated_from_space_and_data_unless_declared() {
+	let bench = Bench::new();
+	let spec = |meta: &str, case: &str| {
+		bench.spec(&format!(
+			"[meta]\nname = \"m\"\nfile = \"lab.py\"\nfunction = \"big\"\nlanguage = \"python\"\n{meta}\n[[cases]]\nname = \"big\"\nargs = [8000000]\nexpect = 8000000\n{case}\n"
+		))
+	};
+	let student = bench.student(
+		"alice",
+		"lab.py",
+		"def big(n):\n    return len(list(range(n)))\n",
+	);
+	let failure = |meta: &str, case: &str| {
+		let spec = spec(meta, case);
+		let student = student.clone();
+		async move {
+			let r = grade(vec![spec], &[student]).await;
+			let c = r[0].test_results[0].cases[0].clone();
+			assert_eq!(
+				(c.status, c.fault, c.cause),
+				(TestStatus::Error, Some(Fault::Student), Some(Cause::Memory)),
+				"{c:?}"
+			);
+			c.failure.unwrap().message
+		}
+	};
+	let estimated = failure("", "space = \"O(1)\"").await;
+	assert!(
+		estimated.contains("16 MiB memory limit (estimated from O(1) over 8000001 elements"),
+		"{estimated}"
+	);
+	let declared = failure("memory_mb = 16", "").await;
+	assert!(
+		declared.contains("16 MiB memory limit (`memory_mb`"),
+		"{declared}"
+	);
+	for (meta, case) in [
+		// O(n^2) over eight million elements: the 1 GiB cap.
+		("", ""),
+		("space = \"O(1)\"", "memory_mb = 1024"),
+		("memory_mb = 16", "space = \"O(n)\""),
+	] {
+		let roomy = grade(vec![spec(meta, case)], std::slice::from_ref(&student)).await;
+		assert_eq!(roomy[0].total_passed(), 1, "{meta}{case}: {:#?}", roomy[0]);
 	}
 }
