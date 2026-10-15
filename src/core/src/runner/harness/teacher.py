@@ -122,7 +122,12 @@ def call_bound(files=0, value=True, transfer=False):
 
 
 # --- Checking what the student side says -------------------------------------------------
-OUTCOMES = {"returned", "raised", "timeout", "missing", "matching", "unresolved", "unserialisable"}
+# The outcomes each kind of request can have. The student side resolves nothing by name — this
+# side does, before asking — and only a fuzzy function lookup can need a teacher's decision:
+# anything else claimed is not an answer to the request.
+RAN = {"returned", "raised", "timeout"}
+LOOKED_UP = RAN | {"missing", "unserialisable"}
+MATCHED = LOOKED_UP | {"matching"}
 
 
 def _str(value, what):
@@ -170,12 +175,12 @@ def _decision(decision):
 	}
 
 
-def _outcome(outcome):
+def _outcome(outcome, allowed):
 	if not isinstance(outcome, dict) or len(outcome) != 1:
 		raise Garbled("an outcome that is not exactly one thing")
 	((kind, body),) = outcome.items()
-	if kind not in OUTCOMES or not isinstance(body, dict):
-		raise Garbled(f"an unknown outcome '{kind}'")
+	if kind not in allowed or not isinstance(body, dict):
+		raise Garbled(f"an outcome '{kind}' this request cannot have")
 	if kind == "returned":
 		return {"returned": {"value": body.get("value"), "type": _str(body.get("type"), "a type name")}}
 	if kind in ("raised", "unserialisable"):
@@ -184,12 +189,13 @@ def _outcome(outcome):
 		return {"timeout": {}}
 	if kind == "missing":
 		return {"missing": {"message": _str(body.get("message"), "a message")}}
-	if kind == "unresolved":
-		return {"unresolved": {"name": _str(body.get("name"), "a name")}}
-	return {"matching": {"message": _str(body.get("message"), "a message"), "decision": _decision(body.get("decision"))}}
+	decision = _decision(body.get("decision"))
+	if decision is None or decision["selected"] is not None:
+		raise Garbled("a lookup that needs a decision but settled on a function")
+	return {"matching": {"message": _str(body.get("message"), "a message"), "decision": decision}}
 
 
-def checked(answer, files):
+def checked(answer, files, allowed):
 	"""The call record an answer describes, rebuilt from only what a record may hold."""
 	if "fatal" in answer:
 		raise Garbled(f"the student side failed: {text_of(answer['fatal'])[:MESSAGE_LIMIT]}")
@@ -199,7 +205,7 @@ def checked(answer, files):
 	if not isinstance(truncated, bool) or not isinstance(elapsed, int) or isinstance(elapsed, bool):
 		raise Garbled("a call record with malformed fields")
 	record = {
-		"outcome": _outcome(answer.get("outcome")),
+		"outcome": _outcome(answer.get("outcome"), allowed),
 		"stdout": stdout,
 		"stdout_truncated": truncated,
 		"elapsed_ms": max(elapsed, 0),
@@ -353,17 +359,15 @@ def fetch(student, name, timeout):
 	"""A value the student side holds, taken by value now. Returns the value, or the
 	outcome that kept it from arriving."""
 	answer = student.ask({"op": "fetch", "name": name, "timeout": timeout}, call_bound(value=False, transfer=True), timeout + GRACE)
-	if "value" in answer:
-		tree = answer["value"]
-		if isinstance(tree, dict) and tree.get("$") == "too_large":
-			return None, {"error": problem("TooLarge", f"'{name}' is {tree.get('size')} bytes of JSON, more than a checker can be given")}
-		try:
+	try:
+		if "value" in answer:
+			tree = answer["value"]
+			if isinstance(tree, dict) and tree.get("$") == "too_large":
+				return None, {"error": problem("TooLarge", f"'{name}' is {tree.get('size')} bytes of JSON, more than a checker can be given")}
 			return decode(tree), None
-		except Garbled as exc:
-			raise student.garbled(str(exc)) from None
-	if "unresolved" in answer:
-		return None, {"unresolved": {"name": name}}
-	outcome = _outcome(answer.get("outcome"))
+		outcome = _outcome(answer.get("outcome"), RAN)
+	except Garbled as exc:
+		raise student.garbled(str(exc)) from None
 	if "timeout" in outcome:
 		return None, {"error": problem("Timeout", f"reading '{name}' for the checker took longer than {timeout}s")}
 	if "raised" in outcome:
@@ -469,6 +473,9 @@ def teacher_call(plan, phase, index, student):
 		args = local(plan.get("args", []), student, plan["timeout"])
 	except Unresolved as exc:
 		args = exc
+	except Garbled as exc:
+		stopped(phase, index, student.garbled(str(exc)))
+		return None
 	except Stop as stop:
 		stopped(phase, index, stop)
 		return None
@@ -517,10 +524,16 @@ def student_call(plan, phase, index, student):
 			"stdout": "", "stdout_truncated": False, "elapsed_ms": 0,
 		})
 		return False
+	if kind != "function":
+		allowed = LOOKED_UP
+	elif PAYLOAD["role"] == "student":
+		allowed = MATCHED
+	else:
+		allowed = LOOKED_UP
 	try:
 		answer = student.ask(request, call_bound(len(files), transfer=check is not None), plan["timeout"] + GRACE)
 		try:
-			record = checked(answer, files)
+			record = checked(answer, files, allowed)
 		except Garbled as exc:
 			raise student.garbled(str(exc)) from None
 		returned = "returned" in record["outcome"]
@@ -543,7 +556,10 @@ def student_call(plan, phase, index, student):
 		bind(plan["id"], student=True)
 	if returned and check is not None:
 		try:
-			verdict = failed or run_check(check, value, record["stdout"], plan["timeout"], student)
+			try:
+				verdict = failed or run_check(check, value, record["stdout"], plan["timeout"], student)
+			except Garbled as exc:
+				raise student.garbled(str(exc)) from None
 		except Stop as stop:
 			emit({"kind": "check", "index": index, "error": problem("StudentEnded", f"the student side stopped while the checker read its values: {stop.message}")})
 			stopped(phase, index, stop)
@@ -570,7 +586,7 @@ def run_calls(phase, calls, student):
 def run_load(student):
 	try:
 		answer = student.ask({"op": "load", "timeout": PAYLOAD["load_timeout"]}, call_bound(value=False), PAYLOAD["load_timeout"] + GRACE)
-		record = checked(answer, [])
+		record = checked(answer, [], RAN)
 	except Garbled as exc:
 		stopped("load", 0, student.garbled(str(exc)))
 		return False
@@ -594,7 +610,7 @@ def run_script(student):
 			script["timeout"] + GRACE,
 		)
 		compile_error = answer.get("compiles") is False
-		record = checked(answer, [] if compile_error else files)
+		record = checked(answer, [] if compile_error else files, RAN)
 	except Garbled as exc:
 		stopped("step", 0, student.garbled(str(exc)))
 		return
