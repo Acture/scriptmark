@@ -469,7 +469,7 @@ fn death(exit: &Exit) -> (TestStatus, String) {
 			TestStatus::Error,
 			format!(
 				"the {limit_mb} MiB memory limit (`memory_mb`, on top of the {idle_mb} MiB \
-				 Python and the allowed imports take) was exceeded during"
+				 Python and the submission's imports take) was exceeded during"
 			),
 		),
 		Exit::Stopped => (

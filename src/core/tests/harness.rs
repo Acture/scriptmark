@@ -1024,33 +1024,31 @@ async fn test_a_student_who_writes_into_the_pipe_only_breaks_their_own_unit() {
 	assert!(obs.done, "{obs:?}");
 }
 
-/// What the teacher allows is loaded when ScriptMark measures what the student side takes
-/// idle, so a student is not charged for importing it.
+/// What a submission imports, wherever in its file, is loaded when ScriptMark measures what
+/// its student side takes idle: no import is the student's.
 #[tokio::test]
-async fn test_allowed_imports_count_as_what_a_unit_takes_idle() {
+async fn test_what_a_submission_imports_counts_as_idle() {
 	let dir = tempfile::tempdir().unwrap();
-	let student = write(
-		dir.path(),
-		"lab.py",
-		"import time\n\ndef hog():\n    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n",
-	);
 	let mut idle = Vec::new();
-	for allowed in [vec![], vec!["asyncio".to_string()]] {
+	for (name, import) in [("bare.py", ""), ("imports.py", "    import asyncio\n")] {
+		let student = write(
+			dir.path(),
+			name,
+			&format!(
+				"import time\n\ndef hog():\n{import}    held = b'x' * (256 * 1024 * 1024)\n    time.sleep(5)\n    return len(held)\n"
+			),
+		);
 		let mut plan = unit(&student);
-		plan.allowed_imports = allowed;
+		plan.allowed_imports = vec!["asyncio".into()];
 		plan.steps = vec![function("hog", vec![])];
 		plan.memory_mb = 16;
 		match run(&plan).await.exit {
 			Exit::Memory { idle_mb, .. } => idle.push(idle_mb),
-			other => panic!("{:?}: {other:?}", plan.allowed_imports),
+			other => panic!("{name}: {other:?}"),
 		}
 	}
-	let (bare, with_asyncio) = (idle[0], idle[1]);
 	// asyncio, which the harness does not load, takes 7 to 10 MiB to import.
-	assert!(
-		with_asyncio >= bare + 4,
-		"{bare} MiB, {with_asyncio} MiB with asyncio"
-	);
+	assert!(idle[1] >= idle[0] + 4, "{idle:?} MiB");
 }
 
 /// An entry names a module: a dotted one allows its whole package, and one that is not

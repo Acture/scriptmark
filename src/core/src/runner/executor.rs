@@ -59,8 +59,8 @@ pub struct UnitPlan {
 	/// Shared modules, as `(source in the bundle, relative destination)`: staged beside the
 	/// student's file, and imported by the teacher side from the bundle.
 	pub shared: Vec<(PathBuf, String)>,
-	/// The most memory the student side may hold beyond what it takes idle, in MiB, before
-	/// it is ended.
+	/// The most memory the student side may hold beyond what it takes idle with the
+	/// submission's imports loaded, in MiB, before it is ended.
 	pub memory_mb: u64,
 	pub allowed_imports: Vec<String>,
 	pub load_timeout: u64,
@@ -274,7 +274,7 @@ pub enum Exit {
 	/// Killed by the grader at the unit's deadline.
 	Deadline,
 	/// Killed by the grader for holding more than the unit's `memory_mb` beyond what the
-	/// student side takes idle with its allowed imports loaded (`idle_mb`).
+	/// student side takes idle with the submission's imports loaded (`idle_mb`).
 	Memory {
 		limit_mb: u64,
 		idle_mb: u64,
