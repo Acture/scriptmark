@@ -132,10 +132,11 @@ pub fn reserved(name: &str) -> Option<&'static str> {
 /// The longest timeout a spec or the command line may ask for.
 pub const MAX_TIMEOUT_SECS: u64 = 86_400;
 
-/// The memory a unit's student process may hold when its spec does not say, in MiB:
-/// several times what an introductory exercise needs (Python itself takes about 25 MiB, a
-/// list of a million integers about 40 more).
-pub const DEFAULT_MEMORY_MB: u64 = 256;
+/// The memory a unit's student process may hold when its spec does not say, in MiB: five
+/// times what it takes idle (about 25 MiB), and room to return a list of a million
+/// integers (about 40 MiB) to a function checker. The limit also counts the harness's
+/// copies of a returned value while it encodes it, a few times the value's own size.
+pub const DEFAULT_MEMORY_MB: u64 = 128;
 
 /// The memory a spec may give a unit, in MiB: from what Python and the harness need to
 /// start, to 64 GiB.

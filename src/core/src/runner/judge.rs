@@ -964,7 +964,7 @@ mod tests {
 			data_files: Vec::new(),
 			bundle: std::path::PathBuf::new(),
 			shared: Vec::new(),
-			memory_mb: 256,
+			memory_mb: crate::spec_loader::DEFAULT_MEMORY_MB,
 			allowed_imports: Vec::new(),
 			load_timeout: 10,
 			setup: Vec::new(),

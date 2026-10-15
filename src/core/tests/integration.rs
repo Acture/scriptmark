@@ -1377,7 +1377,9 @@ expect = 1
 	let student = bench.student(
 		"alice",
 		"lab.py",
-		"def ok():\n    return 1\n\ndef forever():\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n",
+		// A loop that never returns to the interpreter, so the timer never fires in it. One
+		// that catches the timer's exception escapes when the timer lands in its handler.
+		"import itertools\n\ndef ok():\n    return 1\n\ndef forever():\n    return sum(itertools.count())\n",
 	);
 	let results = grade_with(vec![spec], &[student], PythonExecutor::new(), 1).await;
 	let r = &results[0];
@@ -1466,7 +1468,7 @@ async fn test_a_path_into_the_bundle_is_never_handed_to_student_code() {
 	assert_eq!(results[0].total_passed(), 1, "{:#?}", results[0]);
 }
 
-/// A unit's student process is held to `memory_mb`: 256 MiB unless the spec, the case or
+/// A unit's student process is held to `memory_mb`: 128 MiB unless the spec, the case or
 /// the scenario says otherwise, and a case that needs more declares it.
 #[tokio::test]
 async fn test_memory_is_the_default_unless_declared() {
@@ -1489,7 +1491,7 @@ async fn test_memory_is_the_default_unless_declared() {
 		"{c:?}"
 	);
 	assert!(
-		c.failure.as_ref().unwrap().message.contains("256 MiB"),
+		c.failure.as_ref().unwrap().message.contains("128 MiB"),
 		"{:?}",
 		c.failure
 	);

@@ -54,7 +54,7 @@ fn unit(file: &Path) -> UnitPlan {
 		data_files: Vec::new(),
 		bundle: file.parent().unwrap().to_path_buf(),
 		shared: Vec::new(),
-		memory_mb: 256,
+		memory_mb: scriptmark_core::spec_loader::DEFAULT_MEMORY_MB,
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
 		setup: Vec::new(),
@@ -146,7 +146,8 @@ async fn test_a_call_that_never_yields_is_given_up_on_and_nothing_after_it_runs(
 	let student = write(
 		dir.path(),
 		"lab.py",
-		"def forever():\n    while True:\n        try:\n            while True:\n                pass\n        except BaseException:\n            pass\n\ndef ok():\n    return 1\n",
+		// Never returns to the interpreter, where the timer would fire.
+		"import itertools\n\ndef forever():\n    return sum(itertools.count())\n\ndef ok():\n    return 1\n",
 	);
 	let mut plan = unit(&student);
 	plan.load_timeout = 1;
@@ -671,6 +672,8 @@ async fn test_serialisation_edges_found_in_rereview() {
 	);
 	let mut plan = unit(&student);
 	plan.imports = vec![teacher.to_string_lossy().into_owned()];
+	// 1.5 million integers, and the harness's copies of them for the checker.
+	plan.memory_mb = 512;
 	let mut big = function("big_list", vec![]);
 	big.check = Some(InProcessCheck {
 		function: "length".into(),

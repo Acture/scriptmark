@@ -180,7 +180,7 @@ impl Bench {
 			data_files: Vec::new(),
 			bundle: self.bundle.clone(),
 			shared: Vec::new(),
-			memory_mb: 256,
+			memory_mb: scriptmark_core::spec_loader::DEFAULT_MEMORY_MB,
 			allowed_imports: Vec::new(),
 			load_timeout: 5,
 			setup: Vec::new(),
