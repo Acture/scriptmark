@@ -625,6 +625,7 @@ impl PythonExecutor {
 			pumps.spawn(pump(pipe, teacher_tail.clone()));
 		}
 		let over_memory = Arc::new(AtomicBool::new(false));
+		let mut watch = None;
 		if let Some(child) = student.as_mut() {
 			if let Some(pipe) = child.stderr.take() {
 				pumps.spawn(pump(pipe, student_tail.clone()));
@@ -633,7 +634,7 @@ impl PythonExecutor {
 				let limit = self.memory_mb.saturating_mul(1 << 20);
 				let over = over_memory.clone();
 				let group = student_group.0;
-				pumps.spawn(async move { watch_memory(pid, group, limit, over).await });
+				watch = Some(tokio::spawn(watch_memory(pid, group, limit, over)));
 			}
 		}
 
@@ -663,6 +664,10 @@ impl PythonExecutor {
 				}
 			}
 		};
+		// Its exit is settled: the watch has nothing left to end, and is not waited for.
+		if let Some(watch) = watch {
+			watch.abort();
+		}
 		// Whatever is left of either side — a hung student side, or a process either left
 		// behind holding a pipe — goes now.
 		drop(_teacher_group);
