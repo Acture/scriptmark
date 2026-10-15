@@ -496,12 +496,6 @@ const IDLE: &str = include_str!("harness/idle.py");
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const IMPORTS: &str = include_str!("harness/imports.py");
 
-/// The largest source whose imports are read beforehand: a larger one's count. Parsing
-/// takes several hundred times the source (500 KB of constants: about 290 MiB), and the
-/// reader is not watched; a submission is a few kilobytes.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-const IMPORTS_SOURCE_LIMIT: usize = 256 << 10;
-
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn digest(given: &serde_json::Value) -> String {
 	use sha2::{Digest, Sha256};
@@ -657,8 +651,9 @@ impl PythonExecutor {
 				Ok(child) => student = Some(child),
 				Err(e) => {
 					return Finished::spawn_failed(format!(
-						"could not start {}: {e}",
-						self.python_cmd
+						"could not start {}: {}",
+						self.python_cmd,
+						crate::runner::sandbox::spawn_error(&e)
 					));
 				}
 			}
@@ -689,7 +684,11 @@ impl PythonExecutor {
 		let mut teacher = match teacher_cmd.spawn() {
 			Ok(child) => child,
 			Err(e) => {
-				return Finished::spawn_failed(format!("could not start {}: {e}", self.python_cmd));
+				return Finished::spawn_failed(format!(
+					"could not start {}: {}",
+					self.python_cmd,
+					crate::runner::sandbox::spawn_error(&e)
+				));
 			}
 		};
 		// The parent's copies of every pipe end go, so each pipe ends when its side does.
@@ -1271,7 +1270,15 @@ impl PythonExecutor {
 			})),
 		);
 		measured
-			.get_or_try_init(|| self.measure_idle_memory(plan, &imports))
+			.get_or_try_init(|| async {
+				match self.measure_idle_memory(plan, &imports).await {
+					// An import that keeps the idle unit from finishing — one that exits, say —
+					// is the submission's doing: it is then measured without its imports, and
+					// they count.
+					Err(_) if !imports.is_empty() => self.measure_idle_memory(plan, &[]).await,
+					measured => measured,
+				}
+			})
 			.await
 			.copied()
 	}
@@ -1282,16 +1289,13 @@ impl PythonExecutor {
 		Ok(0)
 	}
 
-	/// The modules `source` imports, wherever in it: read by Python's own parser in a process
-	/// of its own, confined and not watched — what parsing takes is the source's to decide,
-	/// and must never be part of what a unit takes idle. Nothing in the source runs. One
-	/// that does not parse, is past `IMPORTS_SOURCE_LIMIT` or takes too long imports nothing
-	/// beforehand: its imports count.
+	/// The modules `source` imports, wherever in it: read from its tokens in a process of its
+	/// own, confined and not watched, so nothing the source holds is part of what a unit
+	/// takes idle. Nothing in the source runs. A reader that cannot finish — the source is
+	/// too strange, or too long to read in time — finds no imports, and they count: only a
+	/// reader that cannot start is an error.
 	#[cfg(any(target_os = "macos", target_os = "linux"))]
 	fn source_imports(&self, source: &[u8]) -> Result<Imports, String> {
-		if source.len() > IMPORTS_SOURCE_LIMIT {
-			return Ok(Vec::new());
-		}
 		let (_dir, scratch) = tempfile::Builder::new()
 			.prefix("scriptmark-imports-")
 			.tempdir()
@@ -1314,18 +1318,17 @@ impl PythonExecutor {
 			Some(String::from_utf8_lossy(source).into_owned()),
 			Duration::from_secs(STARTUP_SECS),
 		)
-		.map_err(|e| format!("could not start the import reader: {e}"))?;
-		let Some(ran) = ran else {
+		.map_err(|e| {
+			format!(
+				"could not start the import reader: {}",
+				crate::runner::sandbox::spawn_error(&e)
+			)
+		})?;
+		let Some(found) = ran.and_then(|ran| {
+			serde_json::from_str::<Vec<(String, Vec<String>)>>(ran.stdout.trim()).ok()
+		}) else {
 			return Ok(Vec::new());
 		};
-		let found: Vec<(String, Vec<String>)> =
-			serde_json::from_str(ran.stdout.trim()).map_err(|e| {
-				format!(
-					"the import reader printed no imports ({e}, {}): {}",
-					ran.status,
-					ran.stderr.trim()
-				)
-			})?;
 		let mut imports: Imports = found
 			.into_iter()
 			.filter(|(name, names)| {
@@ -1342,7 +1345,7 @@ impl PythonExecutor {
 	async fn measure_idle_memory(
 		&self,
 		given: &UnitPlan,
-		imports: &Imports,
+		imports: &[(String, Vec<String>)],
 	) -> Result<u64, String> {
 		let dir = tempfile::tempdir().map_err(|e| format!("could not stage the idle unit: {e}"))?;
 		let file = dir.path().join("idle.py");
@@ -1512,6 +1515,25 @@ impl Default for PythonExecutor {
 mod tests {
 	use super::*;
 	use crate::runner::executor::CallPlan;
+
+	/// The reader finds every import by its tokens — wherever it is, nothing it does not
+	/// spell out — and runs none of the source.
+	#[cfg(any(target_os = "macos", target_os = "linux"))]
+	#[test]
+	fn test_imports_are_read_from_the_source_without_running_it() {
+		let source = "import os, sys as system\nfrom x.y import (p as q,\n    r)\nfrom . import mine\n\
+			if False: import padded\ndef f():\n    import inner; s = 'import fake'\n    # import no\n\
+			open('ran', 'w')\nPAD = [1,\n  2]\nimport last\n";
+		let reader = PythonExecutor::new().with_isolation(Isolation::Unisolated);
+		let found = reader.source_imports(source.as_bytes()).unwrap();
+		let names: Vec<&str> = found.iter().map(|(m, _)| m.as_str()).collect();
+		assert_eq!(names, ["inner", "last", "os", "padded", "sys", "x.y"]);
+		assert!(found.contains(&("x.y".into(), vec!["p".into(), "r".into()])));
+		let garbled = reader
+			.source_imports(b"import ok\nx = '''never ends")
+			.unwrap();
+		assert_eq!(garbled, [("ok".to_string(), Vec::<String>::new())]);
+	}
 
 	/// The CPU limit is derived from the unit's own deadline — never the fixed 30 s it used
 	/// to be, which a scenario of several long steps would outrun and be killed by.

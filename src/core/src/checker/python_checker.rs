@@ -97,7 +97,12 @@ impl Checker for PythonChecker {
 			Some(input_json),
 			Duration::from_secs(self.timeout_secs),
 		)
-		.map_err(|e| CheckError::environment(format!("could not start checker '{script}': {e}")))?;
+		.map_err(|e| {
+			CheckError::environment(format!(
+				"could not start checker '{script}': {}",
+				crate::runner::sandbox::spawn_error(&e)
+			))
+		})?;
 		let Some(Ran {
 			status,
 			stdout,

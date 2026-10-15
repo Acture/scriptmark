@@ -866,12 +866,14 @@ async fn test_a_long_scenario_of_large_legal_values_is_not_a_flood() {
 		function: "picky".into(),
 		expected: None,
 	});
-	// About 10.75 MiB each on the wire: 75 MiB in all, past a fixed 64 MiB cap.
+	// About 10.75 MiB each on the wire: 75 MiB in all, past a fixed 64 MiB cap. This is
+	// about the record channel: the student side's copies of each value get room.
 	plan.steps = vec![step; 7];
+	plan.memory_mb = 512;
 	let obs = run(&plan).await;
 	assert!(obs.protocol_error.is_none(), "{:?}", obs.protocol_error);
 	assert!(obs.done, "{obs:?}");
-	assert_eq!(obs.steps.len(), 7);
+	assert_eq!(obs.steps.len(), 7, "{:?} {:?}", obs.exit, obs.stopped);
 	assert_eq!(obs.checks.len(), 7);
 	for step in &obs.steps {
 		// The value itself arrived, at the limit rather than replaced by its size.
@@ -1026,12 +1028,14 @@ async fn test_a_student_who_writes_into_the_pipe_only_breaks_their_own_unit() {
 }
 
 /// What a submission imports, wherever in its file, is loaded when ScriptMark measures what
-/// its student side takes idle: no import is the student's.
+/// its student side takes idle: no import is the student's. The module here, a teacher's
+/// data file the spec allows, holds 32 MiB from the moment it is imported.
 #[tokio::test]
 async fn test_what_a_submission_imports_counts_as_idle() {
 	let dir = tempfile::tempdir().unwrap();
+	let heavy = write(dir.path(), "heavy.py", "BLOB = b'x' * (32 * 1024 * 1024)\n");
 	let mut idle = Vec::new();
-	for (name, import) in [("bare.py", ""), ("imports.py", "    import asyncio\n")] {
+	for (name, import) in [("bare.py", ""), ("imports.py", "    import heavy\n")] {
 		let student = write(
 			dir.path(),
 			name,
@@ -1040,7 +1044,8 @@ async fn test_what_a_submission_imports_counts_as_idle() {
 			),
 		);
 		let mut plan = unit(&student);
-		plan.allowed_imports = vec!["asyncio".into()];
+		plan.data_files = vec![(heavy.clone(), "heavy.py".into())];
+		plan.allowed_imports = vec!["heavy".into()];
 		plan.steps = vec![function("hog", vec![])];
 		plan.memory_mb = 16;
 		match run(&plan).await.exit {
@@ -1048,8 +1053,7 @@ async fn test_what_a_submission_imports_counts_as_idle() {
 			other => panic!("{name}: {other:?}"),
 		}
 	}
-	// asyncio, which the harness does not load, takes 7 to 10 MiB to import.
-	assert!(idle[1] >= idle[0] + 4, "{idle:?} MiB");
+	assert!(idle[1] >= idle[0] + 30, "{idle:?} MiB");
 }
 
 /// Reading a submission's imports takes memory its source decides — about 140 MiB for the
@@ -1074,6 +1078,24 @@ async fn test_what_reading_a_submission_takes_is_not_idle() {
 		}
 	}
 	assert!(idle[1] <= idle[0] + 3, "{idle:?} MiB");
+}
+
+/// An import that exits when loaded — `unittest.__main__` runs the test runner — cannot
+/// stop a submission's idle share from being measured, nor turn its units into the
+/// environment's failure: it is measured without its imports.
+#[tokio::test]
+async fn test_an_import_that_exits_does_not_stop_the_measurement() {
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def never():\n    import unittest.__main__\n\ndef two():\n    return 2\n",
+	);
+	let mut plan = unit(&student);
+	plan.steps = vec![function("two", vec![])];
+	let obs = run(&plan).await;
+	assert!(obs.done && obs.exit == Exit::Code(0), "{obs:?}");
+	assert_eq!(returned(&obs.steps[0].outcome), &json!(2));
 }
 
 /// An entry names a module: a dotted one allows its whole package, and one that is not

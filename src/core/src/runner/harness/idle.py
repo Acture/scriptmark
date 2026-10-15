@@ -10,6 +10,6 @@ def idle(imports):
 	for name, names in imports:
 		try:
 			__import__(name, fromlist=names)
-		except Exception:  # refused, missing or broken: it costs the student nothing either
+		except (Exception, SystemExit):  # refused, missing, broken or exiting: skipped
 			pass
 	time.sleep(0.05)

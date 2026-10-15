@@ -37,9 +37,9 @@ rars = "0.9.4"
 bzip2-rs = "0.1.2"
 lzma-rs = "0.3.0"
 tempfile = "3"
-shlex = "2"
+shlex = { workspace = true }
 sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-landlock = "0.4"
-seccompiler = "0.5"
+landlock = { workspace = true }
+seccompiler = { workspace = true }

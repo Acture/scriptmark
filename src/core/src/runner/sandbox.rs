@@ -174,6 +174,20 @@ pub fn available() -> Result<(), String> {
 	platform::available()
 }
 
+/// The errno a confined command fails to start with when its sandbox could not be applied
+/// between fork and exec, where nothing may allocate to say more.
+#[cfg(target_os = "linux")]
+const SANDBOX_REFUSED: i32 = libc::ENOTSUP;
+
+/// Why a command could not start, in words: a sandbox that could not be applied says so.
+pub fn spawn_error(e: &std::io::Error) -> String {
+	#[cfg(target_os = "linux")]
+	if e.raw_os_error() == Some(SANDBOX_REFUSED) {
+		return format!("its sandbox could not be applied ({e})");
+	}
+	e.to_string()
+}
+
 /// A command that runs `program` held to `confinement`. Its arguments are the caller's to add.
 pub fn confined(
 	program: &Path,
@@ -411,17 +425,19 @@ mod platform {
 		let mut cmd = std::process::Command::new(program);
 		let mut ruleset = Some(ruleset);
 		// SAFETY: between fork and exec this only makes the syscalls that apply a prepared
-		// ruleset and prepared filters; nothing is allocated unless one fails.
+		// ruleset and prepared filters, and fails with a constant errno: nothing allocates,
+		// as another thread of the grader may have held the allocator's lock at the fork.
 		unsafe {
 			cmd.pre_exec(move || {
+				let refused = || std::io::Error::from_raw_os_error(SANDBOX_REFUSED);
 				if let Some(ruleset) = ruleset.take() {
-					let status = ruleset.restrict_self().map_err(std::io::Error::other)?;
-					if status.ruleset != RulesetStatus::FullyEnforced {
-						return Err(std::io::Error::other("Landlock was not fully enforced"));
+					match ruleset.restrict_self() {
+						Ok(status) if status.ruleset == RulesetStatus::FullyEnforced => {}
+						_ => return Err(refused()),
 					}
 				}
 				for filter in &filters {
-					seccompiler::apply_filter(filter).map_err(std::io::Error::other)?;
+					seccompiler::apply_filter(filter).map_err(|_| refused())?;
 				}
 				Ok(())
 			});

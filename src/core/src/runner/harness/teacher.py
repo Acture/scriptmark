@@ -16,6 +16,13 @@ os.unlink(sys.argv[1])
 configure(PAYLOAD["limits"])
 
 _RECORDS = PAYLOAD["records"]
+if _RECORDS == 2:
+	# Windows has no third pipe: records take stderr, so the teacher's own stderr — a
+	# module's warning, a checker's print — goes nowhere rather than into them.
+	_RECORDS = os.dup(2)
+	_null = os.open(os.devnull, os.O_WRONLY)
+	os.dup2(_null, 2)
+	os.close(_null)
 # Seconds a request may run past its own timeout before the student side is given up on,
 # and how long the student side has to start.
 GRACE = PAYLOAD["grace"]

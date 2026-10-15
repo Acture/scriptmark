@@ -116,7 +116,12 @@ pub fn run_lint(
 	}
 
 	let out = crate::checker::python_checker::run_with_timeout(cmd, None, timeout)
-		.map_err(|e| format!("could not run `{command}`: {e}"))?
+		.map_err(|e| {
+			format!(
+				"could not run `{command}`: {}",
+				crate::runner::sandbox::spawn_error(&e)
+			)
+		})?
 		.ok_or_else(|| format!("`{command}` ran longer than {}s", timeout.as_secs()))?;
 	if !out
 		.status

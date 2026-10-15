@@ -169,19 +169,21 @@ fn bytes_under(path: &Path) -> u64 {
 /// cannot be sized before grading: None.
 pub fn args_size(args: &[Value], vars: &BTreeMap<String, Value>) -> Option<u64> {
 	args.iter().try_fold(0u64, |total, arg| {
-		Some(total.saturating_add(size(arg, true, vars)?))
+		Some(total.saturating_add(size(arg, true, Some(vars))?))
 	})
 }
 
 /// The size of an expected value: as an argument's, but an integer is one element.
 pub fn value_size(value: &Value, vars: &BTreeMap<String, Value>) -> Option<u64> {
-	size(value, false, vars)
+	size(value, false, Some(vars))
 }
 
-fn size(value: &Value, top: bool, vars: &BTreeMap<String, Value>) -> Option<u64> {
+/// `vars` resolves `$name`; a var's own value, None, holds text where it says `$…`.
+fn size(value: &Value, top: bool, vars: Option<&BTreeMap<String, Value>>) -> Option<u64> {
 	Some(match value {
-		Value::String(s) if s.starts_with('$') && !s.starts_with("$$") => {
-			return size(vars.get(&s[1..])?, top, vars);
+		// Resolved once, as the teacher side does: a var's own `$…` strings are text.
+		Value::String(s) if vars.is_some() && s.starts_with('$') && !s.starts_with("$$") => {
+			return size(vars?.get(&s[1..])?, top, None);
 		}
 		Value::String(s) => s.chars().count() as u64,
 		Value::Number(number) if top => number
@@ -279,6 +281,9 @@ mod tests {
 		assert_eq!(args_size(&[json!("$N"), json!("$XS")], &vars), Some(32));
 		assert_eq!(args_size(&[json!("$$literal")], &vars), Some(9));
 		assert_eq!(args_size(&[json!("$data")], &vars), None);
+		// A var that names itself is text, not a loop.
+		let looped = BTreeMap::from([("A".to_string(), json!(["$A", "$A"]))]);
+		assert_eq!(args_size(&[json!("$A")], &looped), Some(4));
 		assert_eq!(value_size(&json!(8_000_000), &vars), Some(1));
 		assert_eq!(value_size(&json!([[1, 2], []]), &vars), Some(3));
 	}

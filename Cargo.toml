@@ -32,6 +32,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Scripting
 rhai = "1"
+shlex = "2"
 
 # Display
 comfy-table = "7"
@@ -53,6 +54,8 @@ calamine = "0.36"
 
 # System
 libc = "0.2"
+landlock = "0.4"
+seccompiler = "0.5"
 
 # Random
 rand = "0.9"
