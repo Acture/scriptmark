@@ -8,8 +8,7 @@ request allows before it is read, and it never reaches a record unchecked.
 """
 
 import importlib.util  # noqa: E402
-import queue  # noqa: E402
-import threading  # noqa: E402
+import select  # noqa: E402
 
 with open(sys.argv[1], encoding="utf-8") as _fh:
 	PAYLOAD = json.load(_fh)
@@ -50,27 +49,69 @@ class Stop(Exception):
 
 
 class Student:
-	"""The pipe to the student side. One request is pending at a time; a reader thread
-	checks each answer's length against that request's bound before reading it."""
+	"""The pipe to the student side. One request is pending at a time: its answer is read
+	before its deadline, and its length checked against the request's bound before its body
+	is read. Reading needs no thread: the kernel's process limit counts threads, and a
+	busy machine may have none to spare."""
 
 	def __init__(self, read_fd, write_fd):
 		self.read_fd, self.write_fd = read_fd, write_fd
-		self.bound = 0
-		self.answers = queue.Queue()
 		self.stopped = None
-		threading.Thread(target=self._read, daemon=True).start()
+		self.windows = os.name == "nt"
+		if self.windows:
+			# Pipes cannot be polled there: a reader thread waits instead, and the process
+			# limit that makes threads scarce is a unix one.
+			import queue
+			import threading
 
-	def _read(self):
+			self.answers = queue.Queue()
+			threading.Thread(target=self._pump, daemon=True).start()
+
+	def _pump(self):
 		try:
 			while True:
 				(size,) = HEADER.unpack(read_exact(self.read_fd, HEADER.size))
-				bound = self.bound
-				if size > bound:
-					self.answers.put(Stop("flooded", f"the student side sent {size} bytes where at most {bound} may arrive"))
+				self.answers.put(size)
+				self.answers.put(read_exact(self.read_fd, size) if size <= self.bound else None)
+				if size > self.bound:
 					return
-				self.answers.put(read_exact(self.read_fd, size))
 		except (Closed, OSError):
-			self.answers.put(Stop("exited", "the student side ended"))
+			self.answers.put(Closed())
+
+	def _exactly(self, n, deadline):
+		"""`n` bytes from the student side, before `deadline`."""
+		chunks, got = [], 0
+		while got < n:
+			left = deadline - time.monotonic()
+			if left <= 0:
+				raise TimeoutError()
+			if not select.select([self.read_fd], [], [], left)[0]:
+				continue
+			chunk = os.read(self.read_fd, min(n - got, 1 << 20))
+			if not chunk:
+				raise Closed()
+			chunks.append(chunk)
+			got += len(chunk)
+		return b"".join(chunks)
+
+	def _answer(self, bound, timeout):
+		deadline = time.monotonic() + timeout
+		if self.windows:
+			import queue
+
+			try:
+				size = self.answers.get(timeout=timeout)
+				body = None if isinstance(size, Closed) or size > bound else self.answers.get(timeout=max(deadline - time.monotonic(), 0.001))
+			except queue.Empty:
+				raise TimeoutError() from None
+			if isinstance(size, Closed) or isinstance(body, Closed):
+				raise Closed()
+		else:
+			(size,) = HEADER.unpack(self._exactly(HEADER.size, deadline))
+			body = None if size > bound else self._exactly(size, deadline)
+		if body is None:
+			raise Stop("flooded", f"the student side sent {size} bytes where at most {bound} may arrive")
+		return body
 
 	def ask(self, request, bound, timeout):
 		if self.stopped is not None:
@@ -82,13 +123,16 @@ class Student:
 			self.stopped = Stop("exited", "the student side ended")
 			raise self.stopped from None
 		try:
-			answer = self.answers.get(timeout=timeout)
-		except queue.Empty:
+			answer = self._answer(bound, timeout)
+		except TimeoutError:
 			self.stopped = Stop("deadline", f"the student side did not answer within {timeout:g}s")
 			raise self.stopped from None
-		if isinstance(answer, Stop):
-			self.stopped = answer
-			raise answer
+		except (Closed, OSError):
+			self.stopped = Stop("exited", "the student side ended")
+			raise self.stopped from None
+		except Stop as stop:
+			self.stopped = stop
+			raise
 		try:
 			parsed = parse(answer)
 			if not isinstance(parsed, dict):

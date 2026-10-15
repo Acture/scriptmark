@@ -8,6 +8,7 @@ use scriptmark_core::runner::frozen::{Frozen, Generation};
 use scriptmark_core::runner::orchestrator::{RunOptions, run_all};
 use scriptmark_core::runner::prepare::{Bundle, prepare};
 use scriptmark_core::runner::python::PythonExecutor;
+use scriptmark_core::runner::sandbox::Isolation;
 use scriptmark_core::spec_loader::load_spec_str;
 use serde_json::{Value, json};
 
@@ -46,6 +47,15 @@ async fn prepared(spec: TestSpec, generation: &Generation) -> Result<Vec<Bundle>
 		.map_err(|e| e.to_string())
 }
 
+/// For a reference that writes outside its unit — counting its calls, or changing its own
+/// source — which only an unsandboxed reference can.
+async fn prepared_unconfined(spec: TestSpec) -> Result<Vec<Bundle>, String> {
+	let executor = PythonExecutor::new().with_isolation(Isolation::Unisolated);
+	prepare(vec![spec], &Generation::fresh(), Arc::new(executor), 3)
+		.await
+		.map_err(|e| e.to_string())
+}
+
 async fn run(bundles: Vec<Bundle>, students: &[StudentSubmission]) -> Vec<StudentReport> {
 	run_all(
 		students,
@@ -80,9 +90,7 @@ async fn fixed_samples_and_seeded_inputs_share_answers_across_students_and_batch
 	let body: String = format!(
 		"{FIXED}\n[[cases]]\nname = 'generated'\n[cases.parametrize]\nargs = {{ x = 'int(0, 10)' }}\nsamples = [[2], [3]]\n[cases.parametrize.random]\ncount = 4\nseed = 42\n[cases.oracle]\nreference = 'ref.py'\nfunction = 'answer'\n"
 	);
-	let bundles: Vec<Bundle> = prepared(bench.spec(&body), &Generation::fresh())
-		.await
-		.unwrap();
+	let bundles: Vec<Bundle> = prepared_unconfined(bench.spec(&body)).await.unwrap();
 	let frozen: Frozen = Frozen::of(&bundles);
 	let path: PathBuf = bench.path().join("batch.cases.json");
 	frozen.write(&path).unwrap();
@@ -323,9 +331,7 @@ async fn sources_cannot_change_while_answers_are_being_prepared() {
 	let bench: Bench = Bench::new();
 	let source: PathBuf = bench.path().join("ref.py");
 	bench.write("ref.py", &format!("def answer(x):\n    with open({source:?}, 'a') as f:\n        f.write('\\n# changed\\n')\n    return x\n"));
-	let error: String = prepared(bench.spec(FIXED), &Generation::fresh())
-		.await
-		.unwrap_err();
+	let error: String = prepared_unconfined(bench.spec(FIXED)).await.unwrap_err();
 	assert!(
 		error.contains("sources changed during preparation"),
 		"{error}"

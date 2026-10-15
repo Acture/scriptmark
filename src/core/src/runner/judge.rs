@@ -152,11 +152,11 @@ fn unit_failure(plan: &UnitPlan, obs: &UnitObservation) -> Option<Blanket> {
 		}
 	}
 	if let Some(ProtocolError::Tampered(problem)) = &obs.protocol_error {
-		// Only the teacher side writes records: student code cannot reach them.
+		let (fault, cause) = teacher_side_broken(obs);
 		return blanket(
 			TestStatus::Error,
-			Fault::Environment,
-			Cause::Harness,
+			fault,
+			cause,
 			format!("the unit's records cannot be trusted: {problem}"),
 		);
 	}
@@ -377,15 +377,28 @@ fn unfinished(obs: &UnitObservation, owner: Fault, cause: Cause, what: &str) -> 
 	if owner == Fault::Teacher {
 		return in_flight(&obs.teacher_exit, Fault::Teacher, cause, what);
 	}
+	let (fault, cause) = teacher_side_broken(obs);
 	let (_, how) = death(&obs.teacher_exit);
 	Blanket {
 		status: TestStatus::Error,
-		fault: Fault::Environment,
-		cause: Cause::Harness,
+		fault,
+		cause,
 		message: format!(
 			"the teacher side ended: {how} {what} ({})",
 			stderr_hint(obs)
 		),
+	}
+}
+
+/// Whose doing it is when the teacher side breaks — ends, or writes records it could not
+/// have meant. In its sandbox, student code cannot reach it: the harness's. Unsandboxed,
+/// once student code has run, it can — signal it, or write into its records — and it is
+/// the student's, as it was when both shared one process.
+fn teacher_side_broken(obs: &UnitObservation) -> (Fault, Cause) {
+	if obs.sandboxed || !obs.ready {
+		(Fault::Environment, Cause::Harness)
+	} else {
+		(Fault::Student, Cause::Protocol)
 	}
 }
 
@@ -469,10 +482,11 @@ fn describe(outcome: &Outcome, timeout: u64) -> String {
 /// teacher side wrote a record it could not have meant. What was recorded before that
 /// stands; nothing after it can be known.
 fn stream_break(obs: &UnitObservation) -> Option<Blanket> {
+	let broken = teacher_side_broken(obs);
 	let (fault, cause, message) = match (&obs.fatal, &obs.protocol_error) {
 		(_, Some(ProtocolError::Flooded(problem))) => (
-			Fault::Environment,
-			Cause::Harness,
+			broken.0,
+			broken.1,
 			format!("the unit's records could not be read past this point: {problem}"),
 		),
 		(Some(fatal), _) if fatal.stage == "harness" => (
@@ -484,8 +498,8 @@ fn stream_break(obs: &UnitObservation) -> Option<Blanket> {
 			),
 		),
 		(_, Some(ProtocolError::Unreadable(problem))) => (
-			Fault::Environment,
-			Cause::Harness,
+			broken.0,
+			broken.1,
 			format!("the harness wrote a record it could not have meant: {problem}"),
 		),
 		_ => return None,
@@ -898,6 +912,7 @@ mod tests {
 			imports: Vec::new(),
 			vars: Arc::new(BTreeMap::new()),
 			data_files: Vec::new(),
+			bundle: std::path::PathBuf::new(),
 			allowed_imports: Vec::new(),
 			load_timeout: 10,
 			setup: Vec::new(),
@@ -957,6 +972,7 @@ mod tests {
 			steps,
 			done: true,
 			exit: Exit::Code(0),
+			sandboxed: true,
 			..UnitObservation::not_started(Exit::Code(0))
 		}
 	}
@@ -1288,8 +1304,8 @@ mod tests {
 			r[2].failure
 		);
 
-		// Without a word from the teacher side, the teacher side itself went: the student
-		// cannot reach it.
+		// Without a word from the teacher side, the teacher side itself went: in its sandbox
+		// the student cannot reach it...
 		let mut lost = finished(vec![record(0, returned(json!(1)))]);
 		lost.done = false;
 		lost.teacher_exit = Exit::Signal(libc::SIGKILL);
@@ -1301,6 +1317,21 @@ mod tests {
 				Some(Fault::Environment),
 				Some(Cause::Harness)
 			)
+		);
+		// ...but unsandboxed, student code could have signalled it.
+		lost.sandboxed = false;
+		let r = judge(&p, &scored, &lost, "python3");
+		assert_eq!(
+			verdict(&r[1]),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Protocol)
+			)
+		);
+		assert_eq!(
+			verdict(&r[2]),
+			(TestStatus::Error, Some(Fault::Student), Some(Cause::NotRun))
 		);
 	}
 
@@ -1354,7 +1385,8 @@ mod tests {
 			(TestStatus::Error, Some(Fault::Student), Some(Cause::Load))
 		);
 
-		// Only the teacher side writes records: student code cannot have broken them.
+		// Only the teacher side writes records: sandboxed, student code cannot have broken
+		// them; unsandboxed, it could have written into them.
 		let mut tampered = finished(vec![record(0, returned(json!(1)))]);
 		tampered.protocol_error = Some(ProtocolError::Tampered("step record 0 repeated".into()));
 		assert_eq!(
@@ -1363,6 +1395,15 @@ mod tests {
 				TestStatus::Error,
 				Some(Fault::Environment),
 				Some(Cause::Harness)
+			)
+		);
+		tampered.sandboxed = false;
+		assert_eq!(
+			verdict(&one(&c, &p, &tampered)),
+			(
+				TestStatus::Error,
+				Some(Fault::Student),
+				Some(Cause::Protocol)
 			)
 		);
 

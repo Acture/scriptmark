@@ -11,6 +11,7 @@ use scriptmark_core::runner::frozen::Generation;
 use scriptmark_core::runner::orchestrator::{RunOptions, run_all};
 use scriptmark_core::runner::prepare::prepare;
 use scriptmark_core::runner::python::PythonExecutor;
+use scriptmark_core::runner::sandbox::Isolation;
 use scriptmark_core::spec_loader::load_spec_str;
 
 /// A scratch directory holding specs, teacher files and one directory per student.
@@ -701,7 +702,10 @@ expect = "recorded"
 		"lab.py",
 		"def record(path):\n    with open(path, 'a') as fh:\n        fh.write('ran\\n')\n    return 'recorded'\n\ndef echo(x):\n    return x\n",
 	);
-	let results = grade(vec![spec], &[student]).await;
+	// The student counts its setup calls in logs shared by every unit, outside them all:
+	// only an unsandboxed unit can write there.
+	let unconfined = PythonExecutor::new().with_isolation(Isolation::Unisolated);
+	let results = grade_with(vec![spec], &[student], unconfined, 5).await;
 	assert_eq!(results[0].total_passed(), 4, "{:#?}", results[0]);
 
 	let lines = |p: &Path| std::fs::read_to_string(p).unwrap().lines().count();

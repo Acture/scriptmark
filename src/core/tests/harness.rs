@@ -52,6 +52,7 @@ fn unit(file: &Path) -> UnitPlan {
 		imports: Vec::new(),
 		vars: Arc::new(BTreeMap::new()),
 		data_files: Vec::new(),
+		bundle: file.parent().unwrap().to_path_buf(),
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
 		setup: Vec::new(),

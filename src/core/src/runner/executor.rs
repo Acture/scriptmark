@@ -54,6 +54,8 @@ pub struct UnitPlan {
 	pub vars: Arc<BTreeMap<String, Value>>,
 	/// `(source, relative destination)` pairs staged into the working directory.
 	pub data_files: Vec<(PathBuf, String)>,
+	/// The test bundle's directory: what teacher code may read, besides its own modules.
+	pub bundle: PathBuf,
 	pub allowed_imports: Vec<String>,
 	pub load_timeout: u64,
 	pub setup: Vec<CallPlan>,
@@ -298,6 +300,10 @@ pub struct UnitObservation {
 	pub protocol_error: Option<ProtocolError>,
 	/// The tail of each side's stderr, for diagnosing a crash.
 	pub stderr: String,
+	/// Each side ran in its own sandbox. Without one, student code can reach the teacher
+	/// side — end it, or write into its records — so what breaks there may be the
+	/// student's doing.
+	pub sandboxed: bool,
 }
 
 impl UnitObservation {
@@ -316,6 +322,7 @@ impl UnitObservation {
 			exit,
 			protocol_error: None,
 			stderr: String::new(),
+			sandboxed: false,
 		}
 	}
 }

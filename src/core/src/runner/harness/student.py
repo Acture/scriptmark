@@ -215,23 +215,17 @@ def load(request):
 
 
 def feed_stdin(text):
-	"""Descriptor 0 becomes a pipe holding `text`, as `python script.py < input` would see
-	it: `input()`, `sys.stdin.buffer` and `os.read(0, …)` all read the same bytes."""
-	import threading
+	"""Descriptor 0 becomes a file holding `text`, as `python script.py < input` would see
+	it: `input()`, `sys.stdin.buffer` and `os.read(0, …)` all read the same bytes. A file in
+	the unit's own temporary directory, not a pipe and a thread to fill it: the process
+	limit counts threads, and a busy machine may have none to spare."""
+	import tempfile
 
-	read_end, write_end = os.pipe()
-
-	def feed():
-		try:
-			write_all(write_end, text.encode("utf-8"))
-		except OSError:  # the script stopped reading
-			pass
-		finally:
-			os.close(write_end)
-
-	threading.Thread(target=feed, daemon=True).start()
-	os.dup2(read_end, 0)
-	os.close(read_end)
+	with tempfile.TemporaryFile() as held:
+		held.write(text.encode("utf-8"))
+		held.flush()
+		held.seek(0)
+		os.dup2(held.fileno(), 0)
 
 
 def script(request):

@@ -472,6 +472,14 @@ pub fn about(record: &Record, n: u32) -> Result<Table> {
 	}
 	rows.extend([
 		("run_by".into(), Cell::text(&evidence.scriptmark)),
+		(
+			"isolation".into(),
+			Cell::text(if evidence.bundle.isolation.is_sandboxed() {
+				"sandboxed"
+			} else {
+				"unisolated (--no-sandbox)"
+			}),
+		),
 		("scored_by".into(), Cell::text(&revision.scriptmark)),
 		(
 			"derived_items".into(),

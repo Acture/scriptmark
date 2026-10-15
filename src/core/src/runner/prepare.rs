@@ -555,6 +555,7 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 			.iter()
 			.map(|rel| (spec.dir.join(rel), rel.clone()))
 			.collect(),
+		bundle: spec.dir.clone(),
 		allowed_imports: spec.meta.allowed_imports.clone(),
 		load_timeout: timeout_secs,
 		setup: Vec::new(),

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -19,6 +19,7 @@ use crate::runner::executor::{
 use crate::runner::records::{Bounds, Reader, Records};
 #[cfg(unix)]
 use crate::runner::sandbox::apply_sandbox;
+use crate::runner::sandbox::{Confinement, Isolation, covering};
 
 /// Resolve a python command to an absolute path so env_clear() doesn't change
 /// which interpreter runs. Falls back to the original string if resolution fails.
@@ -43,6 +44,9 @@ pub struct PythonExecutor {
 	python_cmd: String,
 	/// The most memory the student side may hold before it is ended, in MiB.
 	memory_mb: u64,
+	isolation: Isolation,
+	/// What the interpreter needs to run, found once, the first time a unit is confined.
+	interpreter: OnceLock<Result<Interpreter, String>>,
 }
 
 impl PythonExecutor {
@@ -54,6 +58,8 @@ impl PythonExecutor {
 		Self {
 			python_cmd: resolve_python_path(&python_cmd.into()),
 			memory_mb: crate::runner::sandbox::SandboxConfig::default().mem_mb,
+			isolation: Isolation::default(),
+			interpreter: OnceLock::new(),
 		}
 	}
 
@@ -63,9 +69,117 @@ impl PythonExecutor {
 		self
 	}
 
+	/// Whether each side runs in its own sandbox. Sandboxed is the default; a unit whose
+	/// sandbox cannot be applied is not graded.
+	pub fn with_isolation(mut self, isolation: Isolation) -> Self {
+		self.isolation = isolation;
+		self
+	}
+
+	pub fn isolation(&self) -> Isolation {
+		self.isolation
+	}
+
 	pub fn python_cmd(&self) -> &str {
 		&self.python_cmd
 	}
+
+	fn interpreter(&self) -> Result<&Interpreter, String> {
+		self.interpreter
+			.get_or_init(|| Interpreter::probe(&self.python_cmd))
+			.as_ref()
+			.map_err(Clone::clone)
+	}
+}
+
+/// What one Python interpreter reads and runs: its prefixes, its standard library and
+/// packages, and the shared libraries they load — not the rest of the machine.
+#[derive(Debug, Clone)]
+struct Interpreter {
+	read: Vec<PathBuf>,
+	exec: Vec<PathBuf>,
+}
+
+/// Asks the interpreter where it lives, unconfined and once.
+const PROBE: &str = "import json, os, sys, sysconfig
+paths = [sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix, *sysconfig.get_paths().values(), *sys.path]
+print(json.dumps({
+	'executable': os.path.realpath(sys.executable),
+	'base': os.path.realpath(sys.base_prefix),
+	'paths': [os.path.realpath(p) for p in paths if p and os.path.exists(p)],
+}))";
+
+impl Interpreter {
+	fn probe(python_cmd: &str) -> Result<Self, String> {
+		#[derive(serde::Deserialize)]
+		struct Found {
+			executable: PathBuf,
+			base: PathBuf,
+			paths: Vec<PathBuf>,
+		}
+		let output = std::process::Command::new(python_cmd)
+			.env_clear()
+			.args(["-I", "-c", PROBE])
+			.output()
+			.map_err(|e| format!("could not ask {python_cmd} where it lives: {e}"))?;
+		let found: Found = serde_json::from_slice(&output.stdout).map_err(|e| {
+			format!(
+				"{python_cmd} did not say where it lives ({e}): {}",
+				String::from_utf8_lossy(&output.stderr).trim()
+			)
+		})?;
+		let command = PathBuf::from(python_cmd);
+		let mut read = found.paths;
+		read.extend(system_libraries(&found.base));
+		// The command itself may be a link into the interpreter's prefix, as a venv's is.
+		read.push(command.clone());
+		let mut exec = vec![command];
+		#[cfg(target_os = "macos")]
+		// A framework build's `python3` starts `Python.app` inside its prefix.
+		exec.push(found.base);
+		#[cfg(not(target_os = "macos"))]
+		{
+			exec.extend(crate::runner::sandbox::loader_of(&found.executable));
+			let _ = found.base;
+		}
+		exec.push(found.executable);
+		Ok(Self {
+			read: covering(read),
+			exec,
+		})
+	}
+}
+
+/// Shared libraries an interpreter loads from outside its prefix.
+#[cfg(target_os = "macos")]
+fn system_libraries(base: &Path) -> Vec<PathBuf> {
+	// A Homebrew keg links against other kegs through `opt`: those, and only those — not
+	// the prefix's `etc` or `var`, which hold service configuration and data.
+	let text = base.to_string_lossy();
+	match text.find("/Cellar/") {
+		Some(at) => {
+			let prefix = Path::new(&text[..at]);
+			vec![prefix.join("Cellar"), prefix.join("opt")]
+		}
+		None => Vec::new(),
+	}
+}
+
+#[cfg(not(target_os = "macos"))]
+fn system_libraries(_base: &Path) -> Vec<PathBuf> {
+	[
+		"/usr/lib",
+		"/usr/lib64",
+		"/lib",
+		"/lib64",
+		"/usr/local/lib",
+		"/etc/ld.so.cache",
+		"/etc/localtime",
+		"/usr/share/zoneinfo",
+	]
+	.iter()
+	.filter_map(|p| std::fs::canonicalize(p).ok())
+	.collect()
 }
 
 const COMMON: &str = include_str!("harness/common.py");
@@ -170,6 +284,9 @@ struct Staged {
 	subject: Option<PathBuf>,
 	/// The subject's source, for teacher code to read.
 	source: Option<PathBuf>,
+	/// A file outside everything either side may read: a side that can open it is not in
+	/// its sandbox, and refuses to go on.
+	canary: PathBuf,
 }
 
 /// Copy `src` (a file or a directory) to `dest`, creating parents.
@@ -209,8 +326,12 @@ fn stage(
 	let root = tempfile::Builder::new()
 		.prefix("scriptmark-unit-")
 		.tempdir()?;
-	let teacher = side(root.path(), "teacher")?;
-	let student = side(root.path(), "student")?;
+	// The sandbox sees resolved paths: `/var/folders/…` is `/private/var/folders/…` on macOS.
+	let base = std::fs::canonicalize(root.path())?;
+	let teacher = side(&base, "teacher")?;
+	let student = side(&base, "student")?;
+	let canary = base.join("canary");
+	std::fs::write(&canary, "a sandboxed side must not be able to read this\n")?;
 	// Teacher code that opens a data file by its relative path finds it, as student code does.
 	for (src, rel) in data_files {
 		copy_into(src, &student.work.join(rel))?;
@@ -223,7 +344,7 @@ fn stage(
 				.unwrap_or(std::ffi::OsStr::new("subject.py"));
 			let dest = student.work.join(name);
 			std::fs::copy(file, &dest)?;
-			let sources = root.path().join("source");
+			let sources = base.join("source");
 			std::fs::create_dir(&sources)?;
 			let source = sources.join(name);
 			std::fs::copy(file, &source)?;
@@ -241,6 +362,7 @@ fn stage(
 		student,
 		subject: copied,
 		source,
+		canary,
 		root,
 	};
 	std::fs::write(&staged.payload, payload(&staged).to_string())?;
@@ -267,10 +389,20 @@ impl Finished {
 }
 
 impl PythonExecutor {
-	/// A command for one side: a cleared environment, the side's own `HOME` and `TMPDIR`,
-	/// and the kernel's limits.
-	fn command(&self, script: &str, side: &Side, deadline_secs: u64) -> Command {
-		let mut cmd = Command::new(&self.python_cmd);
+	/// A command for one side: confined when sandboxed, with a cleared environment, the
+	/// side's own `HOME` and `TMPDIR`, and the kernel's limits.
+	fn command(
+		&self,
+		script: &str,
+		side: &Side,
+		deadline_secs: u64,
+		confinement: Option<&Confinement>,
+	) -> Result<Command, String> {
+		let mut cmd = match confinement {
+			Some(c) => crate::runner::sandbox::confined(Path::new(&self.python_cmd), c)
+				.map_err(|e| format!("cannot sandbox this unit: {e}"))?,
+			None => Command::new(&self.python_cmd),
+		};
 		cmd.env_clear()
 			.env("PATH", "/usr/bin:/usr/local/bin:/opt/homebrew/bin")
 			.env("HOME", &side.home)
@@ -290,11 +422,45 @@ impl PythonExecutor {
 		{
 			// Its own process group, so anything it spawns dies with it.
 			cmd.process_group(0);
-			apply_sandbox(&mut cmd, &sandbox_for(deadline_secs));
+			apply_sandbox(&mut cmd, &sandbox_for(deadline_secs, confinement.is_some()));
 		}
 		#[cfg(not(unix))]
 		let _ = deadline_secs;
-		cmd
+		Ok(cmd)
+	}
+
+	/// Each side's confinement, when sandboxed: the interpreter, its own directories, and
+	/// what `teacher` and `student` add. Neither side makes native calls: on macOS they
+	/// would read the grader's environment.
+	fn confinements(
+		&self,
+		staged: &Staged,
+		teacher: Vec<PathBuf>,
+		student: Vec<PathBuf>,
+	) -> Result<Option<[Confinement; 2]>, String> {
+		if !self.isolation.is_sandboxed() {
+			return Ok(None);
+		}
+		let interpreter = self.interpreter()?;
+		let confine = |side: &Side, extra: Vec<PathBuf>| Confinement {
+			read: covering(interpreter.read.iter().cloned().chain(extra).collect()),
+			write: vec![side.work.clone(), side.home.clone(), side.tmp.clone()],
+			exec: interpreter.exec.clone(),
+			spawn: false,
+			no_ffi: true,
+		};
+		let mut teacher = teacher;
+		teacher.extend(
+			staged
+				.source
+				.as_ref()
+				.and_then(|s| s.parent())
+				.map(Path::to_path_buf),
+		);
+		Ok(Some([
+			confine(&staged.teacher, canonical(teacher)),
+			confine(&staged.student, canonical(student)),
+		]))
 	}
 
 	/// Run a staged unit — the teacher side, and the student side when `with_student` —
@@ -305,8 +471,21 @@ impl PythonExecutor {
 		deadline_secs: u64,
 		bounds: Bounds,
 		with_student: bool,
+		confinements: Option<[Confinement; 2]>,
 	) -> Finished {
-		let mut teacher_cmd = self.command(&TEACHER_SCRIPT, &staged.teacher, deadline_secs);
+		let [teacher_confinement, student_confinement] = match confinements {
+			Some([teacher, student]) => [Some(teacher), Some(student)],
+			None => [None, None],
+		};
+		let mut teacher_cmd = match self.command(
+			&TEACHER_SCRIPT,
+			&staged.teacher,
+			deadline_secs,
+			teacher_confinement.as_ref(),
+		) {
+			Ok(cmd) => cmd,
+			Err(e) => return Finished::spawn_failed(e),
+		};
 		teacher_cmd.arg(&staged.payload);
 		let mut student = None;
 		if with_student {
@@ -318,7 +497,15 @@ impl PythonExecutor {
 					return Finished::spawn_failed(format!("could not join the two sides: {e}"));
 				}
 			};
-			let mut cmd = self.command(&STUDENT_SCRIPT, &staged.student, deadline_secs);
+			let mut cmd = match self.command(
+				&STUDENT_SCRIPT,
+				&staged.student,
+				deadline_secs,
+				student_confinement.as_ref(),
+			) {
+				Ok(cmd) => cmd,
+				Err(e) => return Finished::spawn_failed(e),
+			};
 			cmd.stdin(std::process::Stdio::from(to_student))
 				.stdout(std::process::Stdio::from(from_student))
 				.stderr(std::process::Stdio::piped());
@@ -581,12 +768,16 @@ fn resident_bytes(_pid: u32) -> Option<u64> {
 	None
 }
 
-/// The sandbox for a unit: its CPU limit sits above its deadline, a backstop for one busy
-/// core rather than a second, shorter timeout.
-fn sandbox_for(deadline_secs: u64) -> crate::runner::sandbox::SandboxConfig {
+/// The limits for a unit: its CPU limit sits above its deadline, a backstop for one busy
+/// core rather than a second, shorter timeout. Confined, it cannot start processes, so the
+/// per-user process limit — which counts threads on Linux — is left alone.
+#[cfg(unix)]
+fn sandbox_for(deadline_secs: u64, confined: bool) -> crate::runner::sandbox::SandboxConfig {
+	let defaults = crate::runner::sandbox::SandboxConfig::default();
 	crate::runner::sandbox::SandboxConfig {
 		cpu_secs: deadline_secs.saturating_add(1),
-		..Default::default()
+		nproc: if confined { None } else { defaults.nproc },
+		..defaults
 	}
 }
 
@@ -694,15 +885,37 @@ async fn discard(staged: Staged) {
 	let _ = tokio::task::spawn_blocking(move || drop(staged.root)).await;
 }
 
-/// The teacher side's payload, common to every unit of a spec.
-fn base_payload(mode: &str) -> serde_json::Value {
+/// The teacher side's payload, common to every unit: with each side's canary when sandboxed.
+fn base_payload(mode: &str, staged: &Staged, sandboxed: bool) -> serde_json::Value {
+	let canary = sandboxed.then_some(&staged.canary);
 	serde_json::json!({
 		"mode": mode,
 		"records": RECORD_FD,
 		"limits": LIMITS,
 		"grace": GRACE_SECS,
 		"startup": STARTUP_SECS,
+		"canary": canary,
+		"student_canary": canary,
 	})
+}
+
+/// Each path that exists, resolved.
+fn canonical(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+	paths
+		.into_iter()
+		.filter_map(|p| std::fs::canonicalize(p).ok())
+		.collect()
+}
+
+/// What teacher code reads: the bundle, and the directories its modules import beside.
+fn teacher_reads(bundle: &Path, imports: &[String]) -> Vec<PathBuf> {
+	std::iter::once(bundle.to_path_buf())
+		.chain(
+			imports
+				.iter()
+				.filter_map(|i| Path::new(i).parent().map(Path::to_path_buf)),
+		)
+		.collect()
 }
 
 fn extend(mut base: serde_json::Value, more: serde_json::Value) -> serde_json::Value {
@@ -737,18 +950,31 @@ impl Executor for PythonExecutor {
 			.iter()
 			.map(|rel| (spec.dir.join(rel), rel.clone()))
 			.collect::<Vec<_>>();
-		let payload = extend(
-			base_payload("inspect"),
-			serde_json::json!({ "imports": spec.meta.imports }),
-		);
-		let staged = tokio::task::spawn_blocking(move || stage(None, &data, |_| payload))
-			.await
-			.map_err(|e| e.to_string())?
-			.map_err(|e| format!("could not stage the teacher modules: {e}"))?;
+		let imports = spec.meta.imports.clone();
+		let sandboxed = self.isolation.is_sandboxed();
+		let staged = tokio::task::spawn_blocking(move || {
+			stage(None, &data, |staged| {
+				extend(
+					base_payload("inspect", staged, sandboxed),
+					serde_json::json!({ "imports": imports }),
+				)
+			})
+		})
+		.await
+		.map_err(|e| e.to_string())?
+		.map_err(|e| format!("could not stage the teacher modules: {e}"))?;
 		let deadline = timeout_secs.saturating_add(STARTUP_SECS);
-		let finished = self
-			.run_unit(&staged, deadline, INSPECT_BOUNDS, false)
-			.await;
+		let finished = match self.confinements(
+			&staged,
+			teacher_reads(&spec.dir, &spec.meta.imports),
+			Vec::new(),
+		) {
+			Ok(confinements) => {
+				self.run_unit(&staged, deadline, INSPECT_BOUNDS, false, confinements)
+					.await
+			}
+			Err(e) => Finished::spawn_failed(e),
+		};
 		discard(staged).await;
 
 		let records = finished.records;
@@ -778,9 +1004,10 @@ impl Executor for PythonExecutor {
 		let file = plan.file.clone();
 		let payload = {
 			let plan = plan.clone();
+			let sandboxed = self.isolation.is_sandboxed();
 			move |staged: &Staged| {
 				extend(
-					base_payload("unit"),
+					base_payload("unit", staged, sandboxed),
 					serde_json::json!({
 						"role": match plan.subject {
 							Subject::Student => "student",
@@ -823,9 +1050,30 @@ impl Executor for PythonExecutor {
 		};
 		debug_assert!(staged.subject.as_ref().is_some_and(|s| s.is_file()));
 
-		let finished = self
-			.run_unit(&staged, plan.deadline_secs(), record_bounds(plan), true)
-			.await;
+		// A reference implementation is teacher code: it may read the bundle, as teacher
+		// code beside it may.
+		let student_reads = if plan.subject == Subject::Reference {
+			vec![plan.bundle.clone()]
+		} else {
+			Vec::new()
+		};
+		let finished = match self.confinements(
+			&staged,
+			teacher_reads(&plan.bundle, &plan.imports),
+			student_reads,
+		) {
+			Ok(confinements) => {
+				self.run_unit(
+					&staged,
+					plan.deadline_secs(),
+					record_bounds(plan),
+					true,
+					confinements,
+				)
+				.await
+			}
+			Err(e) => Finished::spawn_failed(e),
+		};
 		discard(staged).await;
 
 		let records = finished.records;
@@ -842,6 +1090,7 @@ impl Executor for PythonExecutor {
 			teacher_exit: finished.teacher_exit,
 			protocol_error: records.protocol_error,
 			stderr: finished.stderr,
+			sandboxed: self.isolation.is_sandboxed(),
 		}
 	}
 }
@@ -862,9 +1111,11 @@ mod tests {
 	#[test]
 	fn test_the_cpu_limit_sits_above_any_units_deadline() {
 		for deadline in [3, 45, 4 * 10 + 2, 86_400 * 4] {
-			assert!(sandbox_for(deadline).cpu_secs > deadline);
+			assert!(sandbox_for(deadline, true).cpu_secs > deadline);
 		}
-		assert_eq!(sandbox_for(u64::MAX).cpu_secs, u64::MAX, "saturates");
+		assert_eq!(sandbox_for(u64::MAX, true).cpu_secs, u64::MAX, "saturates");
+		assert_eq!(sandbox_for(3, true).nproc, None);
+		assert!(sandbox_for(3, false).nproc.is_some());
 	}
 
 	/// Each record is bounded by the largest a call can make, and the stream by the number
@@ -889,6 +1140,7 @@ mod tests {
 			imports: Vec::new(),
 			vars: Default::default(),
 			data_files: Vec::new(),
+			bundle: PathBuf::new(),
 			allowed_imports: Vec::new(),
 			load_timeout: 1,
 			setup: Vec::new(),

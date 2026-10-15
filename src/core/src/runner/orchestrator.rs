@@ -21,6 +21,9 @@ pub struct RunOptions {
 	pub concurrency: Option<usize>,
 	/// The interpreter that runs teacher Python checker scripts.
 	pub python: String,
+	/// Whether teacher checker scripts and lint tools run in the teacher's sandbox, as the
+	/// units do.
+	pub isolation: crate::runner::sandbox::Isolation,
 }
 
 impl Default for RunOptions {
@@ -29,6 +32,7 @@ impl Default for RunOptions {
 			matching: crate::matching::Config::default(),
 			concurrency: None,
 			python: "python3".into(),
+			isolation: crate::runner::sandbox::Isolation::default(),
 		}
 	}
 }

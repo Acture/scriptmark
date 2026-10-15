@@ -23,6 +23,7 @@ use crate::models::{
 };
 use crate::runner::answers::{digest, fingerprint};
 use crate::runner::frozen::{Frozen, scratch};
+use crate::runner::sandbox::Isolation;
 
 /// The layout of the file. A newer one is refused by number, never half-read.
 pub const FORMAT: u32 = 1;
@@ -121,6 +122,14 @@ pub struct BundleVersion {
 	/// The frozen inputs and answers the batch used, when it had any.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub frozen: Option<FrozenLink>,
+	/// Whether student and teacher code ran in their sandboxes. Written only when they did
+	/// not (`--no-sandbox`), so every sandboxed record keeps its bytes and its digest.
+	#[serde(default, skip_serializing_if = "is_sandboxed")]
+	pub isolation: Isolation,
+}
+
+fn is_sandboxed(isolation: &Isolation) -> bool {
+	isolation.is_sandboxed()
 }
 
 /// One test spec as it ran.
@@ -187,6 +196,8 @@ pub struct View {
 	pub reports: Vec<StudentReport>,
 	/// The items the revision scored, in declaration order; empty when unscored.
 	pub items: Vec<GradingItem>,
+	/// How the evidence was gathered: an unisolated run is shown as one.
+	pub isolation: Isolation,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -377,6 +388,7 @@ impl Record {
 			of: self.revisions.len(),
 			reports,
 			items: revision.map(|r| r.policy.items.clone()).unwrap_or_default(),
+			isolation: self.evidence.bundle.isolation,
 		})
 	}
 
@@ -659,6 +671,7 @@ pub fn bundle_version(
 	mut specs: Vec<SpecVersion>,
 	timeout: u64,
 	python: String,
+	isolation: Isolation,
 	frozen: &Frozen,
 	frozen_path: Option<PathBuf>,
 ) -> BundleVersion {
@@ -679,6 +692,7 @@ pub fn bundle_version(
 		digest: digest(&serde_json::to_vec(&(timeout, semantics)).expect("plain JSON")),
 		timeout,
 		python,
+		isolation,
 		frozen: (!frozen.is_empty()).then(|| FrozenLink {
 			path: frozen_path,
 			digest: digest(frozen.to_json().as_bytes()),
@@ -934,7 +948,14 @@ mod tests {
 			},
 			attempt_policy: AttemptPolicy::default(),
 			matching: matching::Config::default(),
-			bundle: bundle_version(Vec::new(), 10, "python3".into(), &frozen, None),
+			bundle: bundle_version(
+				Vec::new(),
+				10,
+				"python3".into(),
+				Isolation::Sandboxed,
+				&frozen,
+				None,
+			),
 			students,
 		}
 	}
