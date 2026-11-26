@@ -5,6 +5,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use scriptmark_core::runner::frozen::Frozen;
+use scriptmark_core::runner::generation::SeedSource;
 
 const SPEC: &str = r#"
 [meta]
@@ -322,4 +323,120 @@ fn test_a_batch_without_templates_does_not_keep_old_frozen_inputs() {
 	let fresh = scriptmark(dir, &args);
 	assert!(fresh.status.success(), "{}", stderr(&fresh));
 	assert!(!dir.join("out/results.cases.json").exists());
+}
+
+/// A spec whose setup value is drawn per batch: `seed = "random"`, echoed by the student
+/// and judged by a teacher checker that reads the value from the scope.
+const SETUP_SPEC: &str = r#"
+[meta]
+name = "echo"
+file = "echo.py"
+function = "echo"
+language = "python"
+imports = ["checks.py"]
+
+[[setup]]
+id = "data"
+generate = "list(int(0, 9), 4, 4)"
+seed = "random"
+
+[[cases]]
+name = "echo"
+args = ["$data"]
+check = { function = "is_data" }
+"#;
+
+fn setup_bench() -> tempfile::TempDir {
+	let dir = tempfile::tempdir().unwrap();
+	let write = |name: &str, content: &str| {
+		let path = dir.path().join(name);
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(path, content).unwrap();
+	};
+	write("tests/test_echo.toml", SETUP_SPEC);
+	write(
+		"tests/checks.py",
+		"def is_data(result, expected, data):\n    return result == data\n",
+	);
+	write(
+		"submissions/alice_echo.py",
+		"def echo(xs):\n    return xs\n",
+	);
+	dir
+}
+
+/// A generated setup value behaves like a template's inputs: the drawn seed is noted, the
+/// value is frozen beside the results, a plain regrade that would draw another is refused,
+/// `--replay` reuses it, and pasting the seed back keeps it.
+#[test]
+fn test_a_generated_setup_value_is_frozen_and_replayed() {
+	let dir = setup_bench();
+	let dir = dir.path();
+	let grade = |extra: &[&str]| {
+		let mut args = GRADE.to_vec();
+		args.push("out/results.json");
+		args.extend(extra);
+		scriptmark(dir, &args)
+	};
+
+	let first = grade(&[]);
+	assert!(first.status.success(), "{}", stderr(&first));
+	assert!(
+		stderr(&first).contains("setup 'data' in 'echo' drew seed"),
+		"{}",
+		stderr(&first)
+	);
+	let inputs = frozen(dir);
+	let made = &inputs.setup["echo"]["data"];
+	assert_eq!(made.seed_source, SeedSource::Drawn);
+
+	let again = grade(&[]);
+	assert!(!again.status.success());
+	assert!(
+		stderr(&again).contains("holds other inputs (setup 'data' in 'echo' differs)"),
+		"{}",
+		stderr(&again)
+	);
+
+	let replayed = grade(&["--replay", "out/results.cases.json"]);
+	assert!(replayed.status.success(), "{}", stderr(&replayed));
+	assert!(!stderr(&replayed).contains("drew seed"));
+	assert_eq!(frozen(dir).setup, inputs.setup);
+
+	// Writing the drawn seed back, as the note says, keeps the same value.
+	let spec = dir.join("tests/test_echo.toml");
+	let text = std::fs::read_to_string(&spec).unwrap();
+	std::fs::write(
+		&spec,
+		text.replace("seed = \"random\"", &format!("seed = {}", made.seed)),
+	)
+	.unwrap();
+	let pasted = grade(&[]);
+	assert!(pasted.status.success(), "{}", stderr(&pasted));
+	assert_eq!(frozen(dir).setup["echo"]["data"].value, made.value);
+}
+
+/// A failing generated case's drawn arguments are in the terminal failure details, as the
+/// saved results record them, so the teacher does not open the results file to find them.
+#[test]
+fn test_failure_details_show_a_generated_cases_arguments() {
+	let dir = bench();
+	let dir = dir.path();
+	// Wrong whatever is drawn: the answer is never above the high bound.
+	std::fs::write(
+		dir.join("submissions/alice_clamp.py"),
+		"def clamp(value, low, high):\n    return high + 1\n",
+	)
+	.unwrap();
+	let mut args = GRADE.to_vec();
+	args.push("out/results.json");
+	let output = scriptmark(dir, &args);
+	assert!(output.status.success(), "{}", stderr(&output));
+	let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+	assert!(
+		stdout
+			.lines()
+			.any(|line| line.contains("args:") && line.contains('[')),
+		"{stdout}"
+	);
 }

@@ -337,7 +337,7 @@ impl<'a> Validator<'a> {
 
 		let mut top = Bound::default();
 		for step in &spec.setup {
-			self.setup(step, &mut top, &format!("setup '{}'", step.id));
+			self.setup(step, &mut top, &format!("setup '{}'", step.id), true);
 		}
 		if !spec.setup.is_empty()
 			&& let Some(case) = spec.cases.iter().find(|c| c.script)
@@ -424,7 +424,12 @@ impl<'a> Validator<'a> {
 		self.memory(scenario.memory_mb, scenario.space.as_deref(), &at);
 		let mut bound = top.clone();
 		for step in &scenario.setup {
-			self.setup(step, &mut bound, &format!("{at} setup '{}'", step.id));
+			self.setup(
+				step,
+				&mut bound,
+				&format!("{at} setup '{}'", step.id),
+				false,
+			);
 		}
 		for step in &scenario.steps {
 			let step_at = format!("{at} step '{}'", step.name);
@@ -444,7 +449,7 @@ impl<'a> Validator<'a> {
 		}
 	}
 
-	fn setup(&mut self, step: &SetupStep, bound: &mut Bound, at: &str) {
+	fn setup(&mut self, step: &SetupStep, bound: &mut Bound, at: &str, top_level: bool) {
 		if step.id.trim().is_empty() {
 			self.problem(at, "needs an id");
 		}
@@ -463,9 +468,19 @@ impl<'a> Validator<'a> {
 		if step.file.is_some() {
 			self.problem(
 				at,
-				"setup.file is not supported: put fixed data in [vars], data_files or a teacher module, and generate inputs with [cases.parametrize]",
+				"setup.file is not supported: put fixed data in [vars], data_files or a teacher module, or draw it once per batch with generate = \"<rule>\"",
 			);
 			return;
+		}
+		if step.generate.is_some() {
+			self.generated_setup(step, bound, at, top_level);
+			return;
+		}
+		if step.seed.is_some() {
+			self.problem(
+				at,
+				"seed seeds a generated value: it belongs beside generate = \"<rule>\"",
+			);
 		}
 		self.timeout(step.timeout, at);
 		let targets = [
@@ -508,6 +523,53 @@ impl<'a> Validator<'a> {
 			}
 		}
 		bound.bind(&step.id, &target);
+	}
+
+	/// A step that draws its value from a rule, once per batch: no call runs, so nothing a
+	/// call needs is allowed beside it. The value is teacher-held, like a teacher call's.
+	fn generated_setup(&mut self, step: &SetupStep, bound: &mut Bound, at: &str, top_level: bool) {
+		if !top_level {
+			self.problem(
+				at,
+				"a value is drawn once per batch: declare it in top-level [[setup]], which every scenario can name",
+			);
+		}
+		if step.function.is_some()
+			|| step.method.is_some()
+			|| step.object.is_some()
+			|| step.teacher.is_some()
+		{
+			self.problem(
+				at,
+				"generate draws the value itself: it replaces function, method (with object) and teacher",
+			);
+		}
+		if !step.args.is_empty() {
+			self.problem(
+				at,
+				"a generated value takes no args: the rule is the whole input",
+			);
+		}
+		if step.timeout.is_some() {
+			self.problem(at, "a generated value runs no call: remove timeout");
+		}
+		if let Some(rule) = &step.generate {
+			match Rule::parse(rule) {
+				Ok(parsed) => {
+					let size = parsed.max_size();
+					if size > MAX_GENERATED {
+						self.problem(
+							at,
+							format!(
+								"its draw could generate up to {size} values or characters, past the {MAX_GENERATED} a generated value may: lower the rule's lengths"
+							),
+						);
+					}
+				}
+				Err(e) => self.problem(at, e.to_string()),
+			}
+		}
+		bound.all.insert(step.id.clone());
 	}
 
 	fn case(&mut self, case: &TestCase, bound: &Bound, is_step: bool, at: &str) {
@@ -1711,6 +1773,57 @@ expect = 150
 		refused(
 			"[[setup]]\nid = \"d\"\nfile = \"gen.py\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
 			"setup.file is not supported",
+		);
+	}
+
+	#[test]
+	fn test_generated_setup_is_validated() {
+		// A generated value, with and without a seed, named by a case.
+		for body in [
+			"[[setup]]\nid = \"data\"\ngenerate = \"list(int(0, 9), 3, 3)\"\n[[cases]]\nname = \"x\"\nargs = [\"$data\"]\ncheck = \"sorted\"\n",
+			"[[setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\nseed = \"random\"\n[[cases]]\nname = \"x\"\nargs = [\"$data\"]\ncheck = { rhai = \"result != ()\" }\n",
+			"[[setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\nseed = 7\n[[cases]]\nname = \"x\"\nargs = [\"$data\"]\ncheck = { rhai = \"result != ()\" }\n",
+		] {
+			assert_eq!(problems(body), Vec::<String>::new(), "{body}");
+		}
+
+		refused(
+			"[[setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\nfunction = \"load\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"it replaces function, method (with object) and teacher",
+		);
+		refused(
+			"[[setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\nargs = [1]\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"a generated value takes no args",
+		);
+		refused(
+			"[[setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\ntimeout = 5\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"a generated value runs no call: remove timeout",
+		);
+		refused(
+			"[[setup]]\nid = \"data\"\nfunction = \"load\"\nseed = 7\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"seed seeds a generated value",
+		);
+		refused(
+			"[[setup]]\nid = \"data\"\ngenerate = \"int(5, 1)\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"greater than",
+		);
+		refused(
+			"[[setup]]\nid = \"data\"\ngenerate = \"list(int(0, 9), 0, 2000000)\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"past the 1000000 a generated value may",
+		);
+		refused(
+			"[[setup]]\nid = \"data\"\ngenerate = \"nonsense(1)\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"unknown rule",
+		);
+		// A value is batch-wide: a scenario cannot draw its own.
+		refused(
+			"[[scenarios]]\nname = \"s\"\n[[scenarios.setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\n[[scenarios.steps]]\nname = \"x\"\nargs = [\"$data\"]\ncheck = \"sorted\"\n",
+			"declare it in top-level [[setup]]",
+		);
+		// The id collides like any setup id.
+		refused(
+			"[vars]\ndata = 1\n[[setup]]\nid = \"data\"\ngenerate = \"int(0, 9)\"\n[[cases]]\nname = \"x\"\nexpect = 1\n",
+			"id 'data' is already bound",
 		);
 	}
 

@@ -48,6 +48,7 @@ pub async fn resolve_oracle<E: Executor>(
 			memory_mb: 0,
 			memory_basis: None,
 			load_timeout: timeout_secs,
+			bound: Default::default(),
 			setup: Vec::new(),
 			steps: vec![CallPlan {
 				target: Target::Function { name: name.clone() },

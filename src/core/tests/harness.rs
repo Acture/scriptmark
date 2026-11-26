@@ -58,6 +58,7 @@ fn unit(file: &Path) -> UnitPlan {
 		memory_basis: None,
 		allowed_imports: Vec::new(),
 		load_timeout: 5,
+		bound: BTreeMap::new(),
 		setup: Vec::new(),
 		steps: Vec::new(),
 	}

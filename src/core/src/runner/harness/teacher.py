@@ -781,6 +781,9 @@ def main():
 		finish()
 	context.update(exports)
 	context.update(PAYLOAD.get("vars", {}))
+	# Setup data drawn once per batch: in scope like a teacher call's result, before any
+	# call runs, and never on the student side unless a call is handed it by value.
+	context.update(PAYLOAD.get("bound", {}))
 	if PAYLOAD.get("source"):
 		with open(PAYLOAD["source"], encoding="utf-8", errors="replace") as fh:
 			SOURCE = fh.read()

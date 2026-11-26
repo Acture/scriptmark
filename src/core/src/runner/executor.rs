@@ -67,6 +67,10 @@ pub struct UnitPlan {
 	pub memory_basis: Option<String>,
 	pub allowed_imports: Vec<String>,
 	pub load_timeout: u64,
+	/// Values in scope before any call runs, by id: setup data drawn once per batch.
+	/// Teacher-held, like a teacher call's result; a student call naming one receives it
+	/// by value.
+	pub bound: BTreeMap<String, Value>,
 	pub setup: Vec<CallPlan>,
 	pub steps: Vec<CallPlan>,
 }

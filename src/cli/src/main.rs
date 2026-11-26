@@ -755,6 +755,18 @@ async fn run_bundles(
 				}
 			}
 		}
+		for (spec, setups) in &inputs.setup {
+			for (id, made) in setups {
+				if made.seed_source == SeedSource::Drawn {
+					eprintln!(
+						"  note: setup '{id}' in '{spec}' drew seed {}. Write `seed = {}` in its [[setup]] to keep these inputs, or, once this run is done, grade with --replay {}",
+						made.seed,
+						made.seed,
+						beside.display()
+					);
+				}
+			}
+		}
 	}
 	run_options.python = executor.python_cmd().to_string();
 	let python = run_options.python.clone();

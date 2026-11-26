@@ -65,6 +65,21 @@ pub struct Generated {
 	pub cases: Vec<Concrete>,
 }
 
+/// A setup step's generated value, and what it takes to make it again.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GeneratedSetup {
+	/// The `GENERATOR_VERSION` that drew this value.
+	pub generator: u32,
+	/// The rule, as the spec wrote it.
+	pub rule: String,
+	/// The seed the draw used: a rule is a distribution, so there always is one.
+	pub seed: u64,
+	pub seed_source: SeedSource,
+	/// The value every student is given.
+	pub value: Value,
+}
+
 /// The name a concrete case is reported under.
 pub fn concrete_name(case: &str, origin: Origin) -> String {
 	match origin {
@@ -91,6 +106,31 @@ pub fn seed_for(inputs: &Inputs, draw: DrawSeed) -> Result<Option<(u64, SeedSour
 		Some(Seed::Fixed(seed)) => (seed, SeedSource::Declared),
 		Some(Seed::Random) => (draw()?, SeedSource::Drawn),
 	}))
+}
+
+/// The seed a generated setup value draws with. A rule is a distribution, so there is
+/// always a draw, and always a seed.
+pub fn setup_seed(seed: Option<Seed>, draw: DrawSeed) -> Result<(u64, SeedSource), String> {
+	Ok(match seed {
+		None => (0, SeedSource::Default),
+		Some(Seed::Fixed(seed)) => (seed, SeedSource::Declared),
+		Some(Seed::Random) => (draw()?, SeedSource::Drawn),
+	})
+}
+
+/// A setup step's value: one draw from its rule, on stream 0 of the seed. Like
+/// `generate`, pure in its seed.
+pub fn generate_setup(rule: &str, seed: (u64, SeedSource)) -> Result<GeneratedSetup, String> {
+	let parsed = Rule::parse(rule).map_err(|e| e.to_string())?;
+	let mut rng = ChaCha8Rng::seed_from_u64(seed.0);
+	let value = parsed.draw(&mut rng);
+	Ok(GeneratedSetup {
+		generator: GENERATOR_VERSION,
+		rule: rule.to_string(),
+		seed: seed.0,
+		seed_source: seed.1,
+		value,
+	})
 }
 
 /// The first template, as `(spec, case)`, whose seed would be drawn: `seed = "random"` on
@@ -374,6 +414,60 @@ mod tests {
 		for _ in 0..100 {
 			assert!(os_seed().unwrap() < 1 << 53);
 		}
+	}
+
+	#[test]
+	fn test_a_setup_seed_is_chosen_like_a_templates() {
+		fn never() -> Result<u64, String> {
+			panic!("no seed should be drawn")
+		}
+		fn four() -> Result<u64, String> {
+			Ok(4)
+		}
+		fn broken() -> Result<u64, String> {
+			Err("no entropy".into())
+		}
+		assert_eq!(setup_seed(None, never), Ok((0, SeedSource::Default)));
+		assert_eq!(
+			setup_seed(Some(Seed::Fixed(7)), never),
+			Ok((7, SeedSource::Declared))
+		);
+		assert_eq!(
+			setup_seed(Some(Seed::Random), four),
+			Ok((4, SeedSource::Drawn))
+		);
+		assert_eq!(
+			setup_seed(Some(Seed::Random), broken),
+			Err("no entropy".into())
+		);
+	}
+
+	/// Pins seed → value for one setup rule. A change here changes every seeded setup
+	/// value: bump `GENERATOR_VERSION` and update this together.
+	#[test]
+	fn test_golden_generate_setup_v1() {
+		let made = generate_setup("list(int(0, 9), 3, 3)", (42, SeedSource::Declared)).unwrap();
+		assert_eq!(made.generator, GENERATOR_VERSION);
+		assert_eq!((made.seed, made.seed_source), (42, SeedSource::Declared));
+		assert_eq!(made.rule, "list(int(0, 9), 3, 3)");
+		assert_eq!(made.value, json!([2, 0, 6]));
+		assert_eq!(
+			generate_setup("list(int(0, 9), 3, 3)", (42, SeedSource::Declared)).unwrap(),
+			made,
+			"the same seed draws the same value"
+		);
+		assert_ne!(
+			generate_setup("list(int(0, 9), 3, 3)", (43, SeedSource::Declared))
+				.unwrap()
+				.value,
+			made.value
+		);
+	}
+
+	#[test]
+	fn test_generate_setup_a_bad_rule_is_an_error_not_a_value() {
+		let e = generate_setup("int(5, 1)", (0, SeedSource::Default)).unwrap_err();
+		assert!(e.contains("greater than"), "{e}");
 	}
 
 	/// Pins seed → streams → call order → names. A change here changes the inputs of every

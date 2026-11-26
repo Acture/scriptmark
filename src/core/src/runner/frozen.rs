@@ -1,7 +1,9 @@
-//! Frozen inputs: every template's concrete cases for one batch, written beside its results
-//! so that a later run — a regrade, late submissions — can use exactly the same inputs.
+//! Frozen inputs: every template's concrete cases and every generated setup value for one
+//! batch, written beside its results so that a later run — a regrade, late submissions —
+//! can use exactly the same inputs.
 //!
 //! Format 2 also freezes oracle answers and the sources/configuration that produced them.
+//! Format 3 adds the generated setup values.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -10,16 +12,16 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::models::{Inputs, Seed};
+use crate::models::{Inputs, Seed, SetupStep};
 use crate::runner::answers::FrozenAnswers;
 use crate::runner::generation::{
-	DrawSeed, Generated, MAX_COUNT, Origin, concrete_name, origins, os_seed,
+	DrawSeed, Generated, GeneratedSetup, MAX_COUNT, Origin, concrete_name, origins, os_seed,
 };
 use crate::runner::prepare::Bundle;
 use crate::spec_loader::{contains_null, plural, refs};
 
 /// The layout of the file. A newer one is refused by name, never half-read.
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 
 /// Every template's inputs, by spec name, then template name.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,6 +31,8 @@ pub struct Frozen {
 	/// The build that wrote the file.
 	pub scriptmark: String,
 	pub specs: BTreeMap<String, BTreeMap<String, Generated>>,
+	/// Each spec's generated setup values, by setup id.
+	pub setup: BTreeMap<String, BTreeMap<String, GeneratedSetup>>,
 	pub answers: BTreeMap<String, FrozenAnswers>,
 }
 
@@ -66,6 +70,11 @@ impl Frozen {
 				.filter(|b| !b.generated.is_empty())
 				.map(|b| (b.spec.meta.name.clone(), b.generated.clone()))
 				.collect(),
+			setup: bundles
+				.iter()
+				.filter(|b| !b.setup.is_empty())
+				.map(|b| (b.spec.meta.name.clone(), b.setup.clone()))
+				.collect(),
 			answers: bundles
 				.iter()
 				.filter_map(|b| b.answers.clone().map(|a| (b.spec.meta.name.clone(), a)))
@@ -75,7 +84,9 @@ impl Frozen {
 
 	/// Whether there are neither generated inputs nor computed answers to preserve.
 	pub fn is_empty(&self) -> bool {
-		self.specs.values().all(BTreeMap::is_empty) && self.answers.is_empty()
+		self.specs.values().all(BTreeMap::is_empty)
+			&& self.setup.values().all(BTreeMap::is_empty)
+			&& self.answers.is_empty()
 	}
 
 	pub fn to_json(&self) -> String {
@@ -94,7 +105,7 @@ impl Frozen {
 			None => Err("it has no format".into()),
 			Some(FORMAT) => serde_json::from_str(text).map_err(|e| e.to_string()),
 			Some(other) => Err(format!(
-				"it is format {other}, and this build reads format {FORMAT}; prepare a fresh bundle to freeze both inputs and answers"
+				"it is format {other}, and this build reads format {FORMAT}; prepare a fresh bundle to freeze this batch's inputs, generated setup and answers"
 			)),
 		}
 	}
@@ -114,10 +125,11 @@ impl Frozen {
 		Ok(())
 	}
 
-	/// The first changed template or answer contract, or `None`. The inputs
-	/// are the rows a student is given: how the seed was spelled or chosen, which generator
-	/// drew the rows and which build wrote the file do not make the same rows other inputs.
-	/// Computed answers additionally require an unchanged source/configuration contract.
+	/// The first changed template, generated setup value or answer contract, or `None`. The
+	/// inputs are the rows a student is given: how the seed was spelled or chosen, which
+	/// generator drew them and which build wrote the file do not make the same rows other
+	/// inputs. Computed answers additionally require an unchanged source/configuration
+	/// contract.
 	pub fn first_difference(&self, other: &Frozen) -> Option<String> {
 		let specs: BTreeSet<&String> = self.specs.keys().chain(other.specs.keys()).collect();
 		for spec in specs {
@@ -128,6 +140,18 @@ impl Frozen {
 			let differs = |c: &&String| a.get(*c).map(|g| &g.cases) != b.get(*c).map(|g| &g.cases);
 			if let Some(case) = cases.into_iter().find(differs) {
 				return Some(format!("case '{case}' in '{spec}' differs"));
+			}
+		}
+		let setups: BTreeSet<&String> = self.setup.keys().chain(other.setup.keys()).collect();
+		for spec in setups {
+			let (Some(a), Some(b)) = (self.setup.get(spec), other.setup.get(spec)) else {
+				return Some(format!("spec '{spec}' differs"));
+			};
+			let ids: BTreeSet<&String> = a.keys().chain(b.keys()).collect();
+			let differs =
+				|id: &&String| a.get(*id).map(|g| &g.value) != b.get(*id).map(|g| &g.value);
+			if let Some(id) = ids.into_iter().find(differs) {
+				return Some(format!("setup '{id}' in '{spec}' differs"));
 			}
 		}
 		let answers: BTreeSet<&String> = self.answers.keys().chain(other.answers.keys()).collect();
@@ -248,6 +272,53 @@ fn shown_args(inputs: &Inputs) -> String {
 	format!("[{}]", args.join(", "))
 }
 
+/// A frozen setup value, checked against the spec's step and against itself, and taken as
+/// it is — its generator version and seed included.
+pub fn replay_setup_entry(
+	step: &SetupStep,
+	entry: &GeneratedSetup,
+) -> Result<GeneratedSetup, Vec<String>> {
+	const RESTORE: &str = "restore it, or draw a new value instead of replaying this";
+	let mut problems = Vec::new();
+	if step.generate.as_ref() != Some(&entry.rule) {
+		problems.push(format!(
+			"the spec's generate is {}; the frozen value was drawn with {:?}: {RESTORE}",
+			shown_rule(step.generate.as_deref()),
+			entry.rule
+		));
+	}
+	// "random" accepts whichever seed was drawn; an omitted one means 0.
+	let wanted = match step.seed {
+		Some(Seed::Random) => None,
+		Some(Seed::Fixed(n)) => Some((n, false)),
+		None => Some((0, true)),
+	};
+	if let Some((n, by_default)) = wanted.filter(|(n, _)| *n != entry.seed) {
+		problems.push(format!(
+			"the spec says seed = {n}{}; the frozen value was drawn with seed {}: {RESTORE}",
+			if by_default { " (by default)" } else { "" },
+			entry.seed
+		));
+	}
+	if contains_null(&entry.value) {
+		problems.push("the frozen value holds null, which no test can pass".into());
+	}
+	if let Some(name) = refs(std::slice::from_ref(&entry.value)).first() {
+		problems.push(format!(
+			"the frozen value holds '${name}', a reference: frozen inputs are values, so write '$${name}' for the literal text"
+		));
+	}
+	if problems.is_empty() {
+		Ok(entry.clone())
+	} else {
+		Err(problems)
+	}
+}
+
+fn shown_rule(rule: Option<&str>) -> String {
+	rule.map_or("none".to_string(), |r| format!("{r:?}"))
+}
+
 /// What an entry says of itself must hold: its rows are exactly its samples and draws, in
 /// order and by name, each a full row of plain values.
 fn consistency(case: &str, entry: &Generated) -> Vec<String> {
@@ -344,6 +415,7 @@ mod tests {
 		Frozen {
 			format: FORMAT,
 			scriptmark: "test".into(),
+			setup: BTreeMap::new(),
 			answers: BTreeMap::new(),
 			specs: BTreeMap::from([(
 				"spec".to_string(),
@@ -413,11 +485,11 @@ mod tests {
 			&frozen(made(&inputs(1, None), (0, SeedSource::Default))).to_json(),
 		)
 		.unwrap();
-		value["format"] = json!(3);
+		value["format"] = json!(4);
 		value["specs"]["spec"]["clamp"]["cases"][0]["answer"] = json!(5);
 		let e = Frozen::from_json(&value.to_string()).unwrap_err();
 		assert!(
-			e.contains("format 3") && e.contains("reads format 2"),
+			e.contains("format 4") && e.contains("reads format 3"),
 			"{e}"
 		);
 		let e = Frozen::from_json("{\"specs\": {}}").unwrap_err();
@@ -523,11 +595,11 @@ mod tests {
 		);
 	}
 
-	/// Format 2 keeps the inputs' shape and adds a mandatory answer map.
+	/// Format 3 keeps the inputs' and answers' shape and adds the generated setup values.
 	#[test]
-	fn test_format_2_reads_as_written_and_refuses_old_input_only_files() {
+	fn test_format_3_reads_as_written_and_refuses_older_files() {
 		let text = r#"{
-			"format": 2,
+			"format": 3,
 			"scriptmark": "0.3.0",
 			"answers": {},
 			"specs": { "clamp": { "clamp": {
@@ -543,6 +615,13 @@ mod tests {
 					{ "name": "clamp [sample 0]", "origin": {"sample": 0}, "args": [-30, -30] },
 					{ "name": "clamp [0]", "origin": {"draw": 0}, "args": [75, -31] }
 				]
+			} } },
+			"setup": { "clamp": { "data": {
+				"generator": 1,
+				"rule": "list(int(0, 9), 3, 3)",
+				"seed": 7,
+				"seed_source": "declared",
+				"value": [4, 0, 7]
 			} } }
 		}"#;
 		let f = Frozen::from_json(text).unwrap_or_else(|e| panic!("{e}"));
@@ -566,14 +645,21 @@ mod tests {
 			crate::runner::generation::Origin::Draw(0)
 		);
 		assert_eq!(entry.cases[1].args, [json!(75), json!(-31)]);
+		let data = &f.setup["clamp"]["data"];
+		assert_eq!((data.generator, data.seed), (1, 7));
+		assert_eq!(data.seed_source, SeedSource::Declared);
+		assert_eq!(data.value, json!([4, 0, 7]));
 		let written: Value = serde_json::from_str(&f.to_json()).unwrap();
 		assert_eq!(written, serde_json::from_str::<Value>(text).unwrap());
-		let old = text.replace("\"format\": 2", "\"format\": 1");
-		assert!(
-			Frozen::from_json(&old)
-				.unwrap_err()
-				.contains("prepare a fresh bundle")
-		);
+		for old in [1, 2] {
+			let old = text.replace("\"format\": 3", &format!("\"format\": {old}"));
+			assert!(
+				Frozen::from_json(&old)
+					.unwrap_err()
+					.contains("prepare a fresh bundle"),
+				"format {old}"
+			);
+		}
 	}
 
 	#[cfg(unix)]
@@ -664,5 +750,112 @@ mod tests {
 		let mut reference = entry.clone();
 		reference.cases[4].args[1] = json!(["$LIMIT"]);
 		refused(&spec, &reference, "'$LIMIT', a reference");
+	}
+
+	fn setup_step(rule: Option<&str>, seed: Option<Seed>) -> SetupStep {
+		SetupStep {
+			id: "data".into(),
+			generate: rule.map(String::from),
+			seed,
+			..Default::default()
+		}
+	}
+
+	const RULE: &str = "list(int(0, 9), 3, 3)";
+
+	#[test]
+	fn test_replay_setup_takes_the_entry_as_it_is() {
+		let step = setup_step(Some(RULE), Some(Seed::Random));
+		let mut entry = crate::runner::generation::generate_setup(RULE, (81234, SeedSource::Drawn))
+			.unwrap_or_else(|e| panic!("{e}"));
+		// A value no rule could draw, from a generator this build is not: taken as it is.
+		entry.generator = 999;
+		entry.value = json!([5000, 5000]);
+		assert_eq!(replay_setup_entry(&step, &entry), Ok(entry.clone()));
+		// Pasting the drawn seed back into the spec still replays it.
+		let pasted = setup_step(Some(RULE), Some(Seed::Fixed(81234)));
+		assert_eq!(replay_setup_entry(&pasted, &entry), Ok(entry.clone()));
+	}
+
+	#[test]
+	fn test_replay_setup_refuses_what_it_cannot_honour() {
+		let entry = crate::runner::generation::generate_setup(RULE, (0, SeedSource::Default))
+			.unwrap_or_else(|e| panic!("{e}"));
+		let refused = |step: &SetupStep, entry: &GeneratedSetup, needle: &str| {
+			let problems = replay_setup_entry(step, entry).unwrap_err();
+			assert!(
+				problems.iter().any(|p| p.contains(needle)),
+				"expected {needle:?} in {problems:?}"
+			);
+		};
+
+		refused(
+			&setup_step(Some("list(int(0, 9), 4, 4)"), None),
+			&entry,
+			"the spec's generate is \"list(int(0, 9), 4, 4)\"",
+		);
+		refused(
+			&setup_step(Some(RULE), Some(Seed::Fixed(5))),
+			&entry,
+			"the spec says seed = 5; the frozen value was drawn with seed 0",
+		);
+		let drawn = crate::runner::generation::generate_setup(RULE, (9, SeedSource::Drawn))
+			.unwrap_or_else(|e| panic!("{e}"));
+		refused(
+			&setup_step(Some(RULE), None),
+			&drawn,
+			"the spec says seed = 0 (by default); the frozen value was drawn with seed 9",
+		);
+		let mut null = entry.clone();
+		null.value = json!([1, null]);
+		refused(&setup_step(Some(RULE), None), &null, "null");
+		let mut reference = entry.clone();
+		reference.value = json!(["$LIMIT"]);
+		refused(
+			&setup_step(Some(RULE), None),
+			&reference,
+			"'$LIMIT', a reference",
+		);
+	}
+
+	/// As for templates, the value is the input: how its seed was spelled or chosen, and
+	/// which generator drew it, do not make the same value other inputs.
+	#[test]
+	fn test_the_first_difference_names_the_setup() {
+		let mut a = frozen(made(&inputs(1, None), (0, SeedSource::Default)));
+		let entry =
+			crate::runner::generation::generate_setup(RULE, (0, SeedSource::Default)).unwrap();
+		a.setup
+			.insert("spec".into(), BTreeMap::from([("data".to_string(), entry)]));
+		assert_eq!(a.first_difference(&a), None);
+
+		let mut b = a.clone();
+		let mut respelled = b.setup["spec"]["data"].clone();
+		respelled.seed_source = SeedSource::Declared;
+		respelled.generator = 999;
+		b.setup
+			.get_mut("spec")
+			.unwrap()
+			.insert("data".into(), respelled);
+		assert_eq!(a.first_difference(&b), None);
+
+		let mut c = a.clone();
+		let other = crate::runner::generation::generate_setup(RULE, (7, SeedSource::Declared))
+			.unwrap_or_else(|e| panic!("{e}"));
+		c.setup
+			.get_mut("spec")
+			.unwrap()
+			.insert("data".into(), other);
+		assert_eq!(
+			a.first_difference(&c).as_deref(),
+			Some("setup 'data' in 'spec' differs")
+		);
+
+		let mut d = a.clone();
+		d.setup.clear();
+		assert_eq!(
+			a.first_difference(&d).as_deref(),
+			Some("spec 'spec' differs")
+		);
 	}
 }

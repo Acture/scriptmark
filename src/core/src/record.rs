@@ -943,6 +943,7 @@ mod tests {
 			format: crate::runner::frozen::FORMAT,
 			scriptmark: "test".into(),
 			specs: BTreeMap::new(),
+			setup: BTreeMap::new(),
 			answers: BTreeMap::new(),
 		};
 		Evidence {

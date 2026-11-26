@@ -1364,6 +1364,7 @@ impl PythonExecutor {
 			memory_basis: None,
 			allowed_imports: given.allowed_imports.clone(),
 			load_timeout: given.load_timeout.max(STARTUP_SECS),
+			bound: Default::default(),
 			setup: Vec::new(),
 			steps: vec![crate::runner::executor::CallPlan {
 				target: crate::models::Target::Function {
@@ -1436,6 +1437,7 @@ impl PythonExecutor {
 						"allowed_imports": plan.allowed_imports,
 						"load_timeout": plan.load_timeout,
 						"functions": plan.functions,
+						"bound": plan.bound,
 						"setup": plan.setup,
 						"steps": plan.steps,
 					}),
@@ -1582,6 +1584,7 @@ mod tests {
 			memory_basis: None,
 			allowed_imports: Vec::new(),
 			load_timeout: 1,
+			bound: Default::default(),
 			setup: Vec::new(),
 			steps,
 		};
