@@ -90,6 +90,13 @@ pub struct Inputs {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub assignment: Option<PathBuf>,
 	pub source: Source,
+	/// What `source` and the assignment file resolved to when the batch ran: the
+	/// submission paths actually read and where the roster came from. Provenance only —
+	/// `rescore` rebuilds its input from `source` and the assignment file as before, and
+	/// nothing here is compared. Absent from a record made before it was kept, whose bytes
+	/// and digest it leaves alone.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub resolved: Option<ResolvedSource>,
 }
 
 /// Where the submissions came from.
@@ -104,6 +111,37 @@ pub enum Source {
 	Canvas {
 		bundle: PathBuf,
 	},
+}
+
+/// What a local batch's inputs resolved to: the command line as overridden by
+/// `[input]` in the assignment file, with every configured path made absolute against
+/// the assignment file's directory. Kept so the record can say what it was graded from
+/// even when the command line named none of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResolvedSource {
+	/// The submission paths the batch scanned, or the files `input.students` listed.
+	pub submissions: Vec<PathBuf>,
+	/// Where the roster came from, when the batch had one.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub roster: Option<RosterSource>,
+}
+
+/// Where a batch's roster came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RosterSource {
+	/// A CSV or XLSX table, read with the layout `[input.roster]` declared.
+	Table {
+		path: PathBuf,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		sheet: Option<String>,
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		header_row: Option<usize>,
+	},
+	/// The class is the assignment file's own `[[input.students]]` list, whose path
+	/// `Inputs::assignment` already keeps.
+	Inline,
 }
 
 /// The test bundle a batch ran.
@@ -959,6 +997,7 @@ mod tests {
 					dirs: vec!["/hw/submissions".into()],
 					roster: None,
 				},
+				resolved: None,
 			},
 			attempt_policy: AttemptPolicy::default(),
 			matching: matching::Config::default(),
@@ -1003,6 +1042,46 @@ mod tests {
 		assert_eq!(read.digest, record.digest);
 		assert_eq!(read.revisions, record.revisions);
 		assert_eq!(read.to_json(), record.to_json());
+	}
+
+	#[test]
+	fn resolved_inputs_are_provenance_and_records_from_before_them_still_verify() {
+		let mut graded = evidence(vec![report("alice", 1, 0)]);
+		graded.inputs.resolved = Some(ResolvedSource {
+			submissions: vec!["/hw/submissions".into()],
+			roster: Some(RosterSource::Table {
+				path: "/hw/roster.xlsx".into(),
+				sheet: Some("学生".into()),
+				header_row: Some(2),
+			}),
+		});
+		let with_table = Record::new(graded).unwrap();
+		let read = Record::from_json(&with_table.to_json()).unwrap();
+		assert_eq!(
+			read.evidence.inputs.resolved,
+			with_table.evidence.inputs.resolved
+		);
+		assert!(with_table.to_json().contains("\"kind\": \"table\""));
+
+		let mut listed = evidence(vec![report("alice", 1, 0)]);
+		listed.inputs.resolved = Some(ResolvedSource {
+			submissions: vec!["/hw/alice_work.py".into()],
+			roster: Some(RosterSource::Inline),
+		});
+		let with_inline = Record::new(listed).unwrap();
+		let read = Record::from_json(&with_inline.to_json()).unwrap();
+		assert_eq!(
+			read.evidence.inputs.resolved,
+			with_inline.evidence.inputs.resolved
+		);
+
+		// A record made before `resolved` was kept has no such key and hashes to the same
+		// digest it always did: every other test here reads one, this one says so.
+		let old = record().to_json();
+		assert!(!old.contains("\"resolved\""));
+		let read = Record::from_json(&old).unwrap();
+		assert_eq!(read.evidence.inputs.resolved, None);
+		assert_eq!(read.digest, record().digest);
 	}
 
 	#[test]

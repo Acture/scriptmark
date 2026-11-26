@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use crate::grading::{self, round_half_away};
 use crate::models::{GradeOutcome, GradingItem, ItemOutcome, Reason, StudentReport};
-use crate::record::{Record, Source};
+use crate::record::{Record, RosterSource, Source};
 
 /// A snake_case word for a serialisable value, as the JSON results write it.
 pub fn word<T: serde::Serialize>(value: &T) -> String {
@@ -461,12 +461,47 @@ pub fn about(record: &Record, n: u32) -> Result<Table> {
 	];
 	match &evidence.inputs.source {
 		Source::Local { dirs, roster } => {
-			let dirs: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
-			rows.push(("submissions".into(), Cell::text(dirs.join("\n"))));
-			rows.push((
-				"roster".into(),
-				Cell::maybe(roster.as_ref().map(|p| p.display().to_string())),
-			));
+			// The resolved source says what was actually read; a record from before it
+			// was kept can only show what the command line named.
+			let resolved = evidence.inputs.resolved.as_ref();
+			let submissions: Vec<String> = match resolved {
+				Some(resolved) => resolved
+					.submissions
+					.iter()
+					.map(|d| d.display().to_string())
+					.collect(),
+				None => dirs.iter().map(|d| d.display().to_string()).collect(),
+			};
+			rows.push(("submissions".into(), Cell::text(submissions.join("\n"))));
+			let roster = match resolved.and_then(|r| r.roster.as_ref()) {
+				Some(RosterSource::Table {
+					path,
+					sheet,
+					header_row,
+				}) => {
+					let mut layout = Vec::new();
+					if let Some(sheet) = sheet {
+						layout.push(format!("sheet '{sheet}'"));
+					}
+					if let Some(row) = header_row {
+						layout.push(format!("header row {row}"));
+					}
+					let mut text = path.display().to_string();
+					if !layout.is_empty() {
+						text = format!("{text} ({})", layout.join(", "));
+					}
+					Cell::text(text)
+				}
+				Some(RosterSource::Inline) => {
+					let at = evidence.inputs.assignment.as_ref().map_or_else(
+						|| "assignment.toml".to_string(),
+						|p| p.display().to_string(),
+					);
+					Cell::text(format!("[[input.students]] in {at}"))
+				}
+				None => Cell::maybe(roster.as_ref().map(|p| p.display().to_string())),
+			};
+			rows.push(("roster".into(), roster));
 		}
 		Source::Canvas { bundle } => rows.push(("canvas_bundle".into(), path(bundle))),
 	}
@@ -801,5 +836,112 @@ mod tests {
 			Some(&Data::String("\u{1b}[31m=1+1\0".into()))
 		);
 		assert!(matches!(range.get((1, 4)), None | Some(Data::Empty)));
+	}
+
+	#[test]
+	fn test_about_shows_what_the_input_resolved_to_and_falls_back_to_the_command_line() {
+		use crate::grading::Policy;
+		use crate::models::GradingConfig;
+		use crate::record::{
+			AssignmentId, Evidence, Inputs, ResolvedSource, RosterSource, Source, bundle_version,
+		};
+		use crate::runner::frozen::Frozen;
+		use crate::runner::sandbox::Isolation;
+
+		let record = |resolved: Option<ResolvedSource>| {
+			let frozen = Frozen {
+				format: crate::runner::frozen::FORMAT,
+				scriptmark: "test".into(),
+				specs: BTreeMap::new(),
+				answers: BTreeMap::new(),
+			};
+			let mut record = Record::new(Evidence {
+				scriptmark: "test".into(),
+				assignment: AssignmentId {
+					name: "hw".into(),
+					canvas_course_id: None,
+					canvas_assignment_id: None,
+				},
+				inputs: Inputs {
+					tests: "/hw/tests".into(),
+					assignment: Some("/hw/assignment.toml".into()),
+					source: Source::Local {
+						dirs: vec!["/cli/submissions".into()],
+						roster: Some("/cli/roster.csv".into()),
+					},
+					resolved,
+				},
+				attempt_policy: Default::default(),
+				matching: crate::matching::Config::default(),
+				bundle: bundle_version(
+					vec![],
+					10,
+					"python3".into(),
+					Isolation::Sandboxed,
+					&frozen,
+					None,
+				),
+				students: vec![{
+					let mut alice = StudentReport::new("alice", SubmissionOutcome::Executable);
+					alice.test_results = vec![crate::models::TestResult {
+						item_id: "sum".into(),
+						file: None,
+						cases: vec![crate::models::CaseResult {
+							case_name: "one".into(),
+							status: crate::models::TestStatus::Passed,
+							..Default::default()
+						}],
+					}];
+					alice
+				}],
+			})
+			.unwrap();
+			let policy = Policy::compile(GradingConfig::default(), false).unwrap();
+			let n = record.score(&[GradingItem::new("sum")], &policy).unwrap();
+			about(&record, n).unwrap()
+		};
+		let row = |table: &Table, name: &str| {
+			table
+				.rows
+				.iter()
+				.find(|r| r[0] == Cell::Text(name.into()))
+				.map(|r| r[1].clone())
+		};
+
+		// Configured entirely through assignment.toml: the resolved source says what was
+		// read, where the command line named nothing.
+		let table = record(Some(ResolvedSource {
+			submissions: vec!["/hw/submissions".into()],
+			roster: Some(RosterSource::Table {
+				path: "/hw/roster.xlsx".into(),
+				sheet: Some("学生".into()),
+				header_row: Some(2),
+			}),
+		}));
+		assert_eq!(
+			row(&table, "submissions"),
+			Some(Cell::text("/hw/submissions"))
+		);
+		assert_eq!(
+			row(&table, "roster"),
+			Some(Cell::text("/hw/roster.xlsx (sheet '学生', header row 2)"))
+		);
+
+		let table = record(Some(ResolvedSource {
+			submissions: vec!["/hw/alice_work.py".into()],
+			roster: Some(RosterSource::Inline),
+		}));
+		assert_eq!(
+			row(&table, "roster"),
+			Some(Cell::text("[[input.students]] in /hw/assignment.toml"))
+		);
+
+		// A record from before `resolved` was kept shows what its command line named.
+		let table = record(None);
+		assert_eq!(
+			row(&table, "submissions"),
+			Some(Cell::text("/cli/submissions"))
+		);
+		assert_eq!(row(&table, "roster"), Some(Cell::text("/cli/roster.csv")));
 	}
 }

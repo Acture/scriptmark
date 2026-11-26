@@ -141,6 +141,200 @@ fn options() -> Options {
 }
 
 #[test]
+fn the_record_and_its_export_say_where_a_configured_input_came_from() {
+	use calamine::Reader;
+	use scriptmark_core::record::{RosterSource, Source};
+
+	let dir = setup();
+	// The CLI resolves its working directory through getcwd, which on macOS resolves
+	// the /var symlink; compare against the same real path.
+	let root = dir.path().canonicalize().unwrap();
+	// Configured entirely through assignment.toml: no submission arguments, no --roster.
+	success(
+		dir.path(),
+		&[
+			"grade",
+			"-t",
+			"tests",
+			"--assignment",
+			"xlsx.toml",
+			"-o",
+			"out/r.json",
+		],
+	);
+	let record = Record::load(&dir.path().join("out/r.json")).unwrap();
+	// The command-line overrides stay as they were given — empty. They are what a
+	// rescore rebuilds from, not where the input came from.
+	let Source::Local { dirs, roster } = &record.evidence.inputs.source else {
+		panic!("a local source")
+	};
+	assert!(dirs.is_empty() && roster.is_none());
+	// The resolved source says what was actually read.
+	let resolved = record
+		.evidence
+		.inputs
+		.resolved
+		.as_ref()
+		.expect("the resolved source");
+	assert_eq!(resolved.submissions, [root.join("submissions")]);
+	let Some(RosterSource::Table {
+		path,
+		sheet,
+		header_row,
+	}) = &resolved.roster
+	else {
+		panic!("a roster table")
+	};
+	assert_eq!(path, &root.join("roster.xlsx"));
+	assert_eq!(sheet.as_deref(), Some("学生"));
+	assert_eq!(*header_row, Some(2));
+
+	// The export's Info sheet shows them.
+	let info = |file: &str| {
+		success(
+			dir.path(),
+			&[
+				"export",
+				&format!("out/{file}.json"),
+				"-o",
+				&format!("out/{file}.xlsx"),
+			],
+		);
+		let mut book = calamine::Xlsx::new(
+			std::fs::File::open(dir.path().join(format!("out/{file}.xlsx"))).unwrap(),
+		)
+		.unwrap();
+		book.worksheet_range("record").unwrap()
+	};
+	let field = |sheet: &calamine::Range<calamine::Data>, name: &str| {
+		sheet
+			.rows()
+			.find(|row| row[0] == calamine::Data::String(name.to_string()))
+			.and_then(|row| match &row[1] {
+				calamine::Data::String(text) => Some(text.clone()),
+				_ => None,
+			})
+	};
+	let sheet = info("r");
+	assert_eq!(
+		field(&sheet, "submissions").as_deref(),
+		Some(root.join("submissions").display().to_string().as_str())
+	);
+	assert_eq!(
+		field(&sheet, "roster").as_deref(),
+		Some(
+			format!(
+				"{} (sheet '学生', header row 2)",
+				root.join("roster.xlsx").display()
+			)
+			.as_str()
+		)
+	);
+
+	// An explicit [[input.students]] list is the roster's source, and its files the
+	// submissions'.
+	success(
+		dir.path(),
+		&[
+			"grade",
+			"-t",
+			"tests",
+			"--assignment",
+			"manifest.toml",
+			"-o",
+			"out/m.json",
+		],
+	);
+	let record = Record::load(&dir.path().join("out/m.json")).unwrap();
+	let resolved = record
+		.evidence
+		.inputs
+		.resolved
+		.as_ref()
+		.expect("the resolved source");
+	assert_eq!(
+		resolved.submissions,
+		[
+			root.join("submissions/001_work.py"),
+			root.join("submissions/002_work.py")
+		]
+	);
+	assert_eq!(resolved.roster, Some(RosterSource::Inline));
+	let sheet = info("m");
+	assert_eq!(
+		field(&sheet, "roster").as_deref(),
+		Some(
+			format!(
+				"[[input.students]] in {}",
+				root.join("manifest.toml").display()
+			)
+			.as_str()
+		)
+	);
+
+	// A record written before the resolved source was kept — no such key, its digest
+	// over the rest — still loads, rescores and exports; its Info sheet falls back to
+	// the command line's own words, empty here.
+	success(
+		dir.path(),
+		&[
+			"run",
+			"-t",
+			"tests",
+			"--assignment",
+			"xlsx.toml",
+			"-o",
+			"out/old.json",
+		],
+	);
+	let text = std::fs::read_to_string(dir.path().join("out/old.json")).unwrap();
+	let mut value: serde_json::Value = serde_json::from_str(&text).unwrap();
+	value["evidence"]["inputs"]
+		.as_object_mut()
+		.unwrap()
+		.remove("resolved");
+	let evidence: scriptmark_core::record::Evidence =
+		serde_json::from_value(value["evidence"].clone()).unwrap();
+	value["digest"] =
+		scriptmark_core::runner::answers::digest(&serde_json::to_vec(&evidence).unwrap()).into();
+	write(dir.path(), "out/old.json", &value.to_string());
+	let old = Record::load(&dir.path().join("out/old.json")).unwrap();
+	assert_eq!(old.evidence.inputs.resolved, None);
+	success(dir.path(), &["rescore", "out/old.json"]);
+	assert_eq!(
+		Record::load(&dir.path().join("out/old.json"))
+			.unwrap()
+			.revisions
+			.len(),
+		1
+	);
+	let sheet = info("old");
+	assert!(
+		matches!(field(&sheet, "submissions").as_deref(), None | Some("")),
+		"the command line named no submissions: {:?}",
+		field(&sheet, "submissions")
+	);
+	assert_eq!(field(&sheet, "roster"), None);
+
+	// Rescoring the configured-input record itself is unchanged: the assignment file
+	// and the empty command line rebuild the input.
+	let config = std::fs::read_to_string(dir.path().join("xlsx.toml")).unwrap();
+	write(
+		dir.path(),
+		"xlsx.toml",
+		&(config + "\n[grading]\nscale = 20\n"),
+	);
+	success(dir.path(), &["rescore", "out/r.json"]);
+	assert_eq!(
+		Record::load(&dir.path().join("out/r.json"))
+			.unwrap()
+			.revisions
+			.len(),
+		2
+	);
+}
+
+#[test]
 fn three_sources_preserve_identity_files_and_non_submitters() {
 	let dir = setup();
 	let inputs: Vec<AssignmentInput> = ["csv.toml", "xlsx.toml", "manifest.toml"]
