@@ -33,17 +33,30 @@ SLACK = 1 << 20
 
 
 def emit(record):
-	write_all(_RECORDS, frame(record))
+	send(_RECORDS, record)
 
 
 def emit_bounded(record, bound, student):
 	"""Emit a record built from a student's answer, if it fits what a record of its call
 	may hold: an answer padded past that is the student's, not a record the grader
 	cannot read."""
-	data = frame(record)
-	if len(data) - HEADER.size > bound:
-		raise student.garbled(f"an answer that makes a record of {len(data)} bytes, where at most {bound} may")
-	write_all(_RECORDS, data)
+	cap = _Capture(None, False)
+	raw = None
+	try:
+		_write_json(cap, record)
+		raw = cap.finish()
+		if raw.size > bound:
+			raise student.garbled(
+				f"an answer that makes a record of {raw.size + HEADER.size} bytes, where at most {bound} may"
+			)
+		write_all(_RECORDS, HEADER.pack(raw.size))
+		raw.write_to(_RECORDS)
+	finally:
+		if raw is not None:
+			raw.close()
+		else:
+			cap.discard()
+		_close_raws(record)
 
 
 def finish(student=None):
