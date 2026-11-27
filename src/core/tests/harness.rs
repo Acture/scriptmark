@@ -1139,6 +1139,59 @@ async fn test_a_student_side_past_its_memory_limit_is_ended() {
 	);
 }
 
+/// Default `memory_mb` is 64 above idle. Encoding used to keep several copies of the
+/// value. On macOS (ru_maxrss, python 3.15), a million ints peaked at 104.2 MiB
+/// (+47.8 over the held value) and a hundred thousand dicts at 116.6 MiB (+76.0),
+/// and the student was ended. After streaming `wire` / `transfer` / `frame`, the same
+/// measurement peaks at 58.5 MiB (+0.5) and 58.5 MiB (+16.5, the id table for each
+/// dict). The checker still sees the graph.
+#[tokio::test]
+async fn test_a_checker_can_take_a_million_ints_or_a_hundred_thousand_dicts_at_the_default_memory()
+{
+	let dir = tempfile::tempdir().unwrap();
+	let student = write(
+		dir.path(),
+		"lab.py",
+		"def ints():\n    return list(range(1_000_000))\n\ndef dicts():\n    return [{'i': i} for i in range(100_000)]\n",
+	);
+	let teacher = write(
+		dir.path(),
+		"t.py",
+		"def ints(result, expected):\n    return len(result) == 1_000_000 and result[0] == 0 and result[-1] == 999_999\n\ndef dicts(result, expected):\n    return len(result) == 100_000 and result[0] == {'i': 0} and result[-1] == {'i': 99999}\n",
+	);
+	let pass = CheckObservation::Verdict {
+		pass: true,
+		message: String::new(),
+	};
+	for (name, too_large) in [("ints", true), ("dicts", false)] {
+		let mut plan = unit(&student);
+		plan.imports = vec![teacher.to_string_lossy().into_owned()];
+		let mut step = function(name, vec![]);
+		step.timeout = 60;
+		step.check = Some(InProcessCheck {
+			function: name.into(),
+			expected: None,
+		});
+		plan.steps = vec![step];
+		let obs = run(&plan).await;
+		assert!(
+			obs.fatal.is_none() && obs.protocol_error.is_none() && obs.done,
+			"{name}: {obs:?}"
+		);
+		assert!(
+			!matches!(obs.exit, Exit::Memory { .. }),
+			"{name} exceeded the default 64 MiB: {obs:?}"
+		);
+		let value = returned(&obs.steps[0].outcome);
+		if too_large {
+			assert!(value.get("$too_large").is_some(), "{name}: {value}");
+		} else {
+			assert_eq!(value.as_array().map(Vec::len), Some(100_000), "{name}");
+		}
+		assert_eq!(obs.checks[&0], pass, "{name}: {obs:?}");
+	}
+}
+
 #[tokio::test]
 async fn test_a_checker_sees_a_students_object_as_a_snapshot_and_its_graph_intact() {
 	let dir = tempfile::tempdir().unwrap();

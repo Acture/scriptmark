@@ -39,6 +39,7 @@ import math  # noqa: E402
 import os  # noqa: E402
 import signal  # noqa: E402
 import struct  # noqa: E402
+import tempfile  # noqa: E402
 import time  # noqa: E402
 
 HEADER = struct.Struct(">I")
@@ -85,10 +86,173 @@ class Garbled(Exception):
 	"""A frame that is not what this point of the protocol expects."""
 
 
-def frame(obj):
-	# `replace`: a lone surrogate a student printed or returned must not stop the frame.
-	body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8", "replace")
-	return HEADER.pack(len(body)) + body
+# One reused buffer. Past this, the body spills to temporary files: a frame's length
+# travels ahead of its bytes, and a pipe cannot be rewound, but the bytes themselves must
+# not sit in the process a second time. Each spill stays under the sandbox's 10 MB
+# RLIMIT_FSIZE; a body past that is the next file, not a larger one.
+CHUNK = 64 * 1024
+SPILL = 8 * 1024 * 1024
+
+
+class _Raw:
+	"""JSON bytes already encoded, either still in `CHUNK` or spilled beside the process."""
+
+	__slots__ = ("_buf", "_files", "size", "_closed")
+
+	def __init__(self, buf, files, size):
+		self._buf = buf
+		self._files = files
+		self.size = size
+		self._closed = False
+
+	def write_to(self, fd):
+		for block in self._blocks():
+			write_all(fd, block)
+
+	def _blocks(self):
+		if self._buf is not None:
+			yield self._buf
+			return
+		for handle in self._files:
+			handle.seek(0)
+			while True:
+				block = handle.read(CHUNK)
+				if not block:
+					break
+				yield block
+			handle.seek(0)
+
+	def close(self):
+		if self._closed:
+			return
+		self._closed = True
+		for handle in self._files:
+			handle.close()
+		self._files = []
+		self._buf = None
+
+
+class _Capture:
+	"""Where an encoder writes. `limit` counts bytes and then drops what was stored;
+	`spaces` counts the extra byte `json.dumps` puts after each separator without writing it."""
+
+	__slots__ = ("buf", "file", "files", "written", "extra", "limit", "spaces", "over")
+
+	def __init__(self, limit, spaces):
+		self.buf = bytearray()
+		self.file = None
+		self.files = []
+		self.written = 0
+		self.extra = 0
+		self.limit = limit
+		self.spaces = spaces
+		self.over = False
+
+	def space(self):
+		if not self.spaces:
+			return
+		self.extra += 1
+		if self.over or self.limit is None:
+			return
+		if self.written + self.extra > self.limit:
+			self.over = True
+			self._drop()
+
+	def write(self, data):
+		if not data:
+			return
+		n = len(data)
+		if self.over:
+			self.written += n
+			return
+		if self.limit is not None and self.written + self.extra + n > self.limit:
+			self.over = True
+			self._drop()
+			self.written += n
+			return
+		self._store(data)
+		self.written += n
+
+	def write_raw(self, raw):
+		n = raw.size
+		if self.over:
+			self.written += n
+			return
+		if self.limit is not None and self.written + self.extra + n > self.limit:
+			self.over = True
+			self._drop()
+			self.written += n
+			return
+		for block in raw._blocks():
+			self._store(block)
+		self.written += n
+
+	def _store(self, data):
+		view = memoryview(data)
+		while len(view):
+			if self.file is None and not self.files and len(self.buf) + len(view) <= CHUNK:
+				self.buf.extend(view)
+				return
+			if self.file is None:
+				self.file = tempfile.TemporaryFile()
+				if self.buf:
+					self.file.write(self.buf)
+					self.buf.clear()
+			room = SPILL - self.file.tell()
+			if room <= 0:
+				self.file.flush()
+				self.files.append(self.file)
+				self.file = tempfile.TemporaryFile()
+				continue
+			self.file.write(view[:room])
+			view = view[room:]
+
+	def _drop(self):
+		"""Throw the bytes away. Closing a spill the limit already refused can raise
+		`EFBIG` as its buffer flushes; that must not replace the size result."""
+		self.buf.clear()
+		files = self.files
+		self.files = []
+		if self.file is not None:
+			files.append(self.file)
+			self.file = None
+		for handle in files:
+			try:
+				handle.close()
+			except OSError:
+				pass
+
+	def finish(self):
+		"""The bytes written, or None when `limit` was passed. The count stays in `written`."""
+		if self.over:
+			self._drop()
+			return None
+		if self.file is None and not self.files:
+			raw = _Raw(bytes(self.buf), [], self.written)
+			self.buf = bytearray()
+			return raw
+		if self.file is not None:
+			self.file.flush()
+			self.files.append(self.file)
+			self.file = None
+		raw = _Raw(None, self.files, self.written)
+		self.files = []
+		return raw
+
+	def discard(self):
+		self._drop()
+
+
+def _close_raws(obj):
+	"""Close encodings nested in a frame. Idempotent, and it does not walk a student's value."""
+	if isinstance(obj, _Raw):
+		obj.close()
+	elif isinstance(obj, dict):
+		for item in obj.values():
+			_close_raws(item)
+	elif isinstance(obj, (list, tuple)):
+		for item in obj:
+			_close_raws(item)
 
 
 def write_all(fd, data):
@@ -97,8 +261,27 @@ def write_all(fd, data):
 		view = view[os.write(fd, view) :]
 
 
+def write_frame(fd, obj):
+	"""One length-prefixed frame, body written a chunk at a time."""
+	cap = _Capture(None, False)
+	raw = None
+	try:
+		_write_json(cap, obj)
+		raw = cap.finish()
+		write_all(fd, HEADER.pack(raw.size))
+		raw.write_to(fd)
+	finally:
+		if raw is not None:
+			raw.close()
+		else:
+			cap.discard()
+
+
 def send(fd, obj):
-	write_all(fd, frame(obj))
+	try:
+		write_frame(fd, obj)
+	finally:
+		_close_raws(obj)
 
 
 def read_exact(fd, n):
@@ -287,7 +470,8 @@ def call(fn, timeout, stdin=None, guard=None, serialise=True, then=None):
 		builtins.__import__ = guard
 	_fired[0] = False
 	start = time.perf_counter()
-	value, extra = None, None
+	value, extra, wired = None, None, None
+	keep = False
 	try:
 		if _HAS_TIMER and timeout:
 			signal.setitimer(signal.ITIMER_REAL, timeout, 0.05)
@@ -296,9 +480,11 @@ def call(fn, timeout, stdin=None, guard=None, serialise=True, then=None):
 			if sys.stdout is not out:
 				# The student replaced stdout with their own wrapper: flush it in their scope.
 				sys.stdout.flush()
-			outcome = {"returned": {"value": wire(value) if serialise else None, "type": type(value).__name__}}
+			wired = wire(value) if serialise else None
+			outcome = {"returned": {"value": wired, "type": type(value).__name__}}
 			if then is not None:
 				extra = then(value)
+			keep = True
 		finally:
 			if _HAS_TIMER:
 				signal.setitimer(signal.ITIMER_REAL, 0)
@@ -320,10 +506,18 @@ def call(fn, timeout, stdin=None, guard=None, serialise=True, then=None):
 		sys.stdin = _real_stdin
 	if _fired[0]:
 		# The timer went off even if the code swallowed it with a bare `except:`.
+		keep = False
 		outcome = {"timeout": {}}
+	if not keep:
+		# The frame that would have carried these is not sent.
+		_close_raws(wired)
+		_close_raws(extra)
+		if isinstance(value, _Raw):
+			value.close()
+		extra = None
 	elapsed = int((time.perf_counter() - start) * 1000)
 	stdout, truncated = captured(out, raw)
-	return Call(outcome, stdout, truncated, elapsed, value, extra if "returned" in outcome else None)
+	return Call(outcome, stdout, truncated, elapsed, value, extra if keep else None)
 
 
 # --- The record encoding --------------------------------------------------------------------
@@ -369,26 +563,193 @@ def to_json(value, depth=0, seen=None):
 	return text_of(value)
 
 
-def utf8_size(text):
-	"""The bytes `text` takes on the channel, counted a slice at a time rather than through
-	a second full copy of a value that may already fill most of the memory limit."""
-	step = 1 << 20
-	return sum(len(text[i : i + step].encode("utf-8", "replace")) for i in range(0, len(text), step))
+_ESCAPES = {
+	0x22: b'\\"',
+	0x5C: b"\\\\",
+	0x08: b"\\b",
+	0x0C: b"\\f",
+	0x0A: b"\\n",
+	0x0D: b"\\r",
+	0x09: b"\\t",
+}
 
 
-def json_size(tree):
-	return utf8_size(json.dumps(tree, ensure_ascii=False, separators=(",", ":")))
+def _write_string(out, text):
+	"""A JSON string, escaped a slice at a time. Lone surrogates become U+FFFD, as the
+	frame's `utf-8` with `replace` did."""
+	out.write(b'"')
+	n = len(text)
+	i = 0
+	step = 8192
+	while i < n:
+		end = min(i + step, n)
+		raw = i
+		while i < end:
+			code = ord(text[i])
+			if code < 0x20 or code in _ESCAPES:
+				if i > raw:
+					out.write(text[raw:i].encode("utf-8", "replace"))
+				if code in _ESCAPES:
+					out.write(_ESCAPES[code])
+				else:
+					out.write(f"\\u{code:04x}".encode("ascii"))
+				i += 1
+				raw = i
+			else:
+				i += 1
+		if i > raw:
+			out.write(text[raw:i].encode("utf-8", "replace"))
+	out.write(b'"')
+
+
+def _write_json(out, value):
+	"""Compact JSON of a frame's own tree. A `_Raw` is spliced, not loaded."""
+	if value is None:
+		out.write(b"null")
+	elif isinstance(value, bool):
+		out.write(b"true" if value else b"false")
+	elif isinstance(value, str):
+		_write_string(out, value)
+	elif isinstance(value, int):
+		out.write(str(int(value)).encode("ascii"))
+	elif isinstance(value, float):
+		out.write(json.dumps(value, ensure_ascii=False, allow_nan=True).encode("ascii"))
+	elif isinstance(value, _Raw):
+		out.write_raw(value)
+	elif isinstance(value, dict):
+		out.write(b"{")
+		first = True
+		for key, item in value.items():
+			if not first:
+				out.write(b",")
+				out.space()
+			first = False
+			_write_string(out, key)
+			out.write(b":")
+			out.space()
+			_write_json(out, item)
+		out.write(b"}")
+	elif isinstance(value, (list, tuple)):
+		out.write(b"[")
+		first = True
+		for item in value:
+			if not first:
+				out.write(b",")
+				out.space()
+			first = False
+			_write_json(out, item)
+		out.write(b"]")
+	else:
+		raise Unserialisable(f"cannot frame a {type(value).__name__}")
+
+
+def _write_wire(out, value, depth, stack):
+	"""The record encoding, in the bytes `json.dumps` of `to_json` would produce."""
+	if value is None:
+		out.write(b"null")
+		return
+	if isinstance(value, bool):
+		out.write(b"true" if value else b"false")
+		return
+	if isinstance(value, str):
+		_write_string(out, value)
+		return
+	if isinstance(value, int):
+		if -(2**63) <= value < 2**64:
+			out.write(str(int(value)).encode("ascii"))
+		else:
+			try:
+				text = int.__repr__(value)
+			except ValueError:
+				text = hex(value)
+			out.write(b'{"$bigint":')
+			out.space()
+			_write_string(out, text)
+			out.write(b"}")
+		return
+	if isinstance(value, float):
+		if math.isfinite(value):
+			out.write(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("ascii"))
+		else:
+			_write_string(out, repr(value))
+		return
+	if depth >= DEPTH_LIMIT:
+		_write_string(out, "<too deep>")
+		return
+	identity = id(value)
+	if identity in stack:
+		_write_string(out, "<cycle>")
+		return
+	if isinstance(value, (list, tuple)):
+		stack.add(identity)
+		try:
+			out.write(b"[")
+			first = True
+			for item in value:
+				if not first:
+					out.write(b",")
+					out.space()
+				first = False
+				_write_wire(out, item, depth + 1, stack)
+			out.write(b"]")
+		finally:
+			stack.discard(identity)
+		return
+	if isinstance(value, (set, frozenset)):
+		# Sorting needs every element: stream the sorted tree, don't sort a second copy.
+		stack.add(identity)
+		try:
+			items = [to_json(item, depth + 1, stack) for item in value]
+			try:
+				items.sort()
+			except TypeError:
+				items.sort(key=lambda item: json.dumps(item, sort_keys=True))
+			_write_json(out, items)
+		finally:
+			stack.discard(identity)
+		return
+	if isinstance(value, dict):
+		stack.add(identity)
+		try:
+			out.write(b"{")
+			first = True
+			seen = set()
+			for key, item in value.items():
+				name = key if isinstance(key, str) else text_of(key)
+				if name in seen:
+					raise Unserialisable(f"two keys both read as '{name}'")
+				seen.add(name)
+				if not first:
+					out.write(b",")
+					out.space()
+				first = False
+				_write_string(out, name)
+				out.write(b":")
+				out.space()
+				_write_wire(out, item, depth + 1, stack)
+			out.write(b"}")
+		finally:
+			stack.discard(identity)
+		return
+	_write_string(out, text_of(value))
 
 
 def wire(value):
 	"""The value as a record carries it. One too large to report is replaced by its size:
 	the call still returned, and a function checker still judges it through the transfer
-	encoding."""
-	value = to_json(value)
-	size = utf8_size(json.dumps(value, ensure_ascii=False))
-	if size > VALUE_LIMIT:
+	encoding. The size is `json.dumps` without compact separators, counted while the compact
+	bytes are written; past the limit the bytes are dropped and only the count continues."""
+	cap = _Capture(VALUE_LIMIT, True)
+	try:
+		_write_wire(cap, value, 0, set())
+	except BaseException:
+		cap.discard()
+		raise
+	if cap.over:
+		size = cap.written + cap.extra
+		cap.discard()
 		return {"$too_large": f"{size} bytes of JSON"}
-	return value
+	return cap.finish()
 
 
 # --- The transfer encoding --------------------------------------------------------------------
@@ -460,152 +821,265 @@ def _properties(value):
 _ATOMS = (decimal.Decimal, fractions.Fraction, complex, datetime.date, datetime.time, datetime.timedelta, bytes, bytearray)
 
 
-class _Node:
-	__slots__ = ("kind", "body", "refs", "number", "building")
+class _Walk:
+	"""Ids assigned on the first visit. `keep` holds those objects so an id cannot be reused
+	before the walk ends; `building` is the tuple or frozenset whose items are still open."""
 
-	def __init__(self, kind):
-		self.kind = kind
-		self.body = None
-		self.refs = 1
-		self.number = None
-		self.building = False
+	__slots__ = ("ids", "keep", "counter", "building")
+
+	def __init__(self):
+		self.ids = {}
+		self.keep = []
+		self.counter = 0
+		self.building = set()
+
+	def register(self, value):
+		number = self.counter
+		self.counter += 1
+		self.ids[id(value)] = number
+		self.keep.append(value)
+		return number
+
+
+def _write_ref(out, number):
+	out.write(b'{"$":"ref","#":')
+	out.write(str(number).encode("ascii"))
+	out.write(b"}")
+
+
+def _write_text(out, text, kind):
+	out.write(b'{"$":"text","v":')
+	_write_string(out, text)
+	out.write(b',"type":')
+	_write_string(out, kind)
+	out.write(b"}")
+
+
+def _write_int_value(out, value):
+	if -(2**63) <= value < 2**64:
+		out.write(str(int(value)).encode("ascii"))
+	else:
+		out.write(b'{"$":"int","v":')
+		_write_string(out, hex(value))
+		out.write(b"}")
+
+
+def _write_b64(out, kind, value):
+	out.write(b'{"$":"')
+	out.write(kind.encode("ascii"))
+	out.write(b'","v":"')
+	step = 3 * 8192
+	view = memoryview(value)
+	for start in range(0, len(view), step):
+		out.write(base64.b64encode(view[start : start + step]))
+	out.write(b'"}')
+
+
+def _write_atom(out, value, depth, walk):
+	if isinstance(value, decimal.Decimal):
+		out.write(b'{"$":"decimal","v":')
+		_write_string(out, str(value))
+		out.write(b"}")
+		return
+	if isinstance(value, fractions.Fraction):
+		out.write(b'{"$":"fraction","v":[')
+		_write_transfer(out, value.numerator, depth + 1, walk)
+		out.write(b",")
+		_write_transfer(out, value.denominator, depth + 1, walk)
+		out.write(b"]}")
+		return
+	if isinstance(value, complex):
+		out.write(b'{"$":"complex","v":[')
+		_write_string(out, repr(value.real))
+		out.write(b",")
+		_write_string(out, repr(value.imag))
+		out.write(b"]}")
+		return
+	if isinstance(value, datetime.datetime):
+		out.write(b'{"$":"datetime","v":')
+		_write_string(out, value.isoformat())
+		out.write(b"}")
+		return
+	if isinstance(value, datetime.date):
+		out.write(b'{"$":"date","v":')
+		_write_string(out, value.isoformat())
+		out.write(b"}")
+		return
+	if isinstance(value, datetime.time):
+		out.write(b'{"$":"time","v":')
+		_write_string(out, value.isoformat())
+		out.write(b"}")
+		return
+	if isinstance(value, datetime.timedelta):
+		out.write(b'{"$":"timedelta","v":[')
+		_write_int_value(out, value.days)
+		out.write(b",")
+		_write_int_value(out, value.seconds)
+		out.write(b",")
+		_write_int_value(out, value.microseconds)
+		out.write(b"]}")
+		return
+	_write_b64(out, "bytes" if isinstance(value, bytes) else "bytearray", value)
+
+
+def _write_items(out, values, depth, walk):
+	first = True
+	for item in values:
+		if not first:
+			out.write(b",")
+		first = False
+		_write_transfer(out, item, depth + 1, walk)
+
+
+def _write_tagged(out, kind, number):
+	out.write(b'{"$":"')
+	out.write(kind.encode("ascii"))
+	out.write(b'","#":')
+	out.write(str(number).encode("ascii"))
+
+
+def _write_str_map(out, mapping, depth, walk):
+	out.write(b"{")
+	first = True
+	for key, item in mapping.items():
+		if not first:
+			out.write(b",")
+		first = False
+		_write_string(out, key)
+		out.write(b":")
+		_write_transfer(out, item, depth + 1, walk)
+	out.write(b"}")
+
+
+def _write_transfer(out, value, depth, walk):
+	"""One pass: the first visit writes the value and records its id; a later visit writes
+	the id. A tuple or frozenset is numbered for `decode` only after its items, so a way
+	back into one while those items are written is `<cycle>`, as the record encoding says."""
+	if value is None:
+		out.write(b"null")
+		return
+	if isinstance(value, bool):
+		out.write(b"true" if value else b"false")
+		return
+	if isinstance(value, str):
+		_write_string(out, value)
+		return
+	if isinstance(value, int):
+		_write_int_value(out, value)
+		return
+	if isinstance(value, float):
+		if math.isfinite(value):
+			out.write(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("ascii"))
+		else:
+			out.write(b'{"$":"float","v":')
+			_write_string(out, repr(value))
+			out.write(b"}")
+		return
+	if isinstance(value, _ATOMS):
+		_write_atom(out, value, depth, walk)
+		return
+	# Before the id: a visit past the depth limit is text even when the object was seen
+	# nearer the root, and a visit that is only too deep does not take an id.
+	if depth >= DEPTH_LIMIT:
+		_write_text(out, "<too deep>", type(value).__name__)
+		return
+	identity = id(value)
+	number = walk.ids.get(identity)
+	if number is not None:
+		# A tuple or frozenset is registered for a later sibling, but `decode` only records
+		# its id once its items exist, so a reference from inside those items cannot be one.
+		if identity in walk.building and isinstance(value, (tuple, frozenset)):
+			kind = "tuple" if isinstance(value, tuple) else "frozenset"
+			_write_text(out, "<cycle>", kind)
+		else:
+			_write_ref(out, number)
+		return
+	shared = _shared_name(type(value))
+	if shared is not None:
+		number = walk.register(value)
+		state = _state(value)
+		_write_tagged(out, "shared", number)
+		out.write(b',"class":')
+		_write_string(out, shared)
+		out.write(b',"state":')
+		_write_str_map(out, state, depth, walk)
+		out.write(b"}")
+		return
+	if isinstance(value, (tuple, frozenset)):
+		kind = "tuple" if isinstance(value, tuple) else "frozenset"
+		number = walk.register(value)
+		walk.building.add(identity)
+		try:
+			_write_tagged(out, kind, number)
+			out.write(b',"v":[')
+			_write_items(out, value, depth, walk)
+			out.write(b"]}")
+		finally:
+			walk.building.discard(identity)
+		return
+	if isinstance(value, (list, set)):
+		kind = "list" if isinstance(value, list) else "set"
+		number = walk.register(value)
+		_write_tagged(out, kind, number)
+		out.write(b',"v":[')
+		_write_items(out, value, depth, walk)
+		out.write(b"]}")
+		return
+	if isinstance(value, dict):
+		number = walk.register(value)
+		_write_tagged(out, "dict", number)
+		out.write(b',"v":[')
+		first = True
+		for key, item in value.items():
+			if not first:
+				out.write(b",")
+			first = False
+			out.write(b"[")
+			_write_transfer(out, key, depth + 1, walk)
+			out.write(b",")
+			_write_transfer(out, item, depth + 1, walk)
+			out.write(b"]")
+		out.write(b"]}")
+		return
+	if inspect.isroutine(value) or inspect.isclass(value) or inspect.ismodule(value):
+		_write_text(out, text_of(value), type(value).__name__)
+		return
+	module = getattr(type(value), "__module__", "") or ""
+	if module.split(".")[0] == "numpy" and callable(getattr(value, "tolist", None)):
+		# Not registered: two references become two lists, as they did before.
+		_write_transfer(out, value.tolist(), depth, walk)
+		return
+	if hasattr(value, "__dict__") or any("__slots__" in cls.__dict__ for cls in type(value).__mro__[:-1]):
+		number = walk.register(value)
+		attrs = _state(value)
+		props = _properties(value)
+		_write_tagged(out, "object", number)
+		out.write(b',"class":')
+		_write_string(out, type(value).__qualname__)
+		out.write(b',"attrs":')
+		_write_str_map(out, attrs, depth, walk)
+		out.write(b',"properties":')
+		_write_str_map(out, props, depth, walk)
+		out.write(b"}")
+		return
+	_write_text(out, text_of(value), type(value).__name__)
+
+
+def _capture_transfer(value, limit):
+	cap = _Capture(limit, False)
+	try:
+		_write_transfer(cap, value, 0, _Walk())
+	except BaseException:
+		cap.discard()
+		raise
+	return cap
 
 
 def encode(value):
-	"""The transfer encoding of `value`. Runs the owner's code (properties, `__iter__` of a
-	container subclass) and raises what it raises; call it under the owner's timer."""
-	nodes = {}
-	keep = []  # every object visited stays alive, so no id is reused while encoding
-	root = _graph(value, 0, nodes, keep)
-	numbers = [0]
-	return _emit(root, numbers)
-
-
-def _graph(value, depth, nodes, keep):
-	"""Pass one: the value graph, each container and object visited once, with how often it
-	is referred to — so pass two numbers only what is actually shared."""
-	if value is None or isinstance(value, (bool, str)):
-		return value
-	if isinstance(value, int):
-		return value if -(2**63) <= value < 2**64 else ("int", int(value))
-	if isinstance(value, float):
-		return value if math.isfinite(value) else ("float", repr(value))
-	if isinstance(value, _ATOMS):
-		return ("atom", value)
-	if depth >= DEPTH_LIMIT:
-		return ("text", "<too deep>", type(value).__name__)
-	node = nodes.get(id(value))
-	if node is not None:
-		node.refs += 1
-		return node
-	keep.append(value)
-	shared = _shared_name(type(value))
-	if shared is not None:
-		node = nodes[id(value)] = _Node("shared")
-		node.body = (shared, {k: _graph(v, depth + 1, nodes, keep) for k, v in _state(value).items()})
-		return node
-	if isinstance(value, (list, tuple, set, frozenset)):
-		kind = "list" if isinstance(value, list) else "tuple" if isinstance(value, tuple) else "set" if isinstance(value, set) else "frozenset"
-		node = nodes[id(value)] = _Node(kind)
-		node.body = [_graph(v, depth + 1, nodes, keep) for v in value]
-		return node
-	if isinstance(value, dict):
-		node = nodes[id(value)] = _Node("dict")
-		node.body = [(_graph(k, depth + 1, nodes, keep), _graph(v, depth + 1, nodes, keep)) for k, v in value.items()]
-		return node
-	if inspect.isroutine(value) or inspect.isclass(value) or inspect.ismodule(value):
-		return ("text", text_of(value), type(value).__name__)
-	module = getattr(type(value), "__module__", "") or ""
-	if module.split(".")[0] == "numpy" and callable(getattr(value, "tolist", None)):
-		return _graph(value.tolist(), depth, nodes, keep)
-	if hasattr(value, "__dict__") or any("__slots__" in cls.__dict__ for cls in type(value).__mro__[:-1]):
-		node = nodes[id(value)] = _Node("object")
-		attrs = {k: _graph(v, depth + 1, nodes, keep) for k, v in _state(value).items()}
-		props = {k: _graph(v, depth + 1, nodes, keep) for k, v in _properties(value).items()}
-		node.body = (type(value).__qualname__, attrs, props)
-		return node
-	return ("text", text_of(value), type(value).__name__)
-
-
-def _atom(value):
-	if isinstance(value, decimal.Decimal):
-		return {"$": "decimal", "v": str(value)}
-	if isinstance(value, fractions.Fraction):
-		return {"$": "fraction", "v": [_emit_int(value.numerator), _emit_int(value.denominator)]}
-	if isinstance(value, complex):
-		return {"$": "complex", "v": [repr(value.real), repr(value.imag)]}
-	if isinstance(value, datetime.datetime):
-		return {"$": "datetime", "v": value.isoformat()}
-	if isinstance(value, datetime.date):
-		return {"$": "date", "v": value.isoformat()}
-	if isinstance(value, datetime.time):
-		return {"$": "time", "v": value.isoformat()}
-	if isinstance(value, datetime.timedelta):
-		return {"$": "timedelta", "v": [value.days, value.seconds, value.microseconds]}
-	return {"$": "bytes" if isinstance(value, bytes) else "bytearray", "v": base64.b64encode(bytes(value)).decode("ascii")}
-
-
-def _emit_int(value):
-	return value if -(2**63) <= value < 2**64 else {"$": "int", "v": hex(value)}
-
-
-def _emit(item, numbers):
-	"""Pass two: JSON, plain wherever plain JSON says the same thing."""
-	if not isinstance(item, (_Node, tuple)):
-		return item
-	if isinstance(item, tuple):
-		kind = item[0]
-		if kind == "int":
-			return {"$": "int", "v": hex(item[1])}
-		if kind == "float":
-			return {"$": "float", "v": item[1]}
-		if kind == "atom":
-			return _atom(item[1])
-		return {"$": "text", "v": item[1], "type": item[2]}
-	if item.number is not None:
-		return {"$": "ref", "#": item.number}
-	kind = item.kind
-	if kind in ("tuple", "frozenset"):
-		# Made from their items, so they are numbered once those are: a way back into one
-		# while its items are written cannot be rebuilt, and reads as a cycle, as the
-		# record encoding says.
-		if item.building:
-			return {"$": "text", "v": "<cycle>", "type": kind}
-		item.building = True
-		items = [_emit(v, numbers) for v in item.body]
-		item.building = False
-		tagged = {}
-		if item.refs > 1:
-			item.number = numbers[0]
-			numbers[0] += 1
-			tagged["#"] = item.number
-		return {"$": kind, **tagged, "v": items}
-	tagged = {}
-	if item.refs > 1:
-		item.number = numbers[0]
-		numbers[0] += 1
-		tagged["#"] = item.number
-	if kind == "list":
-		items = [_emit(v, numbers) for v in item.body]
-		return items if not tagged else {"$": "list", **tagged, "v": items}
-	if kind == "set":
-		return {"$": kind, **tagged, "v": [_emit(v, numbers) for v in item.body]}
-	if kind == "dict":
-		pairs = [(_emit(k, numbers), _emit(v, numbers)) for k, v in item.body]
-		if not tagged and all(isinstance(k, str) and k != "$" for k, _ in pairs):
-			return dict(pairs)
-		return {"$": "dict", **tagged, "v": [[k, v] for k, v in pairs]}
-	if kind == "shared":
-		name, state = item.body
-		return {"$": "shared", **tagged, "class": name, "state": {k: _emit(v, numbers) for k, v in state.items()}}
-	cls, attrs, props = item.body
-	return {
-		"$": "object",
-		**tagged,
-		"class": cls,
-		"attrs": {k: _emit(v, numbers) for k, v in attrs.items()},
-		"properties": {k: _emit(v, numbers) for k, v in props.items()},
-	}
+	"""The transfer encoding of `value`, as JSON bytes. Runs the owner's code (properties,
+	`__iter__` of a container subclass) and raises what it raises; call it under the owner's
+	timer. The first visit of a container writes it and records its id."""
+	return _capture_transfer(value, None).finish()
 
 
 def decode(tree, resolve=None):
@@ -724,9 +1198,11 @@ def _tagged(kind, tree, made, resolve, depth):
 
 
 def transfer(value):
-	"""The transfer encoding of `value`, or a marker saying how large it would have been."""
-	tree = encode(value)
-	size = json_size(tree)
-	if size > TRANSFER_LIMIT:
+	"""The transfer encoding of `value`, or a marker saying how large it would have been.
+	Past the limit the bytes already written are dropped; the walk keeps counting."""
+	cap = _capture_transfer(value, TRANSFER_LIMIT)
+	if cap.over:
+		size = cap.written
+		cap.discard()
 		return {"$": "too_large", "size": size}
-	return tree
+	return cap.finish()
