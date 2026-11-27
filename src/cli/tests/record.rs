@@ -169,6 +169,14 @@ fn grade_writes_a_record_whose_first_revision_every_consumer_reads() {
 	let evidence = &record.evidence;
 	assert_eq!(evidence.assignment.name, "sums");
 	assert!(evidence.inputs.tests.is_absolute());
+	// What the command line named is also what the record resolved: no assignment.toml
+	// [input] was involved. (getcwd resolves the /var symlink the tempdir path keeps.)
+	let resolved = evidence.inputs.resolved.as_ref().expect("resolved source");
+	assert_eq!(
+		resolved.submissions,
+		[dir.canonicalize().unwrap().join("submissions")]
+	);
+	assert_eq!(resolved.roster, None);
 	let sources = &evidence.bundle.specs[0].sources;
 	assert!(
 		sources.keys().any(|p| p.ends_with("teacher/helper.py")),

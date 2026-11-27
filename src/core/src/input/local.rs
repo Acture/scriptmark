@@ -222,6 +222,29 @@ impl Config {
 		path.map(|path| table::load(&path, &layout.options()))
 			.transpose()
 	}
+
+	/// Where the roster table a batch read is, resolved as [`Config::roster_table`] reads
+	/// it: `path` from the command line when given, otherwise `input.roster.path` made
+	/// absolute against the assignment file's directory. `None` when the class is listed
+	/// inline — `input.students` has no table — or no table is configured.
+	pub fn roster_table_path(
+		&self,
+		assignment: Option<&Path>,
+		path: Option<&Path>,
+	) -> Result<Option<PathBuf>> {
+		if !self.students.is_empty() {
+			return Ok(None);
+		}
+		match path {
+			Some(path) => Ok(Some(path.to_path_buf())),
+			None => self
+				.roster
+				.as_ref()
+				.and_then(|roster| roster.path.as_deref())
+				.map(|path| relative_to(assignment, path))
+				.transpose(),
+		}
+	}
 }
 
 /// A configured path, relative to the directory of the assignment file that names it.

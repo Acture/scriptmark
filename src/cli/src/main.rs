@@ -862,12 +862,13 @@ fn prepare_batch(
 				.display()
 		);
 	}
-	let (input, source) = match &canvas {
+	let (input, source, resolved) = match &canvas {
 		Some(bundle) => (
 			build_canvas_input(bundle, &declared, purpose)?,
 			record::Source::Canvas {
 				bundle: bundle.clone(),
 			},
+			None,
 		),
 		None => {
 			let resolved = declared.input.resolve(
@@ -877,6 +878,27 @@ fn prepare_batch(
 				&declared.matching,
 			)?;
 			let input = build_local_input(&resolved.paths, &declared, &resolved, purpose)?;
+			// Provenance: what the input resolved to, kept apart from the command-line
+			// overrides in `source` that a rescore rebuilds the input from.
+			let roster_source = if !declared.input.students.is_empty() {
+				Some(record::RosterSource::Inline)
+			} else {
+				declared
+					.input
+					.roster_table_path(declared.path.as_deref(), roster.as_deref())?
+					.map(|path| {
+						let layout = declared.input.roster.clone().unwrap_or_default();
+						record::RosterSource::Table {
+							path,
+							sheet: layout.sheet,
+							header_row: layout.header_row,
+						}
+					})
+			};
+			let provenance = record::ResolvedSource {
+				submissions: resolved.paths.clone(),
+				roster: roster_source,
+			};
 			declared.matching = resolved.matching;
 			(
 				input,
@@ -884,6 +906,7 @@ fn prepare_batch(
 					dirs: submissions,
 					roster,
 				},
+				Some(provenance),
 			)
 		}
 	};
@@ -896,6 +919,7 @@ fn prepare_batch(
 			tests: tests_dir,
 			assignment: declared.path.map(|p| absolute(&p)).transpose()?,
 			source,
+			resolved,
 		},
 	})
 }
