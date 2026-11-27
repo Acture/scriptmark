@@ -45,7 +45,8 @@ enum Commands {
 	Rescore(RescoreArgs),
 	/// Summarize a grading record as one of its revisions scored it
 	Summarize(SummarizeArgs),
-	/// Write a revision's grades as CSV
+	/// Write a revision's grades as CSV or XLSX. CSV prefixes formula-like text; XLSX keeps
+	/// the original
 	Export(ExportArgs),
 	/// Canvas LMS: browse courses, and fetch an assignment for grading
 	#[command(subcommand)]
@@ -144,7 +145,8 @@ struct GradeArgs {
 	python: String,
 
 	/// Also write CSV tables to this directory: one row per case, and one per student's
-	/// grade, beside the frozen inputs. The JSON is the record at --output.
+	/// grade, beside the frozen inputs. The JSON is the record at --output. CSV prefixes
+	/// text a spreadsheet would run as a formula; export .xlsx for the original text
 	#[arg(short, long)]
 	archive: Option<PathBuf>,
 
@@ -288,7 +290,8 @@ struct ExportArgs {
 
 	/// Where to write the grades: a `.csv` of the grades alone, or a `.xlsx` with the
 	/// items, the cases behind the grades and the record they came from on sheets of
-	/// their own
+	/// their own. CSV prefixes text a spreadsheet would run as a formula; use XLSX to
+	/// review the original text
 	#[arg(short, long, default_value = "grades.csv")]
 	output: PathBuf,
 

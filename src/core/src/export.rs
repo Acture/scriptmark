@@ -5,6 +5,11 @@
 //! A sheet is built once as a [`Table`] of typed cells and only then written, as CSV or as
 //! XLSX, so the two cannot disagree: identifiers and words are text, so a 学号 keeps its
 //! leading zeros, and scores are numbers rounded as the CSV prints them.
+//!
+//! CSV text that a spreadsheet would run as a formula is prefixed with `'` as it is
+//! written. The cell is unchanged, so an XLSX sheet still holds the original string. A
+//! finite numeric literal such as `-3` or `+10` is left alone. To review student output
+//! without that prefix, export `.xlsx`.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -162,14 +167,86 @@ impl Cell {
 		Cell::maybe(value.map(|v| word(&v)).filter(|w| !w.is_empty()))
 	}
 
-	/// What CSV writes.
+	/// What CSV writes. Text a spreadsheet would run as a formula is prefixed with `'`.
+	/// A number is [`number`], with no prefix.
 	pub fn csv(&self) -> String {
 		match self {
 			Cell::Empty => String::new(),
-			Cell::Text(text) => text.clone(),
+			Cell::Text(text) => guard_csv_text(text),
 			Cell::Number { value, decimals } => number(*value, *decimals),
 		}
 	}
+}
+
+/// Prefix text a spreadsheet would execute, so the written cell is read as text.
+///
+/// A leading `=`, `@`, tab or carriage return is enough: some spreadsheets skip the tab
+/// or carriage return and then run the rest. The same applies after leading whitespace or
+/// control characters, and to `+` or `-` when the remainder is not a finite number
+/// (`-3`, `+10`). A formula on a later line is included, because a reader that splits on
+/// a newline would give that line a row of its own. One `'` is written at the start of
+/// the cell; the characters after it are unchanged.
+fn guard_csv_text(text: &str) -> String {
+	if needs_formula_guard(text) {
+		format!("'{text}")
+	} else {
+		text.to_string()
+	}
+}
+
+fn needs_formula_guard(text: &str) -> bool {
+	matches!(text.chars().next(), Some('=' | '@' | '\t' | '\r'))
+		|| text.split(['\n', '\r']).any(line_is_formula)
+}
+
+fn line_is_formula(line: &str) -> bool {
+	let stripped = line.trim_start_matches(|c: char| c.is_whitespace() || c.is_control());
+	match stripped.chars().next() {
+		Some('=' | '@') => true,
+		Some('+' | '-') => !is_finite_numeric_literal(stripped),
+		_ => false,
+	}
+}
+
+/// The whole of `text` is a finite number, optionally signed: `+42`, `-0.5`, `1e-2`.
+fn is_finite_numeric_literal(text: &str) -> bool {
+	let unsigned = match text.as_bytes().first() {
+		Some(b'+' | b'-') => &text[1..],
+		_ => text,
+	};
+	numeric_shape(unsigned) && unsigned.parse::<f64>().is_ok_and(|n| n.is_finite())
+}
+
+fn numeric_shape(text: &str) -> bool {
+	let mut chars = text.chars().peekable();
+	let mut digits = false;
+	let mut dot = false;
+	while let Some(c) = chars.peek().copied() {
+		match c {
+			'0'..='9' => {
+				digits = true;
+				chars.next();
+			}
+			'.' if !dot => {
+				dot = true;
+				chars.next();
+			}
+			'e' | 'E' if digits => {
+				chars.next();
+				if matches!(chars.peek(), Some('+' | '-')) {
+					chars.next();
+				}
+				let mut exponent = false;
+				while matches!(chars.peek(), Some('0'..='9')) {
+					exponent = true;
+					chars.next();
+				}
+				return exponent && chars.peek().is_none();
+			}
+			_ => return false,
+		}
+	}
+	digits
 }
 
 /// A sheet: a header, and rows of cells under it.
@@ -801,5 +878,86 @@ mod tests {
 			Some(&Data::String("\u{1b}[31m=1+1\0".into()))
 		);
 		assert!(matches!(range.get((1, 4)), None | Some(Data::Empty)));
+	}
+
+	#[test]
+	fn test_csv_prefixes_formula_text_and_keeps_numbers() {
+		use calamine::{Data, Reader, Xlsx};
+		let hyperlink = "=HYPERLINK(\"http://example.com\",\"x\")";
+		for raw in [
+			"=1+1",
+			hyperlink,
+			"-1+1",
+			"+CMD(...)",
+			"+CMD|'/c calc'!A0",
+			"@SUM(1,2)",
+			"\t=1+1",
+			"\r=1+1",
+			" =1+1",
+			"\n=1+1",
+			"note\r\n=1+1",
+			"kept\n-1+1",
+			"  -1+1",
+			"\u{1b}=1+1",
+			"\t",
+			"\r",
+			"-",
+			"+",
+			"+1e",
+		] {
+			assert_eq!(Cell::text(raw).csv(), format!("'{raw}"), "{raw:?}");
+			assert_eq!(
+				Cell::text(raw),
+				Cell::Text(raw.into()),
+				"{raw:?} stored raw"
+			);
+		}
+		for raw in [
+			"-3",
+			"-0.5",
+			"-0.25",
+			"+10",
+			"+42",
+			"+1e-2",
+			"-3.0",
+			"0",
+			"42",
+			"hello",
+			"",
+			"  -3",
+			"note\n+10",
+			"note\n-0.5",
+			"\u{1b}[31m=1+1\0",
+		] {
+			assert_eq!(Cell::text(raw).csv(), raw, "{raw:?}");
+		}
+		assert_eq!(Cell::number(-3.0, 1).csv(), "-3");
+		assert_eq!(Cell::number(-0.5, 1).csv(), "-0.5");
+		assert_eq!(Cell::number(0.0, 0).csv(), "0");
+		assert_eq!(Cell::number(42.0, 0).csv(), "42");
+
+		let table = Table {
+			name: "cases",
+			header: header(&["actual", "score"]),
+			rows: vec![vec![Cell::text(hyperlink), Cell::number(-0.5, 1)]],
+			keys: 0,
+		};
+		let written = csv(&table);
+		let written = written.strip_prefix('\u{feff}').unwrap();
+		let row = csv::ReaderBuilder::new()
+			.has_headers(false)
+			.from_reader(written.as_bytes())
+			.records()
+			.nth(1)
+			.unwrap()
+			.unwrap();
+		assert_eq!(row.get(0).unwrap(), format!("'{hyperlink}"));
+		assert_eq!(row.get(1).unwrap(), "-0.5");
+
+		let bytes = workbook(&[table]).unwrap();
+		let mut book = Xlsx::new(std::io::Cursor::new(bytes)).unwrap();
+		let range = book.worksheet_range("cases").unwrap();
+		assert_eq!(range.get((1, 0)), Some(&Data::String(hyperlink.into())));
+		assert_eq!(range.get((1, 1)), Some(&Data::Float(-0.5)));
 	}
 }
