@@ -121,8 +121,9 @@ pub fn resolve(
 }
 
 /// The size of a unit's test data, in elements: its calls' arguments and stdin, what its
-/// `expected` cases expect, and the bytes of the data files staged for it. None where an
-/// argument holds a setup's result, which is not known before grading.
+/// `expected` cases expect, and the bytes of the data files staged for it. A `$name` a
+/// generated setup value answers is sized from that value; None where an argument holds a
+/// call's result, which is not known before grading.
 pub fn unit_size<'a>(
 	spec: &TestSpec,
 	plan: &UnitPlan,
@@ -136,14 +137,22 @@ pub fn unit_size<'a>(
 		.map(|rel| bytes_under(&spec.dir.join(rel)))
 		.fold(0u64, u64::saturating_add);
 	total = total.saturating_add(plan.script.as_ref().map_or(0, |s| text(&s.stdin)));
+	// Generated setup values are drawn before planning, so a `$name` they answer is sized
+	// like a var. No id is both: validation refuses the collision.
+	let scope: BTreeMap<String, Value> = spec
+		.vars
+		.iter()
+		.chain(&plan.bound)
+		.map(|(name, value)| (name.clone(), value.clone()))
+		.collect();
 	for call in plan.setup.iter().chain(&plan.steps) {
 		total = total
-			.saturating_add(args_size(&call.args, &spec.vars)?)
+			.saturating_add(args_size(&call.args, &scope)?)
 			.saturating_add(text(&call.stdin));
 	}
 	for case in expected {
 		if let Some(expect) = &case.expect {
-			total = total.saturating_add(value_size(expect, &spec.vars)?);
+			total = total.saturating_add(value_size(expect, &scope)?);
 		}
 		total = total.saturating_add(text(&case.expected_stdout));
 	}
@@ -165,8 +174,8 @@ fn bytes_under(path: &Path) -> u64 {
 
 /// The size of a call's arguments, in elements: a container counts its elements, a string
 /// its characters, and an integer argument its value — `fib(30)` and `primes(10**6)` are
-/// sized by their number. `$name` reads the var `name`; a reference to a setup result
-/// cannot be sized before grading: None.
+/// sized by their number. `$name` reads the var or generated setup value `name`; a
+/// reference to a call's result cannot be sized before grading: None.
 pub fn args_size(args: &[Value], vars: &BTreeMap<String, Value>) -> Option<u64> {
 	args.iter().try_fold(0u64, |total, arg| {
 		Some(total.saturating_add(size(arg, true, Some(vars))?))
@@ -286,5 +295,51 @@ mod tests {
 		assert_eq!(args_size(&[json!("$A")], &looped), Some(4));
 		assert_eq!(value_size(&json!(8_000_000), &vars), Some(1));
 		assert_eq!(value_size(&json!([[1, 2], []]), &vars), Some(3));
+	}
+
+	/// A `$name` a generated setup value answers is sized from that value, like a var's; a
+	/// call's result stays unsizable.
+	#[test]
+	fn test_unit_size_reads_a_generated_setup_value_like_a_var() {
+		use crate::models::Target;
+		use crate::runner::executor::{CallPlan, Subject};
+
+		let dir = tempfile::tempdir().unwrap();
+		let spec = crate::spec_loader::load_spec_str(
+			"[meta]\nname = \"t\"\nfile = \"lab.py\"\nlanguage = \"python\"\nfunction = \"f\"\n[[setup]]\nid = \"data\"\ngenerate = \"list(int(0, 9), 4, 4)\"\n[[cases]]\nname = \"x\"\nargs = [\"$data\"]\ncheck = \"sorted\"\n",
+			dir.path(),
+		)
+		.unwrap_or_else(|e| panic!("{e}"));
+		let call = |args: Vec<Value>| CallPlan {
+			target: Target::Function { name: "f".into() },
+			args,
+			stdin: None,
+			timeout: 1,
+			id: None,
+			files: Vec::new(),
+			check: None,
+		};
+		let mut plan = UnitPlan {
+			subject: Subject::Student,
+			functions: crate::matching::Functions::default(),
+			file: dir.path().join("lab.py"),
+			script: None,
+			imports: Vec::new(),
+			vars: std::sync::Arc::new(spec.vars.clone()),
+			data_files: Vec::new(),
+			bundle: dir.path().to_path_buf(),
+			shared: Vec::new(),
+			memory_mb: 64,
+			memory_basis: None,
+			allowed_imports: Vec::new(),
+			load_timeout: 1,
+			bound: BTreeMap::from([("data".to_string(), json!([1, 2, 3, 4]))]),
+			setup: Vec::new(),
+			steps: vec![call(vec![json!("$data")])],
+		};
+		assert_eq!(unit_size(&spec, &plan, spec.cases.iter()), Some(4));
+		// A call's result, not drawn before grading, cannot be sized.
+		plan.bound.clear();
+		assert_eq!(unit_size(&spec, &plan, spec.cases.iter()), None);
 	}
 }

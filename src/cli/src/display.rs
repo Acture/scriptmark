@@ -101,6 +101,27 @@ fn grade_color(fraction: f64) -> Color {
 	}
 }
 
+/// The longest one line of arguments is shown before it is shortened.
+const ARGS_LIMIT: usize = 160;
+
+/// A failing call's arguments on one line, as the saved results hold them
+/// (`CaseInput.args`): `None` when the call took none, and past the limit a readable head
+/// with the full length said, so a generated list cannot bury the failure it caused.
+fn shown_args(args: &[serde_json::Value]) -> Option<String> {
+	if args.is_empty() {
+		return None;
+	}
+	let rendered = serde_json::to_string(args).expect("arguments are plain JSON");
+	let total = rendered.chars().count();
+	if total <= ARGS_LIMIT {
+		return Some(rendered);
+	}
+	let head: String = rendered.chars().take(ARGS_LIMIT).collect();
+	Some(format!(
+		"{head}… ({total} characters in all; the saved results hold the full input)"
+	))
+}
+
 /// Display detailed failure reports for students with failures.
 pub fn display_failures(reports: &[&StudentReport]) {
 	let failed: Vec<_> = reports
@@ -208,6 +229,15 @@ pub fn display_failures(reports: &[&StudentReport]) {
 					test_result.item_id.dimmed(),
 					case.case_name
 				);
+
+				// The call's arguments as the saved results record them (`input.args`):
+				// a generated case's drawn inputs are nowhere in the spec, so without
+				// this the teacher would open the results file to find them.
+				if let Some(input) = &case.input
+					&& let Some(args) = shown_args(&input.args)
+				{
+					println!("    {} {args}", "args:".dimmed());
+				}
 
 				if let Some(failure) = &case.failure {
 					println!("    {}", failure.message.dimmed());
@@ -325,5 +355,87 @@ fn standing(standing: &Standing) -> String {
 				.map(|r| export::word(&r))
 				.unwrap_or_default()
 		),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use scriptmark_core::models::{CaseInput, CaseResult, Cause, FailureDetail, TestResult};
+	use serde_json::json;
+
+	#[test]
+	fn test_shown_args_says_nothing_when_the_call_took_nothing() {
+		assert_eq!(shown_args(&[]), None);
+	}
+
+	#[test]
+	fn test_shown_args_is_the_saved_input_on_one_line() {
+		let args = vec![json!(75), json!(-33), json!([1, 2])];
+		assert_eq!(shown_args(&args).as_deref(), Some("[75,-33,[1,2]]"));
+		let long = vec![json!("$$literal"), json!("$data")];
+		assert_eq!(
+			shown_args(&long).as_deref(),
+			Some("[\"$$literal\",\"$data\"]")
+		);
+	}
+
+	#[test]
+	fn test_shown_args_shortens_a_long_input_readably() {
+		let args = vec![json!((0..500).collect::<Vec<i64>>())];
+		let shown = shown_args(&args).unwrap();
+		assert!(shown.starts_with("[[0,1,2"), "{shown}");
+		assert!(shown.contains('…'), "{shown}");
+		assert!(shown.contains("characters in all"), "{shown}");
+		assert!(
+			shown.contains("the saved results hold the full input"),
+			"{shown}"
+		);
+		assert!(
+			shown.chars().count() < serde_json::to_string(&args).unwrap().chars().count(),
+			"the head is shorter than the whole"
+		);
+	}
+
+	#[test]
+	fn test_shown_args_cuts_between_characters_not_inside_one() {
+		let args = vec![json!("汉".repeat(500))];
+		let shown = shown_args(&args).unwrap();
+		assert!(shown.contains('…'), "{shown}");
+	}
+
+	/// The failure display prints a failing case's arguments; one without any, or without
+	/// an input at all, prints none. (Output goes to the test's stdout.)
+	#[test]
+	fn test_display_failures_shows_a_failing_cases_arguments() {
+		let case = |name: &str, input: Option<CaseInput>| CaseResult {
+			case_name: name.into(),
+			status: TestStatus::Failed,
+			failure: Some(FailureDetail {
+				message: "wrong answer".into(),
+				details: String::new(),
+			}),
+			fault: Some(Fault::Student),
+			cause: Some(Cause::Wrong),
+			input,
+			..Default::default()
+		};
+		let mut report = StudentReport::new("2024001", SubmissionOutcome::Executable);
+		report.test_results.push(TestResult {
+			item_id: "clamp".into(),
+			file: Some("clamp.py".into()),
+			cases: vec![
+				case(
+					"clamp [3]",
+					Some(CaseInput {
+						args: vec![json!(75), json!(-33), json!(30)],
+						..Default::default()
+					}),
+				),
+				case("no args", Some(CaseInput::default())),
+				case("no input", None),
+			],
+		});
+		display_failures(&[&report]);
 	}
 }

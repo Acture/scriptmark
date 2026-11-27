@@ -981,6 +981,7 @@ mod tests {
 			memory_basis: None,
 			allowed_imports: Vec::new(),
 			load_timeout: 10,
+			bound: Default::default(),
 			setup: Vec::new(),
 			steps: (0..steps)
 				.map(|_| call(Target::Function { name: "f".into() }))

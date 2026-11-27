@@ -549,3 +549,224 @@ async fn test_a_failed_seed_draw_is_refused() {
 		"{message}"
 	);
 }
+
+// --- Generated setup data (OSS-122) -----------------------------------------------------
+
+/// A generated setup value, echoed by the student and judged by a teacher checker that
+/// receives the same value from the scope.
+const SETUP: &str = r#"
+imports = ["checks.py"]
+
+[[setup]]
+id = "data"
+generate = "list(int(0, 9), 4, 4)"
+seed = 7
+
+[[cases]]
+name = "echoes"
+args = ["$data"]
+check = { function = "is_data" }
+"#;
+
+const IS_DATA: &str =
+	"def is_data(result, expected, data):\n    return (result == data, f\"got {result!r}\")\n";
+
+/// The value a bundle's units hold for `id`, from the first unit's plan.
+fn bound(bundles: &[Bundle], id: &str) -> Value {
+	bundles[0].units[0].plan.bound[id].clone()
+}
+
+#[tokio::test]
+async fn test_generated_setup_reaches_every_student_and_the_checker() {
+	let bench = Bench::new();
+	bench.write("checks.py", IS_DATA);
+	let b = bundle(bench.spec(SETUP)).await;
+	// Drawn once, recorded with what it takes to draw it again.
+	let made = &b.setup["data"];
+	assert_eq!((made.seed, made.seed_source), (7, SeedSource::Declared));
+	assert_eq!(made.rule, "list(int(0, 9), 4, 4)");
+	// The units hold the value; no setup call runs for it.
+	assert_eq!(b.units[0].plan.bound["data"], made.value);
+	assert!(b.units[0].plan.setup.is_empty());
+	// The same seed draws the same value, whatever else is prepared alongside.
+	let again = bundle(bench.spec(SETUP)).await;
+	assert_eq!(again.setup, b.setup);
+
+	let students = [
+		bench.student("alice", "def f(xs):\n    return xs\n"),
+		bench.student("bob", "def f(xs):\n    return []\n"),
+	];
+	let reports = run(vec![b], &students).await;
+	assert_eq!(failed(report(&reports, "alice")), Vec::<String>::new());
+	assert_eq!(failed(report(&reports, "bob")), ["echoes".to_string()]);
+}
+
+#[tokio::test]
+async fn test_generated_setup_is_frozen_and_replays() {
+	let bench = Bench::new();
+	bench.write("checks.py", IS_DATA);
+	let drawn = SETUP.replace("seed = 7", "seed = \"random\"");
+	let bundles = prepared(vec![bench.spec(&drawn)]).await.unwrap();
+	let frozen = Frozen::of(&bundles);
+	let made = &frozen.setup["t"]["data"];
+	assert_eq!(made.seed_source, SeedSource::Drawn);
+	assert!(made.seed < 1 << 53);
+	let value = bound(&bundles, "data");
+	assert_eq!(value, made.value);
+
+	// A replay hands every student the very same value, seed spelling aside.
+	let replayed = prepared_with(
+		vec![bench.spec(&drawn)],
+		&Generation::Replay(frozen.clone()),
+	)
+	.await
+	.unwrap_or_else(|e| panic!("{e}"));
+	assert_eq!(bound(&replayed, "data"), value);
+	assert_eq!(Frozen::of(&replayed).setup, frozen.setup);
+	let pasted = drawn.replace("seed = \"random\"", &format!("seed = {}", made.seed));
+	let replayed = prepared_with(
+		vec![bench.spec(&pasted)],
+		&Generation::Replay(frozen.clone()),
+	)
+	.await
+	.unwrap_or_else(|e| panic!("{e}"));
+	assert_eq!(bound(&replayed, "data"), value);
+
+	// A hand-edited value replays as it is, and it is what the student is held to.
+	let mut edited: Value = serde_json::from_str(&frozen.to_json()).unwrap();
+	edited["setup"]["t"]["data"]["value"] = json!([9, 9, 9, 9]);
+	edited["setup"]["t"]["data"]["generator"] = json!(999);
+	let edited = Frozen::from_json(&edited.to_string()).unwrap();
+	let replayed = prepared_with(vec![bench.spec(&drawn)], &Generation::Replay(edited))
+		.await
+		.unwrap_or_else(|e| panic!("{e}"));
+	assert_eq!(bound(&replayed, "data"), json!([9, 9, 9, 9]));
+	let reports = run(
+		replayed,
+		&[bench.student("alice", "def f(xs):\n    return xs\n")],
+	)
+	.await;
+	assert_eq!(failed(&reports[0]), Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn test_generated_setup_replay_refusals() {
+	let bench = Bench::new();
+	bench.write("checks.py", IS_DATA);
+	let frozen = Frozen::of(&prepared(vec![bench.spec(SETUP)]).await.unwrap());
+	let refused = |body: String, frozen: &Frozen, needle: &'static str| {
+		let spec = bench.spec(&body);
+		let generation = Generation::Replay(frozen.clone());
+		async move {
+			let message = prepared_with(vec![spec], &generation)
+				.await
+				.map(|_| ())
+				.unwrap_err();
+			assert!(
+				message.contains(needle),
+				"expected {needle:?} in:\n{message}"
+			);
+		}
+	};
+
+	refused(
+		SETUP.replace("list(int(0, 9), 4, 4)", "list(int(0, 9), 5, 5)"),
+		&frozen,
+		"the spec's generate is \"list(int(0, 9), 5, 5)\"",
+	)
+	.await;
+	refused(
+		SETUP.replace("seed = 7", "seed = 8"),
+		&frozen,
+		"the spec says seed = 8; the frozen value was drawn with seed 7",
+	)
+	.await;
+	// The spec draws a value the frozen inputs do not hold.
+	refused(
+		format!("{SETUP}[[setup]]\nid = \"more\"\ngenerate = \"int(0, 9)\"\n"),
+		&frozen,
+		"setup 'more': the frozen inputs have no generated setup by this name",
+	)
+	.await;
+	// The frozen inputs hold a value the spec no longer draws.
+	let without = SETUP
+		.replace(
+			"[[setup]]\nid = \"data\"\ngenerate = \"list(int(0, 9), 4, 4)\"\nseed = 7\n",
+			"",
+		)
+		.replace("args = [\"$data\"]\n", "args = [[1]]\n");
+	refused(
+		without,
+		&frozen,
+		"the frozen inputs have generated setup 'data', which the spec does not",
+	)
+	.await;
+}
+
+/// A generation error is a preparation failure naming the setup, never a student zero.
+#[tokio::test]
+async fn test_a_bad_generated_setup_is_a_prepare_error() {
+	fn broken() -> Result<u64, String> {
+		Err("no entropy here".into())
+	}
+	let bench = Bench::new();
+	bench.write("checks.py", IS_DATA);
+
+	// A rule broken after loading, as a hand-built spec could hold it.
+	let mut spec = bench.spec(SETUP);
+	spec.setup[0].generate = Some("int(5, 1)".into());
+	let message = refusal(spec).await;
+	assert!(message.contains("setup 'data'"), "{message}");
+	assert!(message.contains("greater than"), "{message}");
+
+	let message = prepared_with(
+		vec![bench.spec(&SETUP.replace("seed = 7", "seed = \"random\""))],
+		&Generation::Fresh(broken),
+	)
+	.await
+	.map(|_| ())
+	.unwrap_err();
+	assert!(
+		message.contains("setup 'data': no entropy here"),
+		"{message}"
+	);
+}
+
+/// A generated path into the test bundle would name a file student code cannot read.
+#[tokio::test]
+async fn test_a_generated_bundle_path_is_refused() {
+	let bench = Bench::new();
+	bench.write("checks.py", IS_DATA);
+	let secret = bench.write("answer.txt", "42");
+	let rule = format!("choice([\\\"{}\\\"])", secret.display());
+	let message = refusal(bench.spec(&SETUP.replace("list(int(0, 9), 4, 4)", &rule))).await;
+	assert!(message.contains("a path into the test bundle"), "{message}");
+}
+
+/// Scenarios name a top-level generated value like any other, and the memory estimate
+/// reads the drawn value's size rather than giving up on it.
+#[tokio::test]
+async fn test_generated_setup_in_a_scenario_and_in_the_memory_estimate() {
+	let bench = Bench::new();
+	bench.write("checks.py", IS_DATA);
+	let body = SETUP.replace(
+		"[[cases]]\nname = \"echoes\"\nargs = [\"$data\"]\ncheck = { function = \"is_data\" }\n",
+		"[[scenarios]]\nname = \"s\"\n[[scenarios.steps]]\nname = \"echoes\"\nargs = [\"$data\"]\ncheck = { function = \"is_data\" }\n",
+	);
+	let b = bundle(bench.spec(&body)).await;
+	assert!(
+		b.units[0]
+			.plan
+			.memory_basis
+			.as_deref()
+			.is_some_and(|basis| basis.contains("over 4 elements")),
+		"{:?}",
+		b.units[0].plan.memory_basis
+	);
+	let reports = run(
+		vec![b],
+		&[bench.student("alice", "def f(xs):\n    return xs\n")],
+	)
+	.await;
+	assert_eq!(failed(&reports[0]), Vec::<String>::new());
+}

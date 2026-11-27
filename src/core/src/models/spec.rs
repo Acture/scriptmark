@@ -638,7 +638,17 @@ pub struct SetupStep {
 	#[serde(default)]
 	pub timeout: Option<u64>,
 
-	/// Refused: generated inputs belong to P-675.
+	/// Draw the value from a generation rule instead of calling anything: once per batch,
+	/// with the drawn value frozen beside the results, so every student and a replay see
+	/// the same one. Top-level only, and not beside a target, `args` or `timeout`.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub generate: Option<String>,
+
+	/// The seed `generate` draws with. Omitted means 0; `"random"` draws one and records it.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub seed: Option<Seed>,
+
+	/// Refused: `generate` draws a value; fixed data belongs in `[vars]` or `data_files`.
 	#[serde(default)]
 	pub file: Option<String>,
 }

@@ -22,8 +22,10 @@ use crate::runner::answers::{Contract, FrozenAnswers};
 use crate::runner::executor::{
 	CallPlan, Executor, InProcessCheck, ScriptRun, Subject, TeacherRuntime, UnitPlan,
 };
-use crate::runner::frozen::{Generation, replay_entry};
-use crate::runner::generation::{DrawSeed, Generated, generate, seed_for};
+use crate::runner::frozen::{Generation, replay_entry, replay_setup_entry};
+use crate::runner::generation::{
+	DrawSeed, Generated, GeneratedSetup, generate, generate_setup, seed_for, setup_seed,
+};
 use crate::runner::judge::Scored;
 use crate::runner::memory;
 use crate::runner::oracle::{resolve_oracle, validate_references};
@@ -38,6 +40,8 @@ pub struct Bundle {
 	pub teacher: TeacherRuntime,
 	/// Each template's concrete inputs and how they were made, by template name.
 	pub generated: BTreeMap<String, Generated>,
+	/// Each generated setup value and how it was made, by setup id.
+	pub setup: BTreeMap<String, GeneratedSetup>,
 	/// Prepared expectations and their source/configuration fingerprints.
 	pub answers: Option<FrozenAnswers>,
 	/// The units to run per student, derived from `spec`.
@@ -78,8 +82,12 @@ pub struct PrepareErrors(pub Vec<PrepareError>);
 /// Where one spec's template inputs come from.
 enum Source {
 	Fresh(DrawSeed),
-	/// The spec's frozen templates, by name.
-	Replay(BTreeMap<String, Generated>, Option<FrozenAnswers>),
+	/// The spec's frozen templates by name, its frozen setup values by id, and its answers.
+	Replay(
+		BTreeMap<String, Generated>,
+		BTreeMap<String, GeneratedSetup>,
+		Option<FrozenAnswers>,
+	),
 }
 
 /// Prepare every spec, concurrently. Either all of them are ready or none is returned.
@@ -120,6 +128,7 @@ pub async fn prepare<E: Executor>(
 		&& let Some(extra) = frozen
 			.specs
 			.keys()
+			.chain(frozen.setup.keys())
 			.chain(frozen.answers.keys())
 			.find(|s| !seen.contains(s.as_str()))
 	{
@@ -136,6 +145,11 @@ pub async fn prepare<E: Executor>(
 			Generation::Replay(frozen) => Source::Replay(
 				frozen
 					.specs
+					.get(&spec.meta.name)
+					.cloned()
+					.unwrap_or_default(),
+				frozen
+					.setup
 					.get(&spec.meta.name)
 					.cloned()
 					.unwrap_or_default(),
@@ -214,7 +228,7 @@ async fn prepare_one<E: Executor>(
 			Source::Fresh(draw) => seed_for(&inputs, *draw)
 				.map_err(|e| vec![e])
 				.and_then(|seed| generate(&case.name, &inputs, seed)),
-			Source::Replay(frozen, _) => match frozen.get(&case.name) {
+			Source::Replay(frozen, _, _) => match frozen.get(&case.name) {
 				Some(entry) => replay_entry(&case.name, &inputs, entry),
 				None => Err(vec![
 					"the frozen inputs have no template by this name: draw new inputs instead of replaying".into(),
@@ -245,7 +259,7 @@ async fn prepare_one<E: Executor>(
 		}
 		generated.insert(case.name.clone(), made);
 	}
-	if let Source::Replay(frozen, _) = &source {
+	if let Source::Replay(frozen, _, _) = &source {
 		let templates: BTreeSet<&str> = spec
 			.cases
 			.iter()
@@ -255,6 +269,48 @@ async fn prepare_one<E: Executor>(
 		for extra in frozen.keys().filter(|t| !templates.contains(t.as_str())) {
 			problems.push(format!(
 				"the frozen inputs have template '{extra}', which the spec does not: replay them with the spec they were made from"
+			));
+		}
+	}
+	// Generated setup values: drawn once here, so every unit of every student gets the
+	// same one, and the frozen inputs record it.
+	let mut setup = BTreeMap::new();
+	for step in &spec.setup {
+		let Some(rule) = &step.generate else {
+			continue;
+		};
+		let made = match &source {
+			Source::Fresh(draw) => setup_seed(step.seed, *draw)
+				.map_err(|e| vec![e])
+				.and_then(|seed| generate_setup(rule, seed).map_err(|e| vec![e])),
+			Source::Replay(_, frozen, _) => match frozen.get(&step.id) {
+				Some(entry) => replay_setup_entry(step, entry),
+				None => Err(vec![
+					"the frozen inputs have no generated setup by this name: draw new inputs instead of replaying".into(),
+				]),
+			},
+		};
+		match made {
+			Ok(made) => {
+				setup.insert(step.id.clone(), made);
+			}
+			Err(errors) => problems.extend(
+				errors
+					.into_iter()
+					.map(|e| format!("setup '{}': {e}", step.id)),
+			),
+		}
+	}
+	if let Source::Replay(_, frozen, _) = &source {
+		let generated: BTreeSet<&str> = spec
+			.setup
+			.iter()
+			.filter(|s| s.generate.is_some())
+			.map(|s| s.id.as_str())
+			.collect();
+		for extra in frozen.keys().filter(|id| !generated.contains(id.as_str())) {
+			problems.push(format!(
+				"the frozen inputs have generated setup '{extra}', which the spec does not: replay them with the spec they were made from"
 			));
 		}
 	}
@@ -271,13 +327,13 @@ async fn prepare_one<E: Executor>(
 		.transpose()
 		.map_err(|e| fail(vec![e]))?;
 	let answers: Option<FrozenAnswers> = match (&source, &contract) {
-		(Source::Replay(_, Some(frozen)), Some(contract)) => {
+		(Source::Replay(_, _, Some(frozen)), Some(contract)) => {
 			frozen
 				.restore(contract, &mut spec)
 				.map_err(|e| fail(vec![e]))?;
 			Some(frozen.clone())
 		}
-		(Source::Replay(_, frozen), wanted) if frozen.is_some() || wanted.is_some() => {
+		(Source::Replay(_, _, frozen), wanted) if frozen.is_some() || wanted.is_some() => {
 			return Err(fail(vec!["frozen answers are missing or this spec no longer uses an oracle: prepare a fresh bundle without --replay".into()]));
 		}
 		(Source::Fresh(_), Some(contract)) => {
@@ -341,17 +397,18 @@ async fn prepare_one<E: Executor>(
 	}
 
 	problems.extend(check_names(&spec, &teacher));
-	problems.extend(check_bundle_paths(&spec, &teacher));
+	problems.extend(check_bundle_paths(&spec, &teacher, &setup));
 	problems.extend(dry_run_rhai(&spec));
 	if !problems.is_empty() {
 		return Err(fail(problems));
 	}
 
-	let units = plan_units(&spec, timeout_secs);
+	let units = plan_units(&spec, &setup, timeout_secs);
 	Ok(Bundle {
 		spec,
 		teacher,
 		generated,
+		setup,
 		answers,
 		units,
 	})
@@ -429,7 +486,11 @@ fn check_names(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> {
 /// Student code runs in a sandbox that cannot read the test bundle: a path into it, handed to
 /// student code, names a file the student can never open. Such a file belongs in
 /// `data_files`, which stages it beside the student's file, under a relative path.
-fn check_bundle_paths(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> {
+fn check_bundle_paths(
+	spec: &TestSpec,
+	teacher: &TeacherRuntime,
+	setup: &BTreeMap<String, GeneratedSetup>,
+) -> Vec<String> {
 	let Ok(bundle) = std::fs::canonicalize(&spec.dir) else {
 		return Vec::new();
 	};
@@ -479,6 +540,13 @@ fn check_bundle_paths(spec: &TestSpec, teacher: &TeacherRuntime) -> Vec<String> 
 					"{at}: '${name}' is a path into the test bundle, which student code cannot read: {fix}"
 				));
 			}
+		}
+	}
+	for (id, made) in setup {
+		for path in bundle_paths(&made.value, &bundle) {
+			problems.push(format!(
+				"setup '{id}': the generated value holds '{path}', a path into the test bundle, which student code cannot read: stage the file with [meta] data_files instead of naming it in a rule"
+			));
 		}
 	}
 	problems
@@ -632,7 +700,11 @@ fn dry_run_rhai(spec: &TestSpec) -> Vec<String> {
 	problems
 }
 
-fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
+fn plan_units(
+	spec: &TestSpec,
+	setup: &BTreeMap<String, GeneratedSetup>,
+	timeout_secs: u64,
+) -> Vec<Unit> {
 	let base = UnitPlan {
 		subject: Subject::Student,
 		functions: crate::matching::Functions::default(),
@@ -658,6 +730,12 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 		memory_mb: 0,
 		memory_basis: None,
 		load_timeout: timeout_secs,
+		bound: spec
+			.setup
+			.iter()
+			.filter(|s| s.generate.is_some())
+			.filter_map(|s| setup.get(&s.id).map(|g| (s.id.clone(), g.value.clone())))
+			.collect(),
 		setup: Vec::new(),
 		steps: Vec::new(),
 	};
@@ -665,6 +743,7 @@ fn plan_units(spec: &TestSpec, timeout_secs: u64) -> Vec<Unit> {
 	let top_setup: Vec<CallPlan> = spec
 		.setup
 		.iter()
+		.filter(|s| s.generate.is_none())
 		.map(|s| setup_call(s, timeout_secs))
 		.collect();
 
